@@ -1,0 +1,39 @@
+use futures::prelude::*;
+use tracing::error;
+
+pub async fn wrap_and_bail<F, T>(future: F) -> T
+where
+  F: Future<Output = Result<T, anyhow::Error>> + Send + 'static,
+{
+  match future.await {
+    Ok(result) => result,
+    Err(e) => {
+      error!("An error occurred: {e}");
+      // TODO: Something more graceful than panic
+      panic!("An error occurred: {e}");
+    }
+  }
+}
+
+pub async fn wrap_and_report<F, T>(future: F) -> Option<T>
+where
+  F: Future<Output = Result<T, anyhow::Error>> + Send + 'static,
+{
+  match future.await {
+    Ok(result) => Some(result),
+    Err(e) => {
+      error!("An error occurred: {e}");
+      None
+    }
+  }
+}
+
+pub fn time_now_fix() -> String {
+  // Use chrono to get the current time in UTC and format it as per FIX standard
+  let now = chrono::Utc::now();
+  fix_time(now)
+}
+
+pub fn fix_time(when: chrono::DateTime<chrono::Utc>) -> String {
+  when.format("%Y%m%d-%H:%M:%S.%3f").to_string()
+}

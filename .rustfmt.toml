@@ -1,0 +1,17 @@
+imports_layout = "HorizontalVertical"
+# indent_style = "Visual"
+imports_granularity = "Module"
+max_width = 80
+newline_style = "Unix"
+normalize_comments = false
+normalize_doc_attributes = true
+group_imports = "StdExternalCrate"
+struct_field_align_threshold = 20
+tab_spaces = 2
+use_field_init_shorthand = true
+use_try_shorthand = true
+where_single_line = false
+# wrap_comments = true
+empty_item_single_line = false
+# struct_lit_single_line = false
+unstable_features = true

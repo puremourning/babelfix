@@ -1,0 +1,13 @@
+[package]
+name = "babelfix-repo"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+proc-macro2.workspace = true
+syn.workspace = true
+quote.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+quick-xml = "0.37"
+include_dir = { version = "0.7", features = ["glob"] }

@@ -1,0 +1,26 @@
+[package]
+name = "babelfix"
+version.workspace = true
+edition.workspace = true
+description = "A production-grade FIX protocol implementation in Rust"
+category = "network-programming"
+keywords = ["fix-protocol", "financial", "fix", "trading"]
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+tokio.workspace = true
+babelfix-repo.workspace = true
+babelfix-repogen.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+tokio-util.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "message_benchmarks"
+harness = false

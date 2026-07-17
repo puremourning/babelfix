@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fixRepository xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               copyright="Copyright (c) FIX Protocol Ltd. All Rights Reserved."
+               xsi:noNamespaceSchemaLocation="../schema/FixRepository.xsd"
+               generated="2014-05-07T17:07:21-04:00"
+               edition="2010">
+   <fix version="Test" fixml="0" components="0"
+        specUrl="http://www.fixprotocol.org/specifications/fix4.0spec">
+     <fields>
+       <field id="1" name="StringField" type="String" />
+       <field id="2" name="EnumField" type="String" >
+         <enum value="a" symbolicName="One" />
+         <enum value="b" symbolicName="Two" />
+         <enum value="c" symbolicName="Three" />
+       </field>
+       <field id="3" name="GroupTag" type="NumInGroup" />
+       <field id="4" name="QtyTag" type="Qty" />
+       <field id="5" name="PriceTag" type="Price" />
+       <field id="6" name="CharTag" type="char" />
+     </fields>
+     <components>
+       <component id="1000" name="SimpleComponent" type="Block">
+         <fieldRef id="1" name="StringField" required="1" />
+         <componentRef id="1001" name="GroupComponent" />
+       </component>
+       <component id="1001" name="GroupComponent" type="Block" repeating="1">
+         <repeatingGroup id="3" name="" required="0">
+           <fieldRef id="4" name="QtyTag" required="1" />
+           <fieldRef id="5" name="PriceTag" required="0" />
+         </repeatingGroup>
+       </component>
+     </components>
+     <messages>
+       <message name="Message" id="1" msgType="1" abbrName="Msg">
+         <fieldRef id="6" name="CharTag" required="0" />
+         <componentRef id="1000" name="SimpleComponent" />
+       </message>
+     </messages>
+ </fix>
+ </fixRepository>
+

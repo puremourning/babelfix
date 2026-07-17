@@ -1,0 +1,8 @@
+[package]
+name = "babelfix-repogen"
+version.workspace = true
+edition.workspace = true
+
+[build-dependencies]
+babelfix-repo.workspace = true
+quote.workspace = true

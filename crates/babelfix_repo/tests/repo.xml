@@ -1,0 +1,1086 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fixRepository xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               copyright="Copyright (c) FIX Protocol Ltd. All Rights Reserved."
+               xsi:noNamespaceSchemaLocation="../schema/FixRepository.xsd"
+               generated="2014-05-07T17:07:21-04:00"
+               edition="2010">
+
+   <fix version="FIX.4.4" fixml="1" components="1"
+        specUrl="http://www.fixprotocol.org/specifications/fix4.4spec">
+      <manifest/>
+      <fields>
+         <field id="1" name="Account" type="String" textId="FIELD_1" added="FIX.2.7"
+                abbrName="Acct"
+                notReqXML="0"/>
+         <field id="2" name="AdvId" type="String" textId="FIELD_2" added="FIX.2.7"
+                abbrName="AdvId"
+                notReqXML="0"/>
+         <field id="3" name="AdvRefID" type="String" textId="FIELD_3" added="FIX.2.7"
+                abbrName="AdvRefID"
+                notReqXML="0"/>
+         <field id="4" name="AdvSide" type="char" textId="FIELD_4" added="FIX.2.7"
+                abbrName="AdvSide"
+                notReqXML="0">
+            <enum value="B" symbolicName="Buy" added="FIX.2.7" textId="ENUM_4_B"/>
+            <enum value="S" symbolicName="Sell" added="FIX.2.7" textId="ENUM_4_S"/>
+            <enum value="X" symbolicName="Cross" added="FIX.2.7" textId="ENUM_4_X"/>
+            <enum value="T" symbolicName="Trade" added="FIX.2.7" textId="ENUM_4_T"/>
+         </field>
+         <field id="5" name="AdvTransType" type="String" textId="FIELD_5" added="FIX.2.7"
+                abbrName="AdvTransTyp"
+                notReqXML="0">
+            <enum value="N" symbolicName="New" added="FIX.2.7" textId="ENUM_5_N"/>
+            <enum value="C" symbolicName="Cancel" added="FIX.2.7" textId="ENUM_5_C"/>
+            <enum value="R" symbolicName="Replace" added="FIX.2.7" textId="ENUM_5_R"/>
+         </field>
+         <field id="6" name="AvgPx" type="Price" textId="FIELD_6" added="FIX.2.7"
+                abbrName="AvgPx"
+                notReqXML="0"/>
+         <field id="7" name="BeginSeqNo" type="SeqNum" textId="FIELD_7" added="FIX.2.7"
+                abbrName="BeginSeqNo"
+                notReqXML="1"/>
+         <field id="8" name="BeginString" type="String" textId="FIELD_8" added="FIX.2.7"
+                abbrName="BeginString"
+                notReqXML="1"/>
+         <field id="9" name="BodyLength" type="Length" textId="FIELD_9" added="FIX.2.7"
+                abbrName="BodyLength"
+                notReqXML="1"/>
+         <field id="10" name="CheckSum" type="String" textId="FIELD_10" added="FIX.2.7"
+                abbrName="CheckSum"
+                notReqXML="1"/>
+         <field id="11" name="ClOrdID" type="String" textId="FIELD_11" added="FIX.2.7"
+                abbrName="ClOrdID"
+                baseCategory="SingleGeneralOrderHandling"
+                baseCategoryAbbrName="ID"
+                notReqXML="0"/>
+         <field id="35" name="MsgType" type="String" textId="FIELD_35" added="FIX.2.7"
+                abbrName="MsgTyp"
+                notReqXML="1">
+            <enum value="0" symbolicName="Heartbeat" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_0"/>
+            <enum value="1" symbolicName="TestRequest" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_1"/>
+            <enum value="2" symbolicName="ResendRequest" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_2"/>
+            <enum value="3" symbolicName="Reject" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_3"/>
+            <enum value="4" symbolicName="SequenceReset" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_4"/>
+            <enum value="5" symbolicName="Logout" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_5"/>
+            <enum value="6" symbolicName="IOI" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_6"/>
+            <enum value="7" symbolicName="Advertisement" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_7"/>
+            <enum value="8" symbolicName="ExecutionReport" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_8"/>
+            <enum value="9" symbolicName="OrderCancelReject" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_9"/>
+            <enum value="A" symbolicName="Logon" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_A"/>
+            <enum value="B" symbolicName="News" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_B"/>
+            <enum value="C" symbolicName="Email" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_C"/>
+            <enum value="D" symbolicName="NewOrderSingle" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_D"/>
+            <enum value="E" symbolicName="NewOrderList" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_E"/>
+            <enum value="F" symbolicName="OrderCancelRequest" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_F"/>
+            <enum value="G" symbolicName="OrderCancelReplaceRequest" group="" sort=""
+                  added="FIX.2.7"
+                  textId="ENUM_35_G"/>
+            <enum value="H" symbolicName="OrderStatusRequest" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_H"/>
+            <enum value="J" symbolicName="AllocationInstruction" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_J"/>
+            <enum value="K" symbolicName="ListCancelRequest" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_K"/>
+            <enum value="L" symbolicName="ListExecute" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_L"/>
+            <enum value="M" symbolicName="ListStatusRequest" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_M"/>
+            <enum value="N" symbolicName="ListStatus" group="" sort="" added="FIX.2.7"
+                  textId="ENUM_35_N"/>
+            <enum value="P" symbolicName="AllocationInstructionAck" group="" sort=""
+                  added="FIX.2.7"
+                  textId="ENUM_35_P"/>
+            <enum value="Q" symbolicName="DontKnowTrade" group="" sort="" added="FIX.4.0"
+                  textId="ENUM_35_Q"/>
+            <enum value="R" symbolicName="QuoteRequest" group="" sort="" added="FIX.4.0"
+                  textId="ENUM_35_R"/>
+            <enum value="S" symbolicName="Quote" group="" sort="" added="FIX.4.0"
+                  textId="ENUM_35_S"/>
+            <enum value="T" symbolicName="SettlementInstructions" group="" sort=""
+                  added="FIX.4.1"
+                  textId="ENUM_35_T"/>
+            <enum value="V" symbolicName="MarketDataRequest" group="" sort="" added="FIX.4.2"
+                  textId="ENUM_35_V"/>
+            <enum value="W" symbolicName="MarketDataSnapshotFullRefresh" group="" sort=""
+                  added="FIX.4.2"
+                  textId="ENUM_35_W"/>
+            <enum value="X" symbolicName="MarketDataIncrementalRefresh" group="" sort=""
+                  added="FIX.4.2"
+                  textId="ENUM_35_X"/>
+            <enum value="Y" symbolicName="MarketDataRequestReject" group="" sort=""
+                  added="FIX.4.2"
+                  textId="ENUM_35_Y"/>
+            <enum value="Z" symbolicName="QuoteCancel" group="" sort="" added="FIX.4.2"
+                  textId="ENUM_35_Z"/>
+            <enum value="a" symbolicName="QuoteStatusRequest" group="" sort="" added="FIX.4.2"
+                  textId="ENUM_35_a"/>
+            <enum value="b" symbolicName="MassQuoteAcknowledgement" group="" sort=""
+                  added="FIX.4.2"
+                  textId="ENUM_35_b"/>
+            <enum value="c" symbolicName="SecurityDefinitionRequest" group="" sort=""
+                  added="FIX.4.2"
+                  textId="ENUM_35_c"/>
+            <enum value="d" symbolicName="SecurityDefinition" group="" sort="" added="FIX.4.2"
+                  textId="ENUM_35_d"/>
+            <enum value="e" symbolicName="SecurityStatusRequest" group="" sort="" added="FIX.4.2"
+                  textId="ENUM_35_e"/>
+            <enum value="f" symbolicName="SecurityStatus" group="" sort="" added="FIX.4.2"
+                  textId="ENUM_35_f"/>
+            <enum value="g" symbolicName="TradingSessionStatusRequest" group="" sort=""
+                  added="FIX.4.2"
+                  textId="ENUM_35_g"/>
+            <enum value="h" symbolicName="TradingSessionStatus" group="" sort="" added="FIX.4.2"
+                  textId="ENUM_35_h"/>
+            <enum value="i" symbolicName="MassQuote" group="" sort="" added="FIX.4.2"
+                  textId="ENUM_35_i"/>
+            <enum value="j" symbolicName="BusinessMessageReject" group="" sort="" added="FIX.4.2"
+                  textId="ENUM_35_j"/>
+            <enum value="k" symbolicName="BidRequest" group="" sort="" added="FIX.4.2"
+                  textId="ENUM_35_k"/>
+            <enum value="l" symbolicName="BidResponse" group="" sort="" added="FIX.4.2"
+                  textId="ENUM_35_l"/>
+            <enum value="m" symbolicName="ListStrikePrice" group="" sort="" added="FIX.4.2"
+                  textId="ENUM_35_m"/>
+            <enum value="n" symbolicName="XMLNonFIX" group="" sort="" added="FIX.4.3"
+                  textId="ENUM_35_n"/>
+            <enum value="o" symbolicName="RegistrationInstructions" group="" sort=""
+                  added="FIX.4.3"
+                  textId="ENUM_35_o"/>
+            <enum value="p" symbolicName="RegistrationInstructionsResponse" group="" sort=""
+                  added="FIX.4.3"
+                  textId="ENUM_35_p"/>
+            <enum value="q" symbolicName="OrderMassCancelRequest" group="" sort=""
+                  added="FIX.4.3"
+                  textId="ENUM_35_q"/>
+            <enum value="r" symbolicName="OrderMassCancelReport" group="" sort="" added="FIX.4.3"
+                  textId="ENUM_35_r"/>
+            <enum value="s" symbolicName="NewOrderCross" group="" sort="" added="FIX.4.3"
+                  textId="ENUM_35_s"/>
+            <enum value="t" symbolicName="CrossOrderCancelReplaceRequest" group="" sort=""
+                  added="FIX.4.3"
+                  textId="ENUM_35_t"/>
+            <enum value="u" symbolicName="CrossOrderCancelRequest" group="" sort=""
+                  added="FIX.4.3"
+                  textId="ENUM_35_u"/>
+            <enum value="v" symbolicName="SecurityTypeRequest" group="" sort="" added="FIX.4.3"
+                  textId="ENUM_35_v"/>
+            <enum value="w" symbolicName="SecurityTypes" group="" sort="" added="FIX.4.3"
+                  textId="ENUM_35_w"/>
+            <enum value="x" symbolicName="SecurityListRequest" group="" sort="" added="FIX.4.3"
+                  textId="ENUM_35_x"/>
+            <enum value="y" symbolicName="SecurityList" group="" sort="" added="FIX.4.3"
+                  textId="ENUM_35_y"/>
+            <enum value="z" symbolicName="DerivativeSecurityListRequest" group="" sort=""
+                  added="FIX.4.3"
+                  textId="ENUM_35_z"/>
+            <enum value="AA" symbolicName="DerivativeSecurityList" group="" sort=""
+                  added="FIX.4.3"
+                  textId="ENUM_35_AA"/>
+            <enum value="AB" symbolicName="NewOrderMultileg" group="" sort="" added="FIX.4.3"
+                  textId="ENUM_35_AB"/>
+            <enum value="AC" symbolicName="MultilegOrderCancelReplace" group="" sort=""
+                  added="FIX.4.3"
+                  textId="ENUM_35_AC"/>
+            <enum value="AD" symbolicName="TradeCaptureReportRequest" group="" sort=""
+                  added="FIX.4.3"
+                  textId="ENUM_35_AD"/>
+            <enum value="AE" symbolicName="TradeCaptureReport" group="" sort="" added="FIX.4.3"
+                  textId="ENUM_35_AE"/>
+            <enum value="AF" symbolicName="OrderMassStatusRequest" group="" sort=""
+                  added="FIX.4.3"
+                  textId="ENUM_35_AF"/>
+            <enum value="AG" symbolicName="QuoteRequestReject" group="" sort="" added="FIX.4.3"
+                  textId="ENUM_35_AG"/>
+            <enum value="AH" symbolicName="RFQRequest" group="" sort="" added="FIX.4.3"
+                  textId="ENUM_35_AH"/>
+            <enum value="AI" symbolicName="QuoteStatusReport" group="" sort="" added="FIX.4.3"
+                  textId="ENUM_35_AI"/>
+            <enum value="AJ" symbolicName="QuoteResponse" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_AJ"/>
+            <enum value="AK" symbolicName="Confirmation" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_AK"/>
+            <enum value="AL" symbolicName="PositionMaintenanceRequest" group="" sort=""
+                  added="FIX.4.4"
+                  textId="ENUM_35_AL"/>
+            <enum value="AM" symbolicName="PositionMaintenanceReport" group="" sort=""
+                  added="FIX.4.4"
+                  textId="ENUM_35_AM"/>
+            <enum value="AN" symbolicName="RequestForPositions" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_AN"/>
+            <enum value="AO" symbolicName="RequestForPositionsAck" group="" sort=""
+                  added="FIX.4.4"
+                  textId="ENUM_35_AO"/>
+            <enum value="AP" symbolicName="PositionReport" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_AP"/>
+            <enum value="AQ" symbolicName="TradeCaptureReportRequestAck" group="" sort=""
+                  added="FIX.4.4"
+                  textId="ENUM_35_AQ"/>
+            <enum value="AR" symbolicName="TradeCaptureReportAck" group="" sort=""
+                  added="FIX.4.4"
+                  textId="ENUM_35_AR"/>
+            <enum value="AS" symbolicName="AllocationReport" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_AS"/>
+            <enum value="AT" symbolicName="AllocationReportAck" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_AT"/>
+            <enum value="AU" symbolicName="ConfirmationAck" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_AU"/>
+            <enum value="AV" symbolicName="SettlementInstructionRequest" group="" sort=""
+                  added="FIX.4.4"
+                  textId="ENUM_35_AV"/>
+            <enum value="AW" symbolicName="AssignmentReport" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_AW"/>
+            <enum value="AX" symbolicName="CollateralRequest" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_AX"/>
+            <enum value="AY" symbolicName="CollateralAssignment" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_AY"/>
+            <enum value="AZ" symbolicName="CollateralResponse" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_AZ"/>
+            <enum value="BA" symbolicName="CollateralReport" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_BA"/>
+            <enum value="BB" symbolicName="CollateralInquiry" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_BB"/>
+            <enum value="BC" symbolicName="NetworkCounterpartySystemStatusRequest" group=""
+                  sort=""
+                  added="FIX.4.4"
+                  textId="ENUM_35_BC"/>
+            <enum value="BD" symbolicName="NetworkCounterpartySystemStatusResponse" group=""
+                  sort=""
+                  added="FIX.4.4"
+                  textId="ENUM_35_BD"/>
+            <enum value="BE" symbolicName="UserRequest" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_BE"/>
+            <enum value="BF" symbolicName="UserResponse" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_BF"/>
+            <enum value="BG" symbolicName="CollateralInquiryAck" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_BG"/>
+            <enum value="BH" symbolicName="ConfirmationRequest" group="" sort="" added="FIX.4.4"
+                  textId="ENUM_35_BH"/>
+         </field>
+      </fields>
+      <components>
+        <component name="Instrument" id="1003" type="Block" category="Common" added="FIX.4.3"
+                    textId="COMP_Instrument_TITLE"
+                    abbrName="Instrmt"
+                    notReqXML="0"
+                    repeating="0">
+            <fieldRef id="55" name="Symbol" required="0" legacyPosition="1" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_55"/>
+            <fieldRef id="65" name="SymbolSfx" required="0" legacyPosition="2" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_65"/>
+            <fieldRef id="48" name="SecurityID" required="0" legacyPosition="3" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_48"/>
+            <fieldRef id="22" name="SecurityIDSource" required="0" legacyPosition="4"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_22"/>
+            <componentRef id="2071" name="SecAltIDGrp" required="0" legacyPosition="5" legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.4"
+                          textId="CMP_1003_REF_SecAltIDGrp"/>
+            <fieldRef id="460" name="Product" required="0" legacyPosition="8" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_460"/>
+            <fieldRef id="461" name="CFICode" required="0" legacyPosition="9" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_461"/>
+            <fieldRef id="167" name="SecurityType" required="0" legacyPosition="10" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_167"/>
+            <fieldRef id="762" name="SecuritySubType" required="0" legacyPosition="11"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1003_REF_762"/>
+            <fieldRef id="200" name="MaturityMonthYear" required="0" legacyPosition="12"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_200"/>
+            <fieldRef id="541" name="MaturityDate" required="0" legacyPosition="13" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_541"/>
+            <fieldRef id="201" name="PutOrCall" required="0" legacyPosition="13.1" legacyIndent="0"
+                      added="FIX.4.4"
+                      issue="SPEC-276"
+                      textId="CMP_1003_REF_201"/>
+            <fieldRef id="224" name="CouponPaymentDate" required="0" legacyPosition="14"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_224"/>
+            <fieldRef id="225" name="IssueDate" required="0" legacyPosition="15" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_225"/>
+            <fieldRef id="239" name="RepoCollateralSecurityType" required="0" legacyPosition="16"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_239"/>
+            <fieldRef id="226" name="RepurchaseTerm" required="0" legacyPosition="17"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_226"/>
+            <fieldRef id="227" name="RepurchaseRate" required="0" legacyPosition="18"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_227"/>
+            <fieldRef id="228" name="Factor" required="0" legacyPosition="19" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_228"/>
+            <fieldRef id="255" name="CreditRating" required="0" legacyPosition="20" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_255"/>
+            <fieldRef id="543" name="InstrRegistry" required="0" legacyPosition="21" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_543"/>
+            <fieldRef id="470" name="CountryOfIssue" required="0" legacyPosition="22"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_470"/>
+            <fieldRef id="471" name="StateOrProvinceOfIssue" required="0" legacyPosition="23"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_471"/>
+            <fieldRef id="472" name="LocaleOfIssue" required="0" legacyPosition="24" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_472"/>
+            <fieldRef id="240" name="RedemptionDate" required="0" legacyPosition="25"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_240"/>
+            <fieldRef id="202" name="StrikePrice" required="0" legacyPosition="26" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_202"/>
+            <fieldRef id="947" name="StrikeCurrency" required="0" legacyPosition="27"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1003_REF_947"/>
+            <fieldRef id="206" name="OptAttribute" required="0" legacyPosition="28" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_206"/>
+            <fieldRef id="231" name="ContractMultiplier" required="0" legacyPosition="29"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_231"/>
+            <fieldRef id="223" name="CouponRate" required="0" legacyPosition="30" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_223"/>
+            <fieldRef id="207" name="SecurityExchange" required="0" legacyPosition="31"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_207"/>
+            <fieldRef id="106" name="Issuer" required="0" legacyPosition="32" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_106"/>
+            <fieldRef id="348" name="EncodedIssuerLen" required="0" legacyPosition="33"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_348"/>
+            <fieldRef id="349" name="EncodedIssuer" required="0" legacyPosition="34" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_349"/>
+            <fieldRef id="107" name="SecurityDesc" required="0" legacyPosition="35" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_107"/>
+            <fieldRef id="350" name="EncodedSecurityDescLen" required="0" legacyPosition="36"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_350"/>
+            <fieldRef id="351" name="EncodedSecurityDesc" required="0" legacyPosition="37"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1003_REF_351"/>
+            <fieldRef id="691" name="Pool" required="0" legacyPosition="38" legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1003_REF_691"/>
+            <fieldRef id="667" name="ContractSettlMonth" required="0" legacyPosition="39"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1003_REF_667"/>
+            <fieldRef id="875" name="CPProgram" required="0" legacyPosition="40" legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1003_REF_875"/>
+            <fieldRef id="876" name="CPRegType" required="0" legacyPosition="41" legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1003_REF_876"/>
+            <componentRef id="2070" name="EvntGrp" required="0" legacyPosition="42" legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.4"
+                          textId="CMP_1003_REF_EvntGrp"/>
+            <fieldRef id="873" name="DatedDate" required="0" legacyPosition="47" legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1003_REF_873"/>
+            <fieldRef id="874" name="InterestAccrualDate" required="0" legacyPosition="48"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1003_REF_874"/>
+         </component>
+         <component name="SecAltIDGrp" id="2071" type="ImplicitBlockRepeating" category="Common"
+                    added="FIX.4.4"
+                    textId="COMP_SecAltIDGrp_TITLE"
+                    abbrName="AID"
+                    notReqXML="0"
+                    repeating="1">
+            <repeatingGroup id="454" name="" required="0" legacyPosition="1" legacyIndent="0"
+                            added="FIX.4.4"
+                            textId="CMP_2071_REF_454">
+               <fieldRef id="455" name="SecurityAltID" required="0" legacyPosition="2" legacyIndent="1"
+                         added="FIX.4.4"
+                         textId="CMP_2071_REF_455"/>
+               <fieldRef id="456" name="SecurityAltIDSource" required="0" legacyPosition="3"
+                         legacyIndent="1"
+                         added="FIX.4.4"
+                         textId="CMP_2071_REF_456"/>
+            </repeatingGroup>
+         </component>
+         <component name="EvntGrp" id="2070" type="ImplicitBlockRepeating" category="Common"
+                    added="FIX.4.4"
+                    textId="COMP_EvntGrp_TITLE"
+                    abbrName="Evnt"
+                    notReqXML="0"
+                    repeating="1">
+            <repeatingGroup id="864" name="" required="0" legacyPosition="1" legacyIndent="0"
+                            added="FIX.4.4"
+                            textId="CMP_2070_REF_864">
+               <fieldRef id="865" name="EventType" required="0" legacyPosition="2" legacyIndent="1"
+                         added="FIX.4.4"
+                         textId="CMP_2070_REF_865"/>
+               <fieldRef id="866" name="EventDate" required="0" legacyPosition="3" legacyIndent="1"
+                         added="FIX.4.4"
+                         textId="CMP_2070_REF_866"/>
+               <fieldRef id="867" name="EventPx" required="0" legacyPosition="4" legacyIndent="1"
+                         added="FIX.4.4"
+                         textId="CMP_2070_REF_867"/>
+               <fieldRef id="868" name="EventText" required="0" legacyPosition="5" legacyIndent="1"
+                         added="FIX.4.4"
+                         textId="CMP_2070_REF_868"/>
+            </repeatingGroup>
+         </component>
+         <component name="InstrumentLeg" id="1005" type="Block" category="Common" added="FIX.4.3"
+                    textId="COMP_InstrumentLeg_TITLE"
+                    abbrName="Leg"
+                    notReqXML="0"
+                    repeating="0">
+            <fieldRef id="600" name="LegSymbol" required="0" legacyPosition="1" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_600"/>
+            <fieldRef id="601" name="LegSymbolSfx" required="0" legacyPosition="2" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_601"/>
+            <fieldRef id="602" name="LegSecurityID" required="0" legacyPosition="3" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_602"/>
+            <fieldRef id="603" name="LegSecurityIDSource" required="0" legacyPosition="4"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_603"/>
+            <componentRef id="2072" name="LegSecAltIDGrp" required="0" legacyPosition="5"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.4"
+                          textId="CMP_1005_REF_LegSecAltIDGrp"/>
+            <fieldRef id="607" name="LegProduct" required="0" legacyPosition="8" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_607"/>
+            <fieldRef id="608" name="LegCFICode" required="0" legacyPosition="9" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_608"/>
+            <fieldRef id="609" name="LegSecurityType" required="0" legacyPosition="10"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_609"/>
+            <fieldRef id="764" name="LegSecuritySubType" required="0" legacyPosition="11"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1005_REF_764"/>
+            <fieldRef id="610" name="LegMaturityMonthYear" required="0" legacyPosition="12"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_610"/>
+            <fieldRef id="611" name="LegMaturityDate" required="0" legacyPosition="13"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_611"/>
+            <fieldRef id="1212" name="LegMaturityTime" required="0" legacyPosition="13.1"
+                      legacyIndent="0"
+                      added="FIX.5.0"
+                      addedEP="-1"
+                      textId="CMP_1005_REF_1212"/>
+            <fieldRef id="248" name="LegCouponPaymentDate" required="0" legacyPosition="14"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_248"/>
+            <fieldRef id="249" name="LegIssueDate" required="0" legacyPosition="15" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_249"/>
+            <fieldRef id="250" name="LegRepoCollateralSecurityType" required="0" legacyPosition="16"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      deprecated="FIX.4.4"
+                      textId="CMP_1005_REF_250"/>
+            <fieldRef id="251" name="LegRepurchaseTerm" required="0" legacyPosition="17"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      deprecated="FIX.4.4"
+                      textId="CMP_1005_REF_251"/>
+            <fieldRef id="252" name="LegRepurchaseRate" required="0" legacyPosition="18"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      deprecated="FIX.4.4"
+                      textId="CMP_1005_REF_252"/>
+            <fieldRef id="253" name="LegFactor" required="0" legacyPosition="19" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_253"/>
+            <fieldRef id="257" name="LegCreditRating" required="0" legacyPosition="20"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_257"/>
+            <fieldRef id="599" name="LegInstrRegistry" required="0" legacyPosition="21"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_599"/>
+            <fieldRef id="596" name="LegCountryOfIssue" required="0" legacyPosition="22"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_596"/>
+            <fieldRef id="597" name="LegStateOrProvinceOfIssue" required="0" legacyPosition="23"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_597"/>
+            <fieldRef id="598" name="LegLocaleOfIssue" required="0" legacyPosition="24"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_598"/>
+            <fieldRef id="254" name="LegRedemptionDate" required="0" legacyPosition="25"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      deprecated="FIX.4.4"
+                      textId="CMP_1005_REF_254"/>
+            <fieldRef id="612" name="LegStrikePrice" required="0" legacyPosition="26"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_612"/>
+            <fieldRef id="942" name="LegStrikeCurrency" required="0" legacyPosition="27"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1005_REF_942"/>
+            <fieldRef id="613" name="LegOptAttribute" required="0" legacyPosition="28"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_613"/>
+            <fieldRef id="614" name="LegContractMultiplier" required="0" legacyPosition="29"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_614"/>
+            <fieldRef id="999" name="LegUnitOfMeasure" required="0" legacyPosition="29.1"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="CMP_1005_REF_999"/>
+            <fieldRef id="1224" name="LegUnitOfMeasureQty" required="0" legacyPosition="29.101"
+                      legacyIndent="0"
+                      added="FIX.5.0"
+                      addedEP="-1"
+                      textId="CMP_1005_REF_1224"/>
+            <fieldRef id="1421" name="LegPriceUnitOfMeasure" required="0" legacyPosition="29.102"
+                      legacyIndent="0"
+                      added="FIX.5.0"
+                      addedEP="-1"
+                      textId="CMP_1005_REF_1421"/>
+            <fieldRef id="1422" name="LegPriceUnitOfMeasureQty" required="0" legacyPosition="29.103"
+                      legacyIndent="0"
+                      added="FIX.5.0"
+                      addedEP="-1"
+                      textId="CMP_1005_REF_1422"/>
+            <fieldRef id="1001" name="LegTimeUnit" required="0" legacyPosition="29.2"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="CMP_1005_REF_1001"/>
+            <fieldRef id="1420" name="LegExerciseStyle" required="0" legacyPosition="29.3"
+                      legacyIndent="0"
+                      added="FIX.5.0"
+                      addedEP="-1"
+                      textId="CMP_1005_REF_1420"/>
+            <fieldRef id="615" name="LegCouponRate" required="0" legacyPosition="30" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_615"/>
+            <fieldRef id="616" name="LegSecurityExchange" required="0" legacyPosition="31"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_616"/>
+            <fieldRef id="617" name="LegIssuer" required="0" legacyPosition="32" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_617"/>
+            <fieldRef id="618" name="EncodedLegIssuerLen" required="0" legacyPosition="33"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_618"/>
+            <fieldRef id="619" name="EncodedLegIssuer" required="0" legacyPosition="34"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_619"/>
+            <fieldRef id="620" name="LegSecurityDesc" required="0" legacyPosition="35"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_620"/>
+            <fieldRef id="621" name="EncodedLegSecurityDescLen" required="0" legacyPosition="36"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_621"/>
+            <fieldRef id="622" name="EncodedLegSecurityDesc" required="0" legacyPosition="37"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_622"/>
+            <fieldRef id="623" name="LegRatioQty" required="0" legacyPosition="38" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_623"/>
+            <fieldRef id="624" name="LegSide" required="0" legacyPosition="39" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="CMP_1005_REF_624"/>
+            <fieldRef id="556" name="LegCurrency" required="0" legacyPosition="40" legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1005_REF_556"/>
+            <fieldRef id="740" name="LegPool" required="0" legacyPosition="41" legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1005_REF_740"/>
+            <fieldRef id="739" name="LegDatedDate" required="0" legacyPosition="42" legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1005_REF_739"/>
+            <fieldRef id="955" name="LegContractSettlMonth" required="0" legacyPosition="43"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1005_REF_955"/>
+            <fieldRef id="956" name="LegInterestAccrualDate" required="0" legacyPosition="44"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="CMP_1005_REF_956"/>
+            <fieldRef id="1358" name="LegPutOrCall" required="0" legacyPosition="44.01"
+                      legacyIndent="0"
+                      added="FIX.5.0"
+                      addedEP="-1"
+                      textId="CMP_1005_REF_1358"/>
+            <fieldRef id="1017" name="LegOptionRatio" required="0" legacyPosition="44.1"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="CMP_1005_REF_1017"/>
+            <fieldRef id="566" name="LegPrice" required="0" legacyPosition="44.2" legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="CMP_1005_REF_566"/>
+         </component>
+         <component name="LegSecAltIDGrp" id="2072" type="ImplicitBlockRepeating" category="Common"
+                    added="FIX.4.4"
+                    textId="COMP_LegSecAltIDGrp_TITLE"
+                    abbrName="LegAID"
+                    notReqXML="0"
+                    repeating="1">
+            <repeatingGroup id="604" name="" required="0" legacyPosition="1" legacyIndent="0"
+                            added="FIX.4.4"
+                            textId="CMP_2072_REF_604">
+               <fieldRef id="605" name="LegSecurityAltID" required="0" legacyPosition="2"
+                         legacyIndent="1"
+                         added="FIX.4.4"
+                         textId="CMP_2072_REF_605"/>
+               <fieldRef id="606" name="LegSecurityAltIDSource" required="0" legacyPosition="3"
+                         legacyIndent="1"
+                         added="FIX.4.4"
+                         textId="CMP_2072_REF_606"/>
+            </repeatingGroup>
+         </component>
+       </components>
+      <messages latestEP="97">
+        <message name="NewOrderSingle" id="14" msgType="D" category="SingleGeneralOrderHandling"
+                  section="Trade"
+                  added="FIX.2.7"
+                  textId="MSG_14_TITLE"
+                  abbrName="Order"
+                  notReqXML="0">
+            <componentRef id="1024" name="StandardHeader" required="1" legacyPosition="1"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.2.7"
+                          textId="MSG_14_REF_StandardHeader"/>
+            <fieldRef id="11" name="ClOrdID" required="1" legacyPosition="2" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_11"/>
+            <fieldRef id="526" name="SecondaryClOrdID" required="0" legacyPosition="3"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_526"/>
+            <fieldRef id="583" name="ClOrdLinkID" required="0" legacyPosition="4" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_583"/>
+            <componentRef id="1012" name="Parties" required="0" legacyPosition="5" legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.3"
+                          textId="MSG_14_REF_Parties"/>
+            <fieldRef id="229" name="TradeOriginationDate" required="0" legacyPosition="6"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_229"/>
+            <fieldRef id="75" name="TradeDate" required="0" legacyPosition="7" legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="MSG_14_REF_75"/>
+            <fieldRef id="1" name="Account" required="0" legacyPosition="8" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_1"/>
+            <fieldRef id="660" name="AcctIDSource" required="0" legacyPosition="9" legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="MSG_14_REF_660"/>
+            <fieldRef id="581" name="AccountType" required="0" legacyPosition="10" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_581"/>
+            <fieldRef id="589" name="DayBookingInst" required="0" legacyPosition="11"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_589"/>
+            <fieldRef id="590" name="BookingUnit" required="0" legacyPosition="12" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_590"/>
+            <fieldRef id="591" name="PreallocMethod" required="0" legacyPosition="13"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_591"/>
+            <fieldRef id="70" name="AllocID" required="0" legacyPosition="14" legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="MSG_14_REF_70"/>
+            <componentRef id="2039" name="PreAllocGrp" required="0" legacyPosition="15" legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.4"
+                          textId="MSG_14_REF_PreAllocGrp"/>
+            <fieldRef id="63" name="SettlType" required="0" legacyPosition="22" legacyIndent="0"
+                      added="FIX.2.7"
+                      updated="FIX.5.0SP1"
+                      updatedEP="82"
+                      textId="MSG_14_REF_63"/>
+            <fieldRef id="64" name="SettlDate" required="0" legacyPosition="23" legacyIndent="0"
+                      added="FIX.2.7"
+                      updated="FIX.5.0SP1"
+                      updatedEP="82"
+                      textId="MSG_14_REF_64"/>
+            <fieldRef id="544" name="CashMargin" required="0" legacyPosition="24" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_544"/>
+            <fieldRef id="635" name="ClearingFeeIndicator" required="0" legacyPosition="25"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_635"/>
+            <fieldRef id="21" name="HandlInst" required="0" legacyPosition="26" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_21"/>
+            <fieldRef id="18" name="ExecInst" required="0" legacyPosition="27" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_18"/>
+            <fieldRef id="110" name="MinQty" required="0" legacyPosition="28" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_110"/>
+            <fieldRef id="1089" name="MatchIncrement" required="0" legacyPosition="28.1"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="MSG_14_REF_1089"/>
+            <fieldRef id="1090" name="MaxPriceLevels" required="0" legacyPosition="28.2"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="MSG_14_REF_1090"/>
+            <componentRef id="1029" name="DisplayInstruction" required="0" legacyPosition="28.3"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.4"
+                          addedEP="-1"
+                          textId="MSG_14_REF_DisplayInstruction"/>
+            <fieldRef id="111" name="MaxFloor" required="0" legacyPosition="29" legacyIndent="0"
+                      added="FIX.2.7"
+                      deprecated="FIX.5.0"
+                      textId="MSG_14_REF_111"/>
+            <fieldRef id="100" name="ExDestination" required="0" legacyPosition="30" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_100"/>
+            <fieldRef id="1133" name="ExDestinationIDSource" required="0" legacyPosition="30.1"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="MSG_14_REF_1133"/>
+            <componentRef id="2064" name="TrdgSesGrp" required="0" legacyPosition="31" legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.4"
+                          textId="MSG_14_REF_TrdgSesGrp"/>
+            <fieldRef id="81" name="ProcessCode" required="0" legacyPosition="34" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_81"/>
+            <componentRef id="1003" name="Instrument" required="1" legacyPosition="35" legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.3"
+                          textId="MSG_14_REF_Instrument"/>
+            <componentRef id="1002" name="FinancingDetails" required="0" legacyPosition="36"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.4"
+                          textId="MSG_14_REF_FinancingDetails"/>
+            <componentRef id="2066" name="UndInstrmtGrp" required="0" legacyPosition="37"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.4"
+                          textId="MSG_14_REF_UndInstrmtGrp"/>
+            <fieldRef id="140" name="PrevClosePx" required="0" legacyPosition="39" legacyIndent="0"
+                      added="FIX.4.0"
+                      textId="MSG_14_REF_140"/>
+            <fieldRef id="54" name="Side" required="1" legacyPosition="40" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_54"/>
+            <fieldRef id="114" name="LocateReqd" required="0" legacyPosition="41" legacyIndent="0"
+                      added="FIX.4.0"
+                      textId="MSG_14_REF_114"/>
+            <fieldRef id="60" name="TransactTime" required="1" legacyPosition="42" legacyIndent="0"
+                      added="FIX.4.2"
+                      textId="MSG_14_REF_60"/>
+            <componentRef id="1019" name="Stipulations" required="0" legacyPosition="43" legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.3"
+                          textId="MSG_14_REF_Stipulations"/>
+            <fieldRef id="854" name="QtyType" required="0" legacyPosition="44" legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="MSG_14_REF_854"/>
+            <componentRef id="1011" name="OrderQtyData" required="1" legacyPosition="45" legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.3"
+                          textId="MSG_14_REF_OrderQtyData"/>
+            <fieldRef id="40" name="OrdType" required="1" legacyPosition="46" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_40"/>
+            <fieldRef id="423" name="PriceType" required="0" legacyPosition="47" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_423"/>
+            <fieldRef id="44" name="Price" required="0" legacyPosition="48" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_44"/>
+            <fieldRef id="1092" name="PriceProtectionScope" required="0" legacyPosition="48.1"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="MSG_14_REF_1092"/>
+            <fieldRef id="99" name="StopPx" required="0" legacyPosition="49" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_99"/>
+            <componentRef id="1030" name="TriggeringInstruction" required="0" legacyPosition="49.1"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.5.0"
+                          addedEP="-1"
+                          textId="MSG_14_REF_TriggeringInstruction"/>
+            <componentRef id="1018" name="SpreadOrBenchmarkCurveData" required="0" legacyPosition="50"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.3"
+                          textId="MSG_14_REF_SpreadOrBenchmarkCurveData"/>
+            <componentRef id="1022" name="YieldData" required="0" legacyPosition="51" legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.3"
+                          textId="MSG_14_REF_YieldData"/>
+            <fieldRef id="15" name="Currency" required="0" legacyPosition="52" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_15"/>
+            <fieldRef id="376" name="ComplianceID" required="0" legacyPosition="53" legacyIndent="0"
+                      added="FIX.4.2"
+                      textId="MSG_14_REF_376"/>
+            <fieldRef id="377" name="SolicitedFlag" required="0" legacyPosition="54" legacyIndent="0"
+                      added="FIX.4.2"
+                      textId="MSG_14_REF_377"/>
+            <fieldRef id="23" name="IOIID" required="0" legacyPosition="55" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_23"/>
+            <fieldRef id="117" name="QuoteID" required="0" legacyPosition="56" legacyIndent="0"
+                      added="FIX.4.0"
+                      textId="MSG_14_REF_117"/>
+            <fieldRef id="59" name="TimeInForce" required="0" legacyPosition="57" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_59"/>
+            <fieldRef id="168" name="EffectiveTime" required="0" legacyPosition="58" legacyIndent="0"
+                      added="FIX.4.2"
+                      textId="MSG_14_REF_168"/>
+            <fieldRef id="432" name="ExpireDate" required="0" legacyPosition="59" legacyIndent="0"
+                      added="FIX.4.2"
+                      textId="MSG_14_REF_432"/>
+            <fieldRef id="126" name="ExpireTime" required="0" legacyPosition="60" legacyIndent="0"
+                      added="FIX.4.0"
+                      textId="MSG_14_REF_126"/>
+            <fieldRef id="427" name="GTBookingInst" required="0" legacyPosition="61" legacyIndent="0"
+                      added="FIX.4.2"
+                      textId="MSG_14_REF_427"/>
+            <componentRef id="1000" name="CommissionData" required="0" legacyPosition="62"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.3"
+                          textId="MSG_14_REF_CommissionData"/>
+            <fieldRef id="528" name="OrderCapacity" required="0" legacyPosition="63" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_528"/>
+            <fieldRef id="529" name="OrderRestrictions" required="0" legacyPosition="64"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_529"/>
+            <fieldRef id="1091" name="PreTradeAnonymity" required="0" legacyPosition="64.1"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="MSG_14_REF_1091"/>
+            <fieldRef id="582" name="CustOrderCapacity" required="0" legacyPosition="65"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_582"/>
+            <fieldRef id="121" name="ForexReq" required="0" legacyPosition="66" legacyIndent="0"
+                      added="FIX.4.0"
+                      textId="MSG_14_REF_121"/>
+            <fieldRef id="120" name="SettlCurrency" required="0" legacyPosition="67" legacyIndent="0"
+                      added="FIX.4.0"
+                      updated="FIX.5.0SP1"
+                      updatedEP="82"
+                      textId="MSG_14_REF_120"/>
+            <fieldRef id="775" name="BookingType" required="0" legacyPosition="68" legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="MSG_14_REF_775"/>
+            <fieldRef id="58" name="Text" required="0" legacyPosition="69" legacyIndent="0"
+                      added="FIX.2.7"
+                      textId="MSG_14_REF_58"/>
+            <fieldRef id="354" name="EncodedTextLen" required="0" legacyPosition="70"
+                      legacyIndent="0"
+                      added="FIX.4.2"
+                      textId="MSG_14_REF_354"/>
+            <fieldRef id="355" name="EncodedText" required="0" legacyPosition="71" legacyIndent="0"
+                      added="FIX.4.2"
+                      textId="MSG_14_REF_355"/>
+            <fieldRef id="193" name="SettlDate2" required="0" legacyPosition="72" legacyIndent="0"
+                      added="FIX.4.1"
+                      deprecated="FIX.5.0"
+                      textId="MSG_14_REF_193"/>
+            <fieldRef id="192" name="OrderQty2" required="0" legacyPosition="73" legacyIndent="0"
+                      added="FIX.4.1"
+                      deprecated="FIX.5.0"
+                      textId="MSG_14_REF_192"/>
+            <fieldRef id="640" name="Price2" required="0" legacyPosition="74" legacyIndent="0"
+                      added="FIX.4.3"
+                      deprecated="FIX.5.0"
+                      textId="MSG_14_REF_640"/>
+            <fieldRef id="77" name="PositionEffect" required="0" legacyPosition="75" legacyIndent="0"
+                      added="FIX.4.1"
+                      textId="MSG_14_REF_77"/>
+            <fieldRef id="203" name="CoveredOrUncovered" required="0" legacyPosition="76"
+                      legacyIndent="0"
+                      added="FIX.4.1"
+                      textId="MSG_14_REF_203"/>
+            <fieldRef id="210" name="MaxShow" required="0" legacyPosition="77" legacyIndent="0"
+                      added="FIX.4.1"
+                      deprecated="FIX.5.0"
+                      textId="MSG_14_REF_210"/>
+            <componentRef id="1013" name="PegInstructions" required="0" legacyPosition="78"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.4"
+                          textId="MSG_14_REF_PegInstructions"/>
+            <componentRef id="1001" name="DiscretionInstructions" required="0" legacyPosition="79"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.4"
+                          textId="MSG_14_REF_DiscretionInstructions"/>
+            <fieldRef id="847" name="TargetStrategy" required="0" legacyPosition="80"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      textId="MSG_14_REF_847"/>
+            <componentRef id="2086" name="StrategyParametersGrp" required="0" legacyPosition="80.1"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.4"
+                          addedEP="-1"
+                          textId="MSG_14_REF_StrategyParametersGrp"/>
+            <fieldRef id="848" name="TargetStrategyParameters" required="0" legacyPosition="81"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      deprecated="FIX.5.0"
+                      textId="MSG_14_REF_848"/>
+            <fieldRef id="849" name="ParticipationRate" required="0" legacyPosition="82"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      deprecated="FIX.5.0"
+                      textId="MSG_14_REF_849"/>
+            <fieldRef id="480" name="CancellationRights" required="0" legacyPosition="83"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_480"/>
+            <fieldRef id="481" name="MoneyLaunderingStatus" required="0" legacyPosition="84"
+                      legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_481"/>
+            <fieldRef id="513" name="RegistID" required="0" legacyPosition="85" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_513"/>
+            <fieldRef id="494" name="Designation" required="0" legacyPosition="86" legacyIndent="0"
+                      added="FIX.4.3"
+                      textId="MSG_14_REF_494"/>
+            <fieldRef id="1028" name="ManualOrderIndicator" required="0" legacyPosition="86.1"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="MSG_14_REF_1028"/>
+            <fieldRef id="1029" name="CustDirectedOrder" required="0" legacyPosition="86.2"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="MSG_14_REF_1029"/>
+            <fieldRef id="1030" name="ReceivedDeptID" required="0" legacyPosition="86.3"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="MSG_14_REF_1030"/>
+            <fieldRef id="1031" name="CustOrderHandlingInst" required="0" legacyPosition="86.4"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="MSG_14_REF_1031"/>
+            <fieldRef id="1032" name="OrderHandlingInstSource" required="0" legacyPosition="86.5"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="MSG_14_REF_1032"/>
+            <componentRef id="1020" name="TrdRegTimestamps" required="0" legacyPosition="86.6"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.4.4"
+                          addedEP="-1"
+                          textId="MSG_14_REF_TrdRegTimestamps"/>
+            <fieldRef id="1080" name="RefOrderID" required="0" legacyPosition="86.61"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="MSG_14_REF_1080"/>
+            <fieldRef id="1081" name="RefOrderIDSource" required="0" legacyPosition="86.62"
+                      legacyIndent="0"
+                      added="FIX.4.4"
+                      addedEP="-1"
+                      textId="MSG_14_REF_1081"/>
+            <componentRef id="1025" name="StandardTrailer" required="1" legacyPosition="87"
+                          legacyIndent="0"
+                          inlined="0"
+                          added="FIX.2.7"
+                          textId="MSG_14_REF_StandardTrailer"/>
+         </message>
+      </messages>
+   </fix>
+</fixRepository>
