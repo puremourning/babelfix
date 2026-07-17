@@ -1,3 +1,43 @@
+//! FIX session layer: sequence numbers, heartbeats and message recovery.
+//!
+//! A [`Session`] holds the mutable per-connection state — inbound/outbound
+//! sequence numbers, the heartbeat interval and the negotiated
+//! [`FixVersion`](crate::repository::FixVersion). The [`crate::endpoint`] layer
+//! runs the session loop internally; applications interact with a live session
+//! through a [`SessionHandle`]:
+//!
+//! * `tx: mpsc::Sender<`[`SessionCommand`]`>` — send an application message with
+//!   [`SessionCommand::Send`], drive a resend with [`SessionCommand::Replay`] /
+//!   [`SessionCommand::ReplayComplete`], or [`SessionCommand::Disconnect`].
+//! * `events: mpsc::Receiver<`[`SessionEvent`]`>` — a stream of session lifecycle
+//!   and inbound-message events.
+//!
+//! The session automatically emits heartbeats, answers TestRequests, issues a
+//! ResendRequest on a sequence gap, queues out-of-order messages, and handles
+//! logout — so application code usually only needs to react to
+//! [`SessionEvent::MessageReceived`] (inbound *application* messages) and
+//! [`SessionEvent::Disconnected`].
+//!
+//! ```ignore
+//! use babelfix::session::{SessionHandle, SessionEvent};
+//! use babelfix::schema::FIX_Latest::Fields;
+//! use futures::StreamExt;
+//!
+//! async fn drive(mut handle: SessionHandle) {
+//!     while let Some(event) = handle.events.next().await {
+//!         match event {
+//!             SessionEvent::MessageReceived(msg) => {
+//!                 if let Some(t) = msg.header.tag(Fields::MsgType) {
+//!                     println!("received {}", t.as_string());
+//!                 }
+//!             }
+//!             SessionEvent::Disconnected => break,
+//!             _ => {}
+//!         }
+//!     }
+//! }
+//! ```
+
 use std::sync::Arc;
 
 use futures::channel::{mpsc, oneshot};
@@ -7,17 +47,17 @@ use tracing::{debug, error, info};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionIdentifier {
-  pub begin_string:   String,
+  pub begin_string: String,
   pub sender_comp_id: String,
   pub target_comp_id: String,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Session {
-  pub next_out_seq_num:   u32,
-  pub next_in_seq_num:    u32,
+  pub next_out_seq_num: u32,
+  pub next_in_seq_num: u32,
   pub heartbeat_interval: std::time::Duration,
-  pub fix_version:        Arc<crate::repository::FixVersion>,
+  pub fix_version: Arc<crate::repository::FixVersion>,
 }
 
 impl Session {
@@ -100,29 +140,29 @@ pub enum SessionEvent {
 #[derive(Debug)]
 pub struct SessionHandle {
   pub session_id: SessionIdentifier,
-  pub tx:         mpsc::Sender<SessionCommand>,
+  pub tx: mpsc::Sender<SessionCommand>,
   // FIXME: Remove this from the struct so that you can cheaply clone it
-  pub events:     mpsc::Receiver<SessionEvent>,
+  pub events: mpsc::Receiver<SessionEvent>,
 }
 
 #[derive(Debug, Default, Clone)]
 struct Replay {
   pub begin_seq_no: u32,
-  pub end_seq_no:   u32,
+  pub end_seq_no: u32,
 
   next_expected_seq_num: u32,
-  gap_fill_count:        u32,
+  gap_fill_count: u32,
 }
 
 pub(crate) struct SessionManager<'stream, E, D> {
   rx: tokio_util::codec::FramedRead<tokio::net::tcp::ReadHalf<'stream>, D>,
   tx: tokio_util::codec::FramedWrite<tokio::net::tcp::WriteHalf<'stream>, E>,
-  session_id:           SessionIdentifier,
-  session:              Session,
+  session_id: SessionIdentifier,
+  session: Session,
   session_event_sender: mpsc::Sender<SessionEvent>,
-  session_msg_recv:     mpsc::Receiver<SessionCommand>,
-  queued_messages:      Vec<crate::message::builder::Message>,
-  replay:               Option<Replay>,
+  session_msg_recv: mpsc::Receiver<SessionCommand>,
+  queued_messages: Vec<crate::message::builder::Message>,
+  replay: Option<Replay>,
 }
 
 impl<'stream, E, D> SessionManager<'stream, E, D>

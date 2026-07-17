@@ -1,3 +1,25 @@
+//! Parsed FIX Orchestra metadata — the babelfix "repository".
+//!
+//! This crate parses [FIX Orchestra](https://www.fixtrading.org/standards/fix-orchestra/)
+//! XML into strongly-typed, lookup-friendly metadata: a [`FixVersion`] holding
+//! its [`Field`]s, [`Message`]s, [`Component`]s and [`Group`]s.
+//!
+//! The Orchestra files for FIX 4.2, 4.4 and FIX.Latest are embedded in the crate
+//! (`third-party/fix_orchestra`, Apache-2.0 licensed), so nothing needs to be
+//! loaded from disk at runtime — call [`orchestrate`] to build a
+//! [`FixRepository`] from the embedded data and select a version by begin-string:
+//!
+//! ```no_run
+//! let repo = babelfix_repo::orchestrate().unwrap();
+//! let fix44 = repo.get_version("FIX.4.4").unwrap();
+//! println!("{} fields defined", fix44.fields.len());
+//! ```
+//!
+//! To parse your own Orchestra XML instead, use [`load_orchestration`] or
+//! [`load_orchestrations`].
+//!
+//! This crate is re-exported from the `babelfix` crate as `babelfix::repository`.
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -8,9 +30,8 @@ use quick_xml::events::{BytesStart, Event};
 mod fix_orchestra;
 pub mod fixify;
 
-static FIX_ORCHESTRA: include_dir::Dir<'_> = include_dir::include_dir!(
-  "$CARGO_MANIFEST_DIR/third-party/fix_orchestra/"
-);
+static FIX_ORCHESTRA: include_dir::Dir<'_> =
+  include_dir::include_dir!("$CARGO_MANIFEST_DIR/third-party/fix_orchestra/");
 
 /// Error type for FIX repository parsing operations
 #[derive(Debug, thiserror::Error)]
@@ -30,21 +51,21 @@ pub enum FixRepoError {
 /// Represents a FIX version (e.g., FIX.4.4, FIX.5.0SP2)
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
 pub struct FixVersion {
-  pub name:         String,
-  pub version:      String,
-  pub fields:       HashMap<u32, Arc<Field>>,
-  pub components:   HashMap<u32, Arc<Component>>,
-  pub groups:       HashMap<u32, Arc<Group>>,
-  pub messages:     HashMap<String, Arc<Message>>,
-  pub codesets:     HashMap<String, Arc<Vec<EnumValue>>>,
+  pub name: String,
+  pub version: String,
+  pub fields: HashMap<u32, Arc<Field>>,
+  pub components: HashMap<u32, Arc<Component>>,
+  pub groups: HashMap<u32, Arc<Group>>,
+  pub messages: HashMap<String, Arc<Message>>,
+  pub codesets: HashMap<String, Arc<Vec<EnumValue>>>,
   pub begin_string: String,
 }
 
 /// Represents a FIX field
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Field {
-  pub id:         u32,
-  pub name:       String,
+  pub id: u32,
+  pub name: String,
   pub field_type: String,
 }
 
@@ -61,8 +82,8 @@ impl Field {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct EnumValue {
   pub value: String,
-  pub name:  String,
-  sort:      u32,
+  pub name: String,
+  sort: u32,
 }
 
 /// Reference to a field within a message, component, or group
@@ -76,7 +97,7 @@ pub struct FieldRef {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ComponentRef {
   pub component_id: u32,
-  pub required:     bool,
+  pub required: bool,
 }
 
 /// Reference to a group within a message or component
@@ -159,13 +180,13 @@ impl FieldBlock for Block {
 /// Represents a component (reusable block of fields)
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Component {
-  pub id:       u32,
-  pub name:     String,
+  pub id: u32,
+  pub name: String,
   pub category: Option<String>,
   // Ordered collection of child elements (fields, components, groups)
   pub elements: Vec<MessageElement>,
   // Pre-computed set of all member field IDs (including nested components)
-  pub members:  HashSet<u32>,
+  pub members: HashSet<u32>,
 }
 
 impl FieldBlock for Component {
@@ -177,22 +198,20 @@ impl FieldBlock for Component {
   }
 }
 
-impl Component {
-}
+impl Component {}
 
 /// Represents a message definition
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Message {
-  pub name:        String,
-  pub msg_type:    String,
-  pub category:    Option<String>,
+  pub name: String,
+  pub msg_type: String,
+  pub category: Option<String>,
   pub description: Option<String>,
   // Ordered collection of child elements (fields, components, groups)
-  pub elements:    Vec<MessageElement>,
+  pub elements: Vec<MessageElement>,
 }
 
-impl Message {
-}
+impl Message {}
 
 impl FieldBlock for Message {
   fn get_elements(&self) -> &Vec<MessageElement> {
@@ -206,14 +225,14 @@ impl FieldBlock for Message {
 /// Represents a repeating group
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Group {
-  pub id:               u32,
-  pub name:             String,
-  pub required:         bool,
+  pub id: u32,
+  pub name: String,
+  pub required: bool,
   pub num_in_group_tag: u32,
   // Ordered collection of child elements (fields, components, groups)
-  pub elements:         Vec<MessageElement>,
+  pub elements: Vec<MessageElement>,
   // Pre-computed set of all member field IDs (including nested components)
-  pub members:          HashSet<u32>,
+  pub members: HashSet<u32>,
 }
 
 impl Group {

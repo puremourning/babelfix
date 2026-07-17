@@ -1,3 +1,115 @@
+//! FIX message parsing, building and serialisation.
+//!
+//! # Two representations
+//!
+//! babelfix models a message two ways, a deliberate speed/convenience trade-off.
+//! Choose based on what you are doing.
+//!
+//! ## [`FixMessage`] — fast, flat, buffer-backed
+//!
+//! A [`FixMessage`] is barely more than the message's byte buffer (`data`) plus a
+//! flat, ordered `Vec` of `(tag, `[`Value`]`)` pairs (`tags`). Parsing is trivial
+//! and cheap: each [`Value`] is normally just a *slice* into the original buffer
+//! ([`Value::StringRef`] / [`Value::DataRef`]), so there is no per-field
+//! allocation or copying. This is the representation the [`crate::endpoint`]
+//! codec produces and consumes.
+//!
+//! Reach for it when you need **very fast reading**: scan `tags` and resolve each
+//! value against `data`. It also supports **fast construction by appending body
+//! tags** — start from [`FixMessage::of_type`] (which presets `BeginString` and
+//! `MsgType`) and push owned `(tag, `[`Value`]`)` pairs straight onto `tags`.
+//! There is no field-ordering, repeating-group, or duplicate-tag bookkeeping —
+//! that is exactly what makes it fast, and also what makes it easy to produce a
+//! malformed message, so appending by hand is comparatively rare.
+//!
+//! ```no_run
+//! use babelfix::{repository, FixMessage, Value};
+//! use babelfix::schema::FIX_Latest::Fields;
+//!
+//! let repo = repository::orchestrate().unwrap();
+//! let fix = repo.get_version("FIX.4.4").unwrap();
+//!
+//! // Fast construction: append owned body tags directly onto `tags`.
+//! let mut msg = FixMessage::of_type(fix, "D"); // NewOrderSingle
+//! msg.tags.push((Fields::Symbol, Value::String("AAPL".into())));
+//! msg.tags.push((Fields::OrderQty, Value::String("100".into())));
+//!
+//! // Fast reading: scan the flat tag list, resolving each value against `data`.
+//! for (tag, value) in &msg.tags {
+//!     if *tag == Fields::Symbol {
+//!         println!("symbol = {}", value.as_str(&msg.data));
+//!     }
+//! }
+//! ```
+//!
+//! ## [`builder::Message`] — convenient, structured, slower
+//!
+//! A [`builder::Message`] is an ergonomic, typed representation keyed by tag
+//! number: separate [`builder::Block`]s for header and body, [`builder::TypedValue`]
+//! accessors, duplicate-tag checks, and first-class repeating groups
+//! ([`builder::Block::group_mut`]). It owns its data and does bookkeeping on every
+//! mutation, so it is **not especially fast** — but it is the right choice for
+//! assembling non-trivial messages or navigating one by structure. This is the
+//! type the [`crate::session`] layer works with.
+//!
+//! Convert between the two with [`builder::Message::from_message`] (`FixMessage` →
+//! builder) and [`builder::Message::as_message`] / [`builder::Message::into_message`]
+//! (builder → `FixMessage`).
+//!
+//! # Building
+//!
+//! ```no_run
+//! use babelfix::{repository, message::builder};
+//! use babelfix::schema::FIX_Latest::Fields;
+//!
+//! let repo = repository::orchestrate().unwrap();
+//! let fix = repo.get_version("FIX.4.4").unwrap();
+//!
+//! let mut order = builder::Message::new(fix, "D").unwrap(); // NewOrderSingle
+//! order.body.set_tag(Fields::ClOrdID, "abc");
+//! order.body.set_tag(Fields::OrderQty, 100i64);
+//! order.body.set_tag(Fields::Price, 12.30f64);
+//!
+//! let wire = order.into_message().unwrap();
+//! ```
+//!
+//! # Parsing
+//!
+//! ```no_run
+//! use babelfix::{repository, message::builder};
+//! use babelfix::schema::FIX_Latest::Fields;
+//!
+//! let repo = repository::orchestrate().unwrap();
+//! let fix = repo.get_version("FIX.4.4").unwrap();
+//!
+//! // `|`-delimited for readability; real wire data uses SOH (b'\x01').
+//! let raw = b"8=FIX.4.4|9=...|35=D|11=abc|55=AAPL|10=000|";
+//! let msg = builder::Message::from_bytes_delimited(fix, raw, b'|').unwrap();
+//!
+//! if let Some(symbol) = msg.body.tag(Fields::Symbol) {
+//!     println!("symbol = {}", symbol.as_string());
+//! }
+//! ```
+//!
+//! # Repeating groups
+//!
+//! Groups are addressed by their `NumInGroup` tag; each entry is a
+//! [`builder::Block`] pushed onto the group:
+//!
+//! ```no_run
+//! use babelfix::{repository, message::builder};
+//! use babelfix::schema::FIX_Latest::Fields;
+//!
+//! let repo = repository::orchestrate().unwrap();
+//! let fix = repo.get_version("FIX.4.4").unwrap();
+//! let mut msg = builder::Message::new(fix, "D").unwrap();
+//!
+//! let mut party = builder::Block::new();
+//! party.push_tag(Fields::PartyID, "CLIENT-A").unwrap();
+//! party.push_tag(Fields::PartyRole, 3i64).unwrap();
+//! msg.body.group_mut(Fields::NoPartyIDs).push(party);
+//! ```
+
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -7,10 +119,13 @@ use bytes::Bytes;
 use crate::repository;
 use crate::repository::FieldBlock;
 
+const DEFAULT_MSG_CAPACITY: usize = 128;
+const DEFAULT_GROUP_CAPACITY: usize = 8;
+
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct ValRef {
   start: usize,
-  len:   usize,
+  len: usize,
 }
 
 impl<'a> ValRef {
@@ -116,8 +231,8 @@ type TagValue = (u32, Value);
 #[derive(Default, Eq, Clone)]
 pub struct FixMessage {
   pub fix_version: Arc<repository::FixVersion>,
-  pub data:        Bytes,
-  pub tags:        Vec<TagValue>,
+  pub data: Bytes,
+  pub tags: Vec<TagValue>,
 }
 
 impl PartialEq for FixMessage {
@@ -313,8 +428,11 @@ impl FixMessage {
   ) -> Result<(Self, usize), anyhow::Error> {
     let mut msg = FixMessage {
       fix_version: fix,
-      data:        data.clone(),
-      tags:        Vec::new(),
+      data: data.clone(),
+      tags: Vec::with_capacity(std::cmp::max(
+        DEFAULT_MSG_CAPACITY,
+        data.len() / 10,
+      )),
     };
 
     msg.tags.reserve(data.len() / 10);
@@ -350,7 +468,7 @@ impl FixMessage {
                 tag,
                 Value::DataRef(ValRef {
                   start: tag_start,
-                  len:   raw_data_len,
+                  len: raw_data_len,
                 }),
               ));
               i += raw_data_len;
@@ -366,7 +484,7 @@ impl FixMessage {
           tag,
           Value::StringRef(ValRef {
             start: tag_start,
-            len:   i - tag_start - 1,
+            len: i - tag_start - 1,
           }),
         ));
 
@@ -409,7 +527,7 @@ impl FixMessage {
         tag,
         Value::StringRef(ValRef {
           start: tag_start,
-          len:   data.len() - tag_start,
+          len: data.len() - tag_start,
         }),
       ));
     }
@@ -771,19 +889,13 @@ pub mod builder {
   #[derive(Clone, Debug, Default)]
   pub struct Block(Vec<Element>, HashMap<u32, usize>);
 
-  impl Block {
-    pub fn is_empty(&self) -> bool {
-      self.0.is_empty()
-    }
-  }
-
   #[derive(Clone)]
   pub struct Message {
     pub fix_message: Arc<repository::Message>,
     pub fix_version: Arc<repository::FixVersion>,
 
     pub header: Block,
-    pub body:   Block,
+    pub body: Block,
   }
 
   impl Message {
@@ -803,8 +915,8 @@ pub mod builder {
           .get_message(msg_type)
           .ok_or(anyhow::anyhow!("Invalid message type"))?,
         fix_version: repo,
-        body:        Block::default(),
-        header:      Block::default(),
+        body: Block::default(),
+        header: Block::default(),
       };
       s.header.set_tag(8, s.fix_version.begin_string.clone());
       s.header.set_tag(35, s.fix_message.msg_type.clone());
@@ -928,9 +1040,10 @@ pub mod builder {
                       fixmessage.name
                     )
                   })?;
-                let mut group_entries = Vec::new();
 
                 let num_entries: u32 = val.parse(&msg.data)?;
+                let mut group_entries =
+                  Vec::with_capacity(num_entries as usize);
                 for _ in 0..num_entries {
                   let mut group_elements = Block::new();
                   i += read_elements(
@@ -1090,6 +1203,22 @@ pub mod builder {
       Default::default()
     }
 
+    pub fn is_empty(&self) -> bool {
+      self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Element> {
+      self.0.iter().filter(|e| e.is_set())
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Element> {
+      self.0.iter_mut().filter(|e| e.is_set())
+    }
+
+    pub fn len(&self) -> usize {
+      self.0.len()
+    }
+
     fn push(&mut self, element: Element) -> usize {
       // note this internal version doesn't check for existing tag and just
       // pushes what it is told
@@ -1178,8 +1307,12 @@ pub mod builder {
           index = Some(*i)
         }
       }
-      let index =
-        index.unwrap_or_else(|| self.push(Element::Group(tag, Vec::new())));
+      let index = index.unwrap_or_else(|| {
+        self.push(Element::Group(
+          tag,
+          Vec::with_capacity(DEFAULT_GROUP_CAPACITY),
+        ))
+      });
       if let Element::Group(_, group) = self.0.get_mut(index).unwrap() {
         return group;
       }
@@ -1192,18 +1325,9 @@ pub mod builder {
   // just having all users implement iteration with recursion. Recursion isn't
   // difficult but it can have lifetime issues.
 
-  impl Block {
-    pub fn iter(&self) -> impl Iterator<Item = &Element> {
-      self.0.iter().filter(|e| e.is_set())
-    }
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Element> {
-      self.0.iter_mut().filter(|e| e.is_set())
-    }
-  }
-
   struct MessageIter<BlockIter> {
     header_iter: Option<BlockIter>,
-    body_iter:   BlockIter,
+    body_iter: BlockIter,
   }
 
   impl<'msg, BlockIter> Iterator for MessageIter<BlockIter>
@@ -1226,7 +1350,7 @@ pub mod builder {
     pub fn iter(&self) -> impl Iterator<Item = &Element> {
       MessageIter {
         header_iter: Some(self.header.iter()),
-        body_iter:   self.body.iter(),
+        body_iter: self.body.iter(),
       }
     }
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Element> {
@@ -1252,8 +1376,8 @@ pub mod builder {
       let mut normalized = Message {
         fix_message: self.fix_message.clone(),
         fix_version: self.fix_version.clone(),
-        header:      Block::new(),
-        body:        Block::new(),
+        header: Block::new(),
+        body: Block::new(),
       };
 
       // Normalize header using StandardHeader component if available
@@ -1302,7 +1426,7 @@ pub mod builder {
       );
 
       // Collect all elements from the current block
-      let mut elements_to_sort = Vec::new();
+      let mut elements_to_sort = Vec::with_capacity(block.len());
       for element in block.iter() {
         elements_to_sort.push(element.clone());
       }
@@ -1330,7 +1454,8 @@ pub mod builder {
             normalized.push(Element::Tag(tag_value));
           }
           Element::Group(num_in_group_tag, group_entries) => {
-            let mut normalized_entries = Vec::new();
+            let mut normalized_entries =
+              Vec::with_capacity(group_entries.len());
 
             // Find the group definition to get proper ordering for group
             // members

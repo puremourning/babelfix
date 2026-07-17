@@ -1,3 +1,10 @@
+//! Assorted helpers used across babelfix.
+//!
+//! FIX UTC timestamp formatting ([`time_now_fix`] and [`fix_time`], producing the
+//! `YYYYMMDD-HH:MM:SS.sss` form used in `SendingTime`/`TransactTime`), plus
+//! [`wrap_and_report`] and [`wrap_and_bail`] for logging errors out of spawned
+//! background tasks.
+
 use futures::prelude::*;
 use tracing::error;
 

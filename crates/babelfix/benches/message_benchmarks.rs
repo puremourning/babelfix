@@ -1,13 +1,12 @@
+use std::hint::black_box;
 use std::sync::{Arc, OnceLock};
 
-use babelfix::message::builder::{self, TypedValue};
 use babelfix::message::FixMessage;
+use babelfix::message::builder::{self, TypedValue};
 use babelfix::repository;
 use babelfix::schema::FIX_4_4 as FIX44;
 use bytes::Bytes;
-use criterion::{
-  black_box, criterion_group, criterion_main, Criterion, Throughput,
-};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 static REPO: OnceLock<Arc<repository::FixRepository>> = OnceLock::new();
 
@@ -575,6 +574,14 @@ fn bench_message_serialization(c: &mut Criterion) {
 
   group.bench_function("to_string_delimited", |b| {
     b.iter(|| black_box(&fix_msg).to_string_delimited(b'|'))
+  });
+
+  group.bench_function("write_to", |b| {
+    let mut buf = bytes::BytesMut::with_capacity(1024);
+    b.iter(|| {
+      buf.clear();
+      black_box(&fix_msg).write_to(&mut buf, b'|')
+    })
   });
 
   group.throughput(Throughput::Bytes(msgs.with_groups.len() as u64));

@@ -1,3 +1,51 @@
+//! TCP endpoint layer: accept or initiate FIX connections.
+//!
+//! The endpoint owns the wire framing — an internal `tokio_util` codec that
+//! splits the byte stream into [`FixMessage`]s and verifies
+//! `BodyLength`/`CheckSum` — and spawns a [`session`] task per connection.
+//!
+//! * [`serve`] binds a listener and returns an [`Endpoint`]. Iterate its `events`
+//!   receiver: reply to [`EndpointEvent::NewSession`] with a
+//!   [`Session`](crate::session::Session) for the negotiated version, then take
+//!   the [`SessionHandle`](crate::session::SessionHandle) from
+//!   [`EndpointEvent::SessionConnected`].
+//! * [`connect`] initiates an outbound connection (with reconnect and backoff),
+//!   emitting the same [`EndpointEvent::SessionConnected`] once logged on.
+//!
+//! Both take an `Arc<`[`FixRepository`](crate::repository::FixRepository)`>` and
+//! an optional field delimiter (`None` uses SOH, `b'\x01'`).
+//!
+//! # Server
+//!
+//! ```ignore
+//! use std::sync::Arc;
+//! use babelfix::{endpoint, session, repository};
+//! use futures::StreamExt;
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let repo = Arc::new(repository::orchestrate()?);
+//!     let mut endpoint = endpoint::serve(9878, None, repo.clone(), None).await?;
+//!
+//!     while let Some(event) = endpoint.events.next().await {
+//!         match event {
+//!             endpoint::EndpointEvent::NewSession { session_id, response } => {
+//!                 let fix = repo
+//!                     .get_version(&session_id.begin_string)
+//!                     .ok_or_else(|| anyhow::anyhow!("unknown FIX version"))?;
+//!                 let _ = response.send(session::Session::new(fix));
+//!             }
+//!             endpoint::EndpointEvent::SessionConnected(handle) => {
+//!                 // Drive `handle` — see the `session` module docs.
+//!                 tokio::spawn(async move { let _ = handle; });
+//!             }
+//!             endpoint::EndpointEvent::SessionInvalid(_peer) => {}
+//!         }
+//!     }
+//!     Ok(())
+//! }
+//! ```
+
 #![allow(unused_variables)]
 use std::sync::Arc;
 
@@ -12,7 +60,7 @@ use crate::repository::FieldBlock;
 pub enum EndpointEvent {
   NewSession {
     session_id: session::SessionIdentifier,
-    response:   oneshot::Sender<session::Session>,
+    response: oneshot::Sender<session::Session>,
   },
   SessionInvalid(String), // Partner address{
   SessionConnected(session::SessionHandle),
@@ -23,7 +71,7 @@ pub enum EndpointCommand {
 }
 
 pub struct Endpoint {
-  pub events:   mpsc::Receiver<EndpointEvent>,
+  pub events: mpsc::Receiver<EndpointEvent>,
   pub commands: mpsc::Sender<EndpointCommand>,
 }
 
@@ -39,8 +87,8 @@ impl Drop for Endpoint {
 
 #[derive(Default)]
 struct FixDecoder {
-  repo:        Arc<crate::repository::FixRepository>,
-  delimiter:   Option<u8>,
+  repo: Arc<crate::repository::FixRepository>,
+  delimiter: Option<u8>,
   fix_version: Option<Arc<crate::repository::FixVersion>>,
 }
 
@@ -311,8 +359,8 @@ async fn initiate_connection(
 
     let session_handle = session::SessionHandle {
       session_id: session_id.clone(),
-      tx:         session_send,
-      events:     session_event_recv,
+      tx: session_send,
+      events: session_event_recv,
     };
 
     event_sender
@@ -430,7 +478,7 @@ async fn accept_connection(
     crate::message::builder::Message::from_message(&logon_fix_msg)?;
 
   let session_id = session::SessionIdentifier {
-    begin_string:   logon_msg
+    begin_string: logon_msg
       .header
       .tag(crate::schema::FIX_Latest::Fields::BeginString)
       .ok_or(anyhow::anyhow!("Logon message missing BeginString"))?
@@ -451,7 +499,7 @@ async fn accept_connection(
   event_sender
     .send(EndpointEvent::NewSession {
       session_id: session_id.clone(),
-      response:   set_session,
+      response: set_session,
     })
     .await?;
   let mut session = get_session.await?;
@@ -472,8 +520,8 @@ async fn accept_connection(
   async {
     let session_handle = session::SessionHandle {
       session_id: session_id.clone(),
-      tx:         session_send,
-      events:     session_event_recv,
+      tx: session_send,
+      events: session_event_recv,
     };
 
     event_sender
@@ -565,6 +613,6 @@ pub async fn serve(
 
   Ok(Endpoint {
     commands: command_sender,
-    events:   event_receiver,
+    events: event_receiver,
   })
 }

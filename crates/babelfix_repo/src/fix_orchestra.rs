@@ -40,14 +40,14 @@ impl FixRepository {
 /// Parser for the FIX repository XML
 #[derive(Debug, Default)]
 struct FixOrchestraParser {
-  repository:          FixRepository,
+  repository: FixRepository,
   current_fix_version: FixVersion,
-  current_field:       Option<Field>,
-  current_message:     Option<Message>,
-  current_group:       Option<Group>,
-  current_codeset:     Option<(String, Vec<EnumValue>)>,
-  block_stack:         Vec<Block>,
-  buffer:              String,
+  current_field: Option<Field>,
+  current_message: Option<Message>,
+  current_group: Option<Group>,
+  current_codeset: Option<(String, Vec<EnumValue>)>,
+  block_stack: Vec<Block>,
+  buffer: String,
 }
 
 impl FixOrchestraParser {
@@ -130,8 +130,8 @@ impl FixOrchestraParser {
         let attrs = self.get_attributes(e);
         let enum_value = EnumValue {
           value: attrs.get("value").cloned().unwrap(),
-          name:  attrs.get("name").cloned().unwrap(),
-          sort:  attrs.get("sort").and_then(|s| s.parse().ok()).unwrap_or(0),
+          name: attrs.get("name").cloned().unwrap(),
+          sort: attrs.get("sort").and_then(|s| s.parse().ok()).unwrap_or(0),
         };
         let Some(ref mut current_codeset) = self.current_codeset else {
           return Err(FixRepoError::ParseError(
@@ -197,11 +197,11 @@ impl FixOrchestraParser {
         let name = attrs.get("name").cloned().unwrap();
 
         self.current_message = Some(Message {
-          name:        name.clone(),
-          msg_type:    attrs.get("msgType").cloned().unwrap(),
-          category:    attrs.get("category").cloned(),
+          name: name.clone(),
+          msg_type: attrs.get("msgType").cloned().unwrap(),
+          category: attrs.get("category").cloned(),
           description: None,
-          elements:    Vec::new(),
+          elements: Vec::new(),
         });
       }
 
