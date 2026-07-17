@@ -2,6 +2,13 @@
 name = "babelfix-repo"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+# Dual: our code is MIT; the bundled FIX Orchestra data (third-party/fix_orchestra)
+# is Apache-2.0, so redistributors must satisfy both licenses.
+license = "MIT AND Apache-2.0"
+authors.workspace = true
+repository.workspace = true
+description = "FIX repository and Orchestra XML parsing for the babelfix FIX protocol implementation"
 
 [dependencies]
 proc-macro2.workspace = true

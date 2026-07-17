@@ -2,20 +2,10 @@ use babelfix_repo as repository;
 use quote::quote;
 
 pub fn generate_repo_static() -> Result<String, Box<dyn std::error::Error>> {
-  let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or("./".into());
-
-  let mut repo = repository::FixRepository::default();
-  for f in &[
-    "OrchestraFIX42.xml",
-    "OrchestraFIX44.xml",
-    "OrchestraFIXLatest.xml",
-  ] {
-    let p = std::path::Path::new(&manifest_dir)
-      .join("../../third-party/fix_orchestra")
-      .join(f);
-    println!("cargo:rerun-if-changed={}", p.display());
-    repo = repo.merge(repository::load_orchestration(p)?);
-  }
+  // Source the FIX Orchestra data from the babelfix-repo crate, which embeds
+  // it via include_dir!. This keeps the third-party (Apache-2.0) data owned by
+  // a single crate and lets the generator work without any on-disk paths.
+  let repo = repository::orchestrate()?;
 
   let versions: Vec<_> = repo
     .versions

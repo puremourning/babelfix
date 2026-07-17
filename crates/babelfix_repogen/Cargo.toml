@@ -2,6 +2,13 @@
 name = "babelfix-repogen"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+# Dual: our code is MIT; the generated schema tables are derived from the
+# Apache-2.0 FIX Orchestra data, so redistributors must satisfy both licenses.
+license = "MIT AND Apache-2.0"
+authors.workspace = true
+repository.workspace = true
+description = "Build-time code generation of static FIX schema definitions for the babelfix FIX protocol implementation"
 
 [build-dependencies]
 babelfix-repo.workspace = true

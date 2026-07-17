@@ -9,7 +9,7 @@ mod fix_orchestra;
 pub mod fixify;
 
 static FIX_ORCHESTRA: include_dir::Dir<'_> = include_dir::include_dir!(
-  "$CARGO_MANIFEST_DIR/../../third-party/fix_orchestra/"
+  "$CARGO_MANIFEST_DIR/third-party/fix_orchestra/"
 );
 
 /// Error type for FIX repository parsing operations

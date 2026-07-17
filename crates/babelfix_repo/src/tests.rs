@@ -1,16 +1,9 @@
 use super::*;
 
 fn project_root() -> std::path::PathBuf {
-  let manifest_dir =
-    std::env::var("CARGO_MANIFEST_DIR").unwrap_or("crates/fix_repo".into());
+  let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+    .unwrap_or("crates/babelfix_repo".into());
   std::path::PathBuf::from(manifest_dir)
-}
-
-fn workspace_root() -> std::path::PathBuf {
-  let mut path = project_root();
-  path.pop();
-  path.pop();
-  path
 }
 
 fn print_version(fix: &FixVersion) {
@@ -82,9 +75,9 @@ fn print_elements(fix: &FixVersion, element: &impl FieldBlock, depth: usize) {
 #[test]
 fn test_full_fix_orchestra() {
   let repo = load_orchestrations(vec![
-    workspace_root().join("third-party/fix_orchestra/OrchestraFIX42.xml"),
-    workspace_root().join("third-party/fix_orchestra/OrchestraFIX44.xml"),
-    workspace_root().join("third-party/fix_orchestra/OrchestraFIXLatest.xml"),
+    project_root().join("third-party/fix_orchestra/OrchestraFIX42.xml"),
+    project_root().join("third-party/fix_orchestra/OrchestraFIX44.xml"),
+    project_root().join("third-party/fix_orchestra/OrchestraFIXLatest.xml"),
   ])
   .unwrap();
 

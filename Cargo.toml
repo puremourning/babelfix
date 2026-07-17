@@ -19,8 +19,8 @@ anyhow = "1.0"
 futures = "0.3"
 async-stream = "0.3"
 tokio = { version = "1.0", features = ["full"] }
-babelfix-repo = { path = "crates/babelfix_repo" }
-babelfix-repogen = { path = "crates/babelfix_repogen" }
+babelfix-repo = { path = "crates/babelfix_repo", version = "0.1.0" }
+babelfix-repogen = { path = "crates/babelfix_repogen", version = "0.1.0" }
 tracing = "0.1"
 bytes = "1.0"
 tokio-util = { version = "0.7", features = ["codec"] }

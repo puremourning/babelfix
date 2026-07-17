@@ -670,7 +670,7 @@ fn bench_version_detection(c: &mut Criterion) {
   group.throughput(Throughput::Bytes(msgs.simple.len() as u64));
   group.bench_function("peek_infer_version_and_length", |b| {
     b.iter(|| {
-      fix::message::peek_infer_version_and_length(
+      babelfix::message::peek_infer_version_and_length(
         &repo,
         black_box(&msgs.simple),
         b'|',

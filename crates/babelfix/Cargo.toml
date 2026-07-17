@@ -2,8 +2,12 @@
 name = "babelfix"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 description = "A production-grade FIX protocol implementation in Rust"
-category = "network-programming"
+categories = ["network-programming"]
 keywords = ["fix-protocol", "financial", "fix", "trading"]
 
 [dependencies]
