@@ -885,6 +885,133 @@ pub mod builder {
   #[derive(Clone, Debug, Default)]
   pub struct Block(Vec<Element>, HashMap<u32, usize>);
 
+  impl Block {
+    pub fn new() -> Self {
+      Default::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+      self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Element> {
+      self.0.iter().filter(|e| e.is_set())
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Element> {
+      self.0.iter_mut().filter(|e| e.is_set())
+    }
+
+    pub fn len(&self) -> usize {
+      self.0.len()
+    }
+
+    fn push(&mut self, element: Element) -> usize {
+      // note this internal version doesn't check for existing tag and just
+      // pushes what it is told
+      let tag = match element {
+        Element::Tag((tag, _)) => tag,
+        Element::Group(tag, _) => tag,
+        Element::RawDataTag(_, data_tag, _) => data_tag,
+      };
+      let index = self.0.len();
+      self.0.push(element);
+      // TODO: Should this really be a HashMap<Vec<usize>> ? This would allow
+      // for invalid messages though. Or better should this function just return
+      // Result<usize> and not push the tag if it exists?
+      self
+        .1
+        .entry(tag)
+        .and_modify(|e| *e = index)
+        .or_insert(index);
+      index
+    }
+
+    pub fn has_tag(&self, tag: u32) -> bool {
+      self.tag(tag).is_some_and(|t| !t.is_empty())
+    }
+
+    pub fn set_tag<T: Into<TypedValue>>(&mut self, tag: u32, value: T) {
+      *(self.tag_mut(tag)) = value.into()
+    }
+
+    pub fn remove_tag(&mut self, tag: u32) {
+      if self.has_tag(tag) {
+        self.set_tag(tag, TypedValue::Empty);
+      }
+    }
+
+    pub fn push_tag<T: Into<TypedValue>>(
+      &mut self,
+      tag: u32,
+      value: T,
+    ) -> crate::Result<()> {
+      if self.has_tag(tag) {
+        return Err(crate::Error::invalid_message(format!(
+          "Tag {} already exists in block",
+          tag
+        )));
+      }
+      self.push(Element::Tag((tag, value.into())));
+      Ok(())
+    }
+
+    pub fn push_group(&mut self, tag: u32, group: Block) {
+      let g = self.group_mut(tag);
+      g.push(group);
+    }
+
+    pub fn tag(&self, tag: u32) -> Option<&TypedValue> {
+      let index = self.1.get(&tag)?;
+      if let Element::Tag((_, v)) = self.0.get(*index)? {
+        return Some(v);
+      }
+      None
+    }
+
+    pub fn tag_mut(&mut self, tag: u32) -> &mut TypedValue {
+      let mut index: Option<usize> = None;
+      if let Some(i) = self.1.get(&tag) {
+        if let Some(Element::Tag((_, _))) = self.0.get_mut(*i) {
+          index = Some(*i)
+        }
+      }
+      let index = index
+        .unwrap_or_else(|| self.push(Element::Tag((tag, TypedValue::Empty))));
+      if let Element::Tag((_, value)) = self.0.get_mut(index).unwrap() {
+        return value;
+      }
+      unreachable!()
+    }
+
+    pub fn group(&self, tag: u32) -> Option<&Vec<Block>> {
+      let index = self.1.get(&tag)?;
+      if let Element::Group(_, group) = self.0.get(*index)? {
+        return Some(group);
+      }
+      None
+    }
+
+    pub fn group_mut(&mut self, tag: u32) -> &mut Vec<Block> {
+      let mut index: Option<usize> = None;
+      if let Some(i) = self.1.get(&tag) {
+        if let Some(Element::Group(_, _)) = self.0.get_mut(*i) {
+          index = Some(*i)
+        }
+      }
+      let index = index.unwrap_or_else(|| {
+        self.push(Element::Group(
+          tag,
+          Vec::with_capacity(DEFAULT_GROUP_CAPACITY),
+        ))
+      });
+      if let Element::Group(_, group) = self.0.get_mut(index).unwrap() {
+        return group;
+      }
+      unreachable!()
+    }
+  }
+
   #[derive(Clone)]
   pub struct Message {
     pub fix_message: Arc<repository::Message>,
@@ -1190,131 +1317,6 @@ pub mod builder {
       flatten(self.body, &mut msg)?;
 
       Ok(msg)
-    }
-  }
-
-  impl Block {
-    pub fn new() -> Self {
-      Default::default()
-    }
-
-    pub fn is_empty(&self) -> bool {
-      self.0.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Element> {
-      self.0.iter().filter(|e| e.is_set())
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Element> {
-      self.0.iter_mut().filter(|e| e.is_set())
-    }
-
-    pub fn len(&self) -> usize {
-      self.0.len()
-    }
-
-    fn push(&mut self, element: Element) -> usize {
-      // note this internal version doesn't check for existing tag and just
-      // pushes what it is told
-      let tag = match element {
-        Element::Tag((tag, _)) => tag,
-        Element::Group(tag, _) => tag,
-        Element::RawDataTag(_, data_tag, _) => data_tag,
-      };
-      let index = self.0.len();
-      self.0.push(element);
-      // TODO: Should this really be a HashMap<Vec<usize>> ? This would allow
-      // for invalid messages though. Or better should this function just return
-      // Result<usize> and not push the tag if it exists?
-      self
-        .1
-        .entry(tag)
-        .and_modify(|e| *e = index)
-        .or_insert(index);
-      index
-    }
-
-    pub fn has_tag(&self, tag: u32) -> bool {
-      self.tag(tag).is_some_and(|t| !t.is_empty())
-    }
-
-    pub fn set_tag<T: Into<TypedValue>>(&mut self, tag: u32, value: T) {
-      *(self.tag_mut(tag)) = value.into()
-    }
-
-    pub fn remove_tag(&mut self, tag: u32) {
-      self.set_tag(tag, TypedValue::Empty);
-    }
-
-    pub fn push_tag<T: Into<TypedValue>>(
-      &mut self,
-      tag: u32,
-      value: T,
-    ) -> crate::Result<()> {
-      if self.has_tag(tag) {
-        return Err(crate::Error::invalid_message(format!(
-          "Tag {} already exists in block",
-          tag
-        )));
-      }
-      self.push(Element::Tag((tag, value.into())));
-      Ok(())
-    }
-
-    pub fn push_group(&mut self, tag: u32, group: Block) {
-      let g = self.group_mut(tag);
-      g.push(group);
-    }
-
-    pub fn tag(&self, tag: u32) -> Option<&TypedValue> {
-      let index = self.1.get(&tag)?;
-      if let Element::Tag((_, v)) = self.0.get(*index)? {
-        return Some(v);
-      }
-      None
-    }
-
-    pub fn tag_mut(&mut self, tag: u32) -> &mut TypedValue {
-      let mut index: Option<usize> = None;
-      if let Some(i) = self.1.get(&tag) {
-        if let Some(Element::Tag((_, _))) = self.0.get_mut(*i) {
-          index = Some(*i)
-        }
-      }
-      let index = index
-        .unwrap_or_else(|| self.push(Element::Tag((tag, TypedValue::Empty))));
-      if let Element::Tag((_, value)) = self.0.get_mut(index).unwrap() {
-        return value;
-      }
-      unreachable!()
-    }
-
-    pub fn group(&self, tag: u32) -> Option<&Vec<Block>> {
-      let index = self.1.get(&tag)?;
-      if let Element::Group(_, group) = self.0.get(*index)? {
-        return Some(group);
-      }
-      None
-    }
-
-    pub fn group_mut(&mut self, tag: u32) -> &mut Vec<Block> {
-      let mut index: Option<usize> = None;
-      if let Some(i) = self.1.get(&tag) {
-        if let Some(Element::Group(_, _)) = self.0.get_mut(*i) {
-          index = Some(*i)
-        }
-      }
-      let index = index.unwrap_or_else(|| {
-        self.push(Element::Group(
-          tag,
-          Vec::with_capacity(DEFAULT_GROUP_CAPACITY),
-        ))
-      });
-      if let Element::Group(_, group) = self.0.get_mut(index).unwrap() {
-        return group;
-      }
-      unreachable!()
     }
   }
 

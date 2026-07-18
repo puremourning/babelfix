@@ -14,9 +14,12 @@
 //!
 //! The session automatically emits heartbeats, answers TestRequests, issues a
 //! ResendRequest on a sequence gap, queues out-of-order messages, and handles
-//! logout — so application code usually only needs to react to
-//! [`SessionEvent::MessageReceived`] (inbound *application* messages) and
-//! [`SessionEvent::Disconnected`].
+//! logout — so application code technically only needs to react to
+//! [`SessionEvent::MessageReceived`] (inbound *application* messages),
+//! [`SessionEvent::ResendRequest`] (inbound *resend requests*), and
+//! [`SessionEvent::Disconnected`], though handling
+//! [`SessionEvent::RawMessageSent`] and [`SessionEvent::SessionState`] are
+//! usually needed in order to correctly recover the session.
 //!
 //! ```ignore
 //! use babelfix::session::{SessionHandle, SessionEvent};
@@ -32,6 +35,7 @@
 //!                 }
 //!             }
 //!             SessionEvent::Disconnected => break,
+//!             // ...
 //!             _ => {}
 //!         }
 //!     }
@@ -115,26 +119,130 @@ impl Session {
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SessionCommand {
+  /// Send the message on the session. The message is assigned the next outbound
+  /// sequence number and has its session header fields populated. Any supplied
+  /// `MsgSeqNum`, `SendingTime`, `SenderCompID` or `TargetCompID` is overwritten
+  /// — applications cannot set these correctly, so they are left to the session.
+  ///
+  /// It is an error to attempt to send a message while a replay is in progress;
+  /// use [`SessionCommand::Replay`] to send messages in response to a
+  /// [`SessionEvent::ResendRequest`].
   Send(crate::message::builder::Message),
+
+  /// Replay the sequence number in `MsgSeqNum` with the supplied message. Only
+  /// valid between receipt of a [`SessionEvent::ResendRequest`] and a
+  /// subsequent [`SessionCommand::ReplayComplete`].
+  ///
+  /// For more details on resends, see [`SessionEvent::ResendRequest`].
   Replay(crate::message::builder::Message),
+
+  /// Indicate that all messages for the current resend request have been sent.
+  ///
+  /// For more details on resends, see [`SessionEvent::ResendRequest`].
   ReplayComplete,
+
+  /// Disconnect the session. The completion of the disconnection will be
+  /// indicated by a [`SessionEvent::Disconnected`] event.
   Disconnect,
+
+  /// Request the current state of the session. The session state will be
+  /// provided to the supplied [`oneshot::Sender`].
   GetSessionState(oneshot::Sender<Session>),
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SessionEvent {
-  ConnectionEsablished,
-  RecoveryStarted,
-  RecoveryCompleted,
+  /// A connection has been established and logon message received from the
+  /// remote party, but no recovery has been performed.
+  ConnectionEstablished,
+
+  // A recovery has been started, either due to a ResendRequest or a gap in
+  // sequence numbers.
+  //
+  // FIXME: Not actually used yet.
+  // RecoveryStarted,
+
+  // A recovery has been completed, and the session is now ready to be used
+  //
+  // FIXME: Not actually used yet.
+  // RecoveryCompleted
+  /// Occasionally emitted to indicate the current state of the session,
+  /// including the next expected inbound and outbound sequence numbers.
+  /// The state is also included in other events and should be persisted by
+  /// applications in order to correctly recover - the inbound and outbound
+  /// sequence numbers are required to be provided in response to
+  /// [`EndpointEvent::NewSession`](crate::endpoint::EndpointEvent::NewSession).
   SessionState(Session),
+
+  /// Emitted when any FIX message was received from the remote, no matter whether
+  /// this is valid or not. Includes admin messages (logon, logout, resend
+  /// request, etc.). Useful for auditing, logging and display. Business
+  /// logic and processing should not use this message: rather use the
+  /// [`SessionEvent::MessageReceived`] event, which emitted for valid,
+  /// well-sequenced messages.
+  ///
+  /// FIXME: Should include the socket send time
   RawMessageReceived(crate::message::FixMessage, Session),
+
+  /// Emitted when any FIX message was sent to the remote, including admin
+  /// messages. Useful for auditing, logging and display.
+  ///
+  /// FIXME: Should include the socket send time.
+  ///
+  /// Note that the message should be persisted by the application (unmodified)
+  /// so that it can be replayed in response to any future resend request
+  /// [`SessionEvent::ResendRequest`]. Note that this library does not provide
+  /// any persistence at all, so you must implement your own persistence.
   RawMessageSent(crate::message::FixMessage, Session),
+
+  /// Applications should use this event for business processing.
+  ///
+  /// Emitted for each valid, session protocol-compliant business message in
+  /// sequence number order. Does not include session admin messages. When a
+  /// resend is required from the remote, this event will be emitted for replayed
+  /// messages before any new messages, thus the application does not need to be
+  /// concerned with processing out-of-sequence messages, except to the extent
+  /// that `PossDupFlag` might be set on the message by the remote.
   MessageReceived(crate::message::builder::Message),
-  ResendRequest(crate::message::builder::Message, u32, u32),
+
+  /// The remote requested replay (resend) of messages from the given sequence
+  /// number range (inclusive of `end_seq_no`). `end_seq_no` is always supplied,
+  /// even if the remote sent an open-ended resend request; this library
+  /// determines the correct end sequence number in that case.
+  ///
+  /// Applications must action this resend request by using the
+  /// [`SessionCommand::Replay`] and [`SessionCommand::ReplayComplete`] commands
+  /// to send the requested message sequence.
+  ///
+  /// Only messages that were provided by the [`SessionEvent::RawMessageSent`]
+  /// event should be replayed, or the application should faithfully construct
+  /// each equivalent with the relevant sequence number populated in `MsgSeqNum`.
+  /// Any skipped sequence numbers will be gap-filled automatically, allowing
+  /// applications to decide not to replay certain messages, for example to avoid
+  /// re-sending a stale order request. Once all messages have been replayed, the
+  /// application should send [`SessionCommand::ReplayComplete`]; any remaining
+  /// sequence numbers will be gap-filled automatically.
+  ResendRequest {
+    /// The resend request message itself. Applications do not typically need to
+    /// inspect this.
+    resend_request: crate::message::builder::Message,
+    /// The first sequence number to be resent.
+    begin_seq_no: u32,
+    /// The last sequence number to be resent (inclusive).
+    end_seq_no: u32,
+  },
+
+  /// Emitted when the session is disconnected, either due to a logout message
+  /// or a network error.
   Disconnected,
-  Error(crate::Error),
+  // Emitted when the session is disconnected due to an error, either a
+  // protocol violation or a network error.
+  //
+  // FIXME: Not actually used yet.
+  // Error(crate::Error),
 }
 
 #[derive(Debug)]
@@ -272,11 +380,18 @@ where
           out_heartbeat_timer.reset();
           if let Some(cmd) = cmd {
             match cmd {
-              SessionCommand::Send(msg) => {
+              SessionCommand::Send(mut msg) => {
                 if self.replay.is_some() {
                   error!("Cannot send message while replay is in progress; use Resend");
                   break;
                 }
+                msg
+                  .header
+                  .remove_tag(crate::schema::FIX_Latest::Fields::MsgSeqNum);
+                msg
+                  .header
+                  .remove_tag(crate::schema::FIX_Latest::Fields::PossDupFlag);
+
                 debug!("Sending message to session: {:?}", msg);
                 if let Err(e) = self.session.send(msg,
                                                   &self.session_id,
@@ -552,11 +667,11 @@ where
         });
         self
           .session_event_sender
-          .send(SessionEvent::ResendRequest(
-            msg,
-            self.replay.as_ref().unwrap().begin_seq_no,
-            self.replay.as_ref().unwrap().end_seq_no,
-          ))
+          .send(SessionEvent::ResendRequest {
+            resend_request: msg,
+            begin_seq_no: self.replay.as_ref().unwrap().begin_seq_no,
+            end_seq_no: self.replay.as_ref().unwrap().end_seq_no,
+          })
           .await?
       }
       // Logout

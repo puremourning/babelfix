@@ -367,7 +367,7 @@ async fn initiate_connection(
       .await?;
 
     session_event_sender
-      .send(session::SessionEvent::ConnectionEsablished)
+      .send(session::SessionEvent::ConnectionEstablished)
       .await?;
 
     // Create a disconnecter to ensure we send a disconnect event when the
@@ -467,7 +467,7 @@ async fn accept_connection(
   };
 
   session_event_sender
-    .send(session::SessionEvent::ConnectionEsablished)
+    .send(session::SessionEvent::ConnectionEstablished)
     .await?;
 
   // Create a disconnecter to ensure we send a disconnect event when the
