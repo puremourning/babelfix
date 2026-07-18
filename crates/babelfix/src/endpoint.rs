@@ -483,17 +483,23 @@ async fn accept_connection(
     begin_string: logon_msg
       .header
       .tag(crate::schema::FIX_Latest::Fields::BeginString)
-      .ok_or_else(|| Error::protocol_violation("Logon message missing BeginString"))?
+      .ok_or_else(|| {
+        Error::protocol_violation("Logon message missing BeginString")
+      })?
       .as_string(),
     sender_comp_id: logon_msg
       .header
       .tag(crate::schema::FIX_Latest::Fields::TargetCompID)
-      .ok_or_else(|| Error::protocol_violation("Logon message missing TargetCompID"))?
+      .ok_or_else(|| {
+        Error::protocol_violation("Logon message missing TargetCompID")
+      })?
       .as_string(),
     target_comp_id: logon_msg
       .header
       .tag(crate::schema::FIX_Latest::Fields::SenderCompID)
-      .ok_or_else(|| Error::protocol_violation("Logon message missing SenderCompID"))?
+      .ok_or_else(|| {
+        Error::protocol_violation("Logon message missing SenderCompID")
+      })?
       .as_string(),
   };
 

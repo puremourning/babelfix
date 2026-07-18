@@ -268,36 +268,7 @@ impl fmt::Debug for FixMessage {
   }
 }
 
-pub fn peek_infer_version(
-  repo: &repository::FixRepository,
-  s: &[u8],
-  delimiter: u8,
-) -> crate::Result<Option<Arc<repository::FixVersion>>> {
-  let first_tag = s
-    .iter()
-    .position(|c| *c == delimiter)
-    .ok_or_else(|| crate::Error::invalid_message("No delimiter found"))?;
-  let first_tag = std::str::from_utf8(&s[..first_tag])
-    .map_err(|_| crate::Error::invalid_message("Invalid BeginString value"))?;
-
-  let (tag, begin_string) = first_tag
-    .split_once('=')
-    .ok_or_else(|| crate::Error::invalid_message("Invalid tag format"))?;
-
-  if tag != "8" {
-    return Err(crate::Error::invalid_message(format!("Expected BeginString tag (8), found {}", tag)));
-  }
-
-  Ok(
-    repo
-      .versions
-      .values()
-      .find(|v| v.begin_string == begin_string)
-      .cloned(),
-  )
-}
-
-pub fn peek_infer_version_and_length(
+pub(crate) fn peek_infer_version_and_length(
   repo: &repository::FixRepository,
   s: &[u8],
   delimiter: u8,
@@ -312,11 +283,17 @@ pub fn peek_infer_version_and_length(
 
   let delimiter = delimiter as char;
   let (tag, begin_string) = first_tag.split_once('=').ok_or_else(|| {
-    crate::Error::invalid_message(format!("Invalid BeginString tag format in {}", first_tag))
+    crate::Error::invalid_message(format!(
+      "Invalid BeginString tag format in {}",
+      first_tag
+    ))
   })?;
 
   if tag != "8" {
-    return Err(crate::Error::invalid_message(format!("Expected BeginString tag (8), found {}", tag)));
+    return Err(crate::Error::invalid_message(format!(
+      "Expected BeginString tag (8), found {}",
+      tag
+    )));
   }
 
   let fix_version = repo
@@ -338,12 +315,15 @@ pub fn peek_infer_version_and_length(
   )
   .map_err(|_| crate::Error::invalid_message("Invalid BodyLength encoding"))?;
 
-  let (tag, body_length) = second_tag
-    .split_once('=')
-    .ok_or_else(|| crate::Error::invalid_message("Invalid BodyLength tag format"))?;
+  let (tag, body_length) = second_tag.split_once('=').ok_or_else(|| {
+    crate::Error::invalid_message("Invalid BodyLength tag format")
+  })?;
 
   if tag != "9" {
-    return Err(crate::Error::invalid_message(format!("Expected BodyLength tag (9), found {}", tag)));
+    return Err(crate::Error::invalid_message(format!(
+      "Expected BodyLength tag (9), found {}",
+      tag
+    )));
   }
 
   let body_length = body_length
@@ -357,7 +337,7 @@ pub fn peek_infer_version_and_length(
   ))
 }
 
-pub fn peek_checksum(
+pub(crate) fn peek_checksum(
   _repo: &repository::FixRepository,
   s: &[u8],
   delimiter: u8,
@@ -370,11 +350,17 @@ pub fn peek_checksum(
     .map_err(|_| crate::Error::invalid_message("Invalid Checksum value"))?;
 
   let (tag, checksum) = first_tag.split_once('=').ok_or_else(|| {
-    crate::Error::invalid_message(format!("Invalid Checksum tag format in {}", first_tag))
+    crate::Error::invalid_message(format!(
+      "Invalid Checksum tag format in {}",
+      first_tag
+    ))
   })?;
 
   if tag != "10" {
-    return Err(crate::Error::invalid_message(format!("Expected Checksum tag (8), found {}", tag)));
+    return Err(crate::Error::invalid_message(format!(
+      "Expected Checksum tag (8), found {}",
+      tag
+    )));
   }
 
   let checksum = checksum
@@ -911,9 +897,9 @@ pub mod builder {
       msg_type: &str,
     ) -> crate::Result<Self> {
       let mut s = Self {
-        fix_message: repo
-          .get_message(msg_type)
-          .ok_or_else(|| crate::Error::invalid_message("Invalid message type"))?,
+        fix_message: repo.get_message(msg_type).ok_or_else(|| {
+          crate::Error::invalid_message("Invalid message type")
+        })?,
         fix_version: repo,
         body: Block::default(),
         header: Block::default(),
@@ -1036,8 +1022,7 @@ pub mod builder {
                   .ok_or_else(|| {
                     crate::Error::invalid_message(format!(
                       "Invalid group {} in message {}",
-                      field.id,
-                      fixmessage.name
+                      field.id, fixmessage.name
                     ))
                   })?;
 
@@ -1258,7 +1243,10 @@ pub mod builder {
       value: T,
     ) -> crate::Result<()> {
       if self.has_tag(tag) {
-        return Err(crate::Error::invalid_message(format!("Tag {} already exists in block", tag)));
+        return Err(crate::Error::invalid_message(format!(
+          "Tag {} already exists in block",
+          tag
+        )));
       }
       self.push(Element::Tag((tag, value.into())));
       Ok(())
@@ -1889,7 +1877,10 @@ mod tests {
     let Err(s) = peek_infer_version_and_length(&repo, data, b'|') else {
       panic!("Should have failed")
     };
-    assert_eq!(s.to_string().as_str(), "Invalid message: Unknown FIX version");
+    assert_eq!(
+      s.to_string().as_str(),
+      "Invalid message: Unknown FIX version"
+    );
 
     Ok(())
   }

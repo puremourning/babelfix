@@ -352,8 +352,9 @@ where
       .tag(crate::schema::FIX_Latest::Fields::MsgSeqNum)
       .ok_or_else(|| crate::Error::protocol_violation("Missing MsgSeqNum"))?
       .as_int()
-      .ok_or_else(|| crate::Error::protocol_violation("MsgSeqNum is not an integer"))?
-      as u32;
+      .ok_or_else(|| {
+        crate::Error::protocol_violation("MsgSeqNum is not an integer")
+      })? as u32;
 
     if msg_seq_num == self.session.next_in_seq_num {
       if msg.fix_message.msg_type == "4" {
@@ -361,11 +362,15 @@ where
         if msg
           .body
           .tag(crate::schema::FIX_Latest::Fields::GapFillFlag)
-          .ok_or_else(|| crate::Error::protocol_violation("Missing GapFillFlag"))?
+          .ok_or_else(|| {
+            crate::Error::protocol_violation("Missing GapFillFlag")
+          })?
           .as_string()
           != "Y"
         {
-          return Err(crate::Error::protocol_violation("Sequence reset message is garbage and not supported"));
+          return Err(crate::Error::protocol_violation(
+            "Sequence reset message is garbage and not supported",
+          ));
         }
 
         let new_seq_num = msg
@@ -492,7 +497,9 @@ where
           msg
             .body
             .tag(crate::schema::FIX_Latest::Fields::TestReqID)
-            .ok_or_else(|| crate::Error::protocol_violation("Missing TestReqID"))?
+            .ok_or_else(|| {
+              crate::Error::protocol_violation("Missing TestReqID")
+            })?
             .as_string(),
         );
         self
@@ -510,7 +517,9 @@ where
         let begin_seq_no = msg
           .body
           .tag(crate::schema::FIX_Latest::Fields::BeginSeqNo)
-          .ok_or_else(|| crate::Error::protocol_violation("Missing BeginSeqNo"))?
+          .ok_or_else(|| {
+            crate::Error::protocol_violation("Missing BeginSeqNo")
+          })?
           .as_int()
           .ok_or_else(|| crate::Error::protocol_violation("Expected integer"))?
           as u32;
@@ -522,10 +531,14 @@ where
           .ok_or_else(|| crate::Error::protocol_violation("Expected integer"))?
           as u32;
         if end_seq_no > 0 && begin_seq_no > end_seq_no {
-          return Err(crate::Error::protocol_violation("Invalid ResendRequest"));
+          return Err(crate::Error::protocol_violation(
+            "Invalid ResendRequest",
+          ));
         }
         if self.replay.is_some() {
-          return Err(crate::Error::protocol_violation("ResendRequest while a resend is already in progress"));
+          return Err(crate::Error::protocol_violation(
+            "ResendRequest while a resend is already in progress",
+          ));
         }
         self.replay = Some(Replay {
           begin_seq_no,
@@ -619,17 +632,19 @@ where
     // should just abort at this point)
     //
 
-    let replay = self
-      .replay
-      .as_mut()
-      .ok_or_else(|| crate::Error::protocol_violation("No replay in progress"))?;
+    let replay = self.replay.as_mut().ok_or_else(|| {
+      crate::Error::protocol_violation("No replay in progress")
+    })?;
     let msg_seq_num = message
       .header
       .tag(crate::schema::FIX_Latest::Fields::MsgSeqNum)
-      .ok_or_else(|| crate::Error::protocol_violation("No MsgSeqNum in replay message"))?
+      .ok_or_else(|| {
+        crate::Error::protocol_violation("No MsgSeqNum in replay message")
+      })?
       .as_int()
-      .ok_or_else(|| crate::Error::protocol_violation("MsgSeqNum is not an integer"))?
-      as u32;
+      .ok_or_else(|| {
+        crate::Error::protocol_violation("MsgSeqNum is not an integer")
+      })? as u32;
     if msg_seq_num < replay.next_expected_seq_num {
       // Already processed
       return Ok(());
@@ -647,10 +662,9 @@ where
     }
 
     // re-acquire our ref to the replay after send_gap_fill borrowed self
-    let replay = self
-      .replay
-      .as_mut()
-      .ok_or_else(|| crate::Error::protocol_violation("No replay in progress"))?;
+    let replay = self.replay.as_mut().ok_or_else(|| {
+      crate::Error::protocol_violation("No replay in progress")
+    })?;
     replay.gap_fill_count = 0;
     // Send the message as a PossDup
     use crate::schema::FIX_Latest::Fields;
@@ -675,10 +689,9 @@ where
   }
 
   async fn complete_replay(&mut self) -> crate::Result<()> {
-    let replay = self
-      .replay
-      .as_mut()
-      .ok_or_else(|| crate::Error::protocol_violation("No replay in progress"))?;
+    let replay = self.replay.as_mut().ok_or_else(|| {
+      crate::Error::protocol_violation("No replay in progress")
+    })?;
     replay.gap_fill_count +=
       replay.end_seq_no + 1 - replay.next_expected_seq_num;
     if replay.gap_fill_count > 0 {
