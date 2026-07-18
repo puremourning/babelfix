@@ -11,9 +11,9 @@ categories = ["network-programming"]
 keywords = ["fix-protocol", "financial", "fix", "trading"]
 
 [dependencies]
-anyhow.workspace = true
 futures.workspace = true
 async-stream.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 babelfix-repo.workspace = true
 babelfix-repogen.workspace = true
@@ -24,6 +24,7 @@ chrono.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+anyhow.workspace = true
 
 [[bench]]
 name = "message_benchmarks"

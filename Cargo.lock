@@ -87,6 +87,7 @@ dependencies = [
  "chrono",
  "criterion",
  "futures",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -96,7 +97,6 @@ dependencies = [
 name = "babelfix-repo"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "include_dir",
  "proc-macro2",
  "quick-xml",

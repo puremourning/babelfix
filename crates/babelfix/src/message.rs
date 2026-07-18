@@ -272,20 +272,20 @@ pub fn peek_infer_version(
   repo: &repository::FixRepository,
   s: &[u8],
   delimiter: u8,
-) -> anyhow::Result<Option<Arc<repository::FixVersion>>> {
+) -> crate::Result<Option<Arc<repository::FixVersion>>> {
   let first_tag = s
     .iter()
     .position(|c| *c == delimiter)
-    .ok_or_else(|| anyhow::anyhow!("No delimiter found"))?;
+    .ok_or_else(|| crate::Error::invalid_message("No delimiter found"))?;
   let first_tag = std::str::from_utf8(&s[..first_tag])
-    .map_err(|_| anyhow::anyhow!("Invalid BeginString value"))?;
+    .map_err(|_| crate::Error::invalid_message("Invalid BeginString value"))?;
 
   let (tag, begin_string) = first_tag
     .split_once('=')
-    .ok_or_else(|| anyhow::anyhow!("Invalid tag format"))?;
+    .ok_or_else(|| crate::Error::invalid_message("Invalid tag format"))?;
 
   if tag != "8" {
-    anyhow::bail!("Expected BeginString tag (8), found {}", tag)
+    return Err(crate::Error::invalid_message(format!("Expected BeginString tag (8), found {}", tag)));
   }
 
   Ok(
@@ -301,22 +301,22 @@ pub fn peek_infer_version_and_length(
   repo: &repository::FixRepository,
   s: &[u8],
   delimiter: u8,
-) -> anyhow::Result<(Option<Arc<repository::FixVersion>>, Option<usize>, usize)>
+) -> crate::Result<(Option<Arc<repository::FixVersion>>, Option<usize>, usize)>
 {
   let Some(first_tag_delim) = s.iter().position(|c| *c == delimiter) else {
     return Ok((None, None, 0));
   };
 
   let first_tag = std::str::from_utf8(&s[..first_tag_delim])
-    .map_err(|_| anyhow::anyhow!("Invalid BeginString value"))?;
+    .map_err(|_| crate::Error::invalid_message("Invalid BeginString value"))?;
 
   let delimiter = delimiter as char;
   let (tag, begin_string) = first_tag.split_once('=').ok_or_else(|| {
-    anyhow::anyhow!("Invalid BeginString tag format in {}", first_tag)
+    crate::Error::invalid_message(format!("Invalid BeginString tag format in {}", first_tag))
   })?;
 
   if tag != "8" {
-    anyhow::bail!("Expected BeginString tag (8), found {}", tag)
+    return Err(crate::Error::invalid_message(format!("Expected BeginString tag (8), found {}", tag)));
   }
 
   let fix_version = repo
@@ -324,7 +324,7 @@ pub fn peek_infer_version_and_length(
     .values()
     .find(|v| v.begin_string == begin_string)
     .cloned()
-    .ok_or(anyhow::anyhow!("Unknown FIX version"))?;
+    .ok_or_else(|| crate::Error::invalid_message("Unknown FIX version"))?;
 
   let Some(second_tag_delim) = s[first_tag_delim + 1..]
     .iter()
@@ -336,19 +336,19 @@ pub fn peek_infer_version_and_length(
   let second_tag = std::str::from_utf8(
     &s[first_tag_delim + 1..first_tag_delim + 1 + second_tag_delim],
   )
-  .map_err(|_| anyhow::anyhow!("Invalid BodyLength encoding"))?;
+  .map_err(|_| crate::Error::invalid_message("Invalid BodyLength encoding"))?;
 
   let (tag, body_length) = second_tag
     .split_once('=')
-    .ok_or_else(|| anyhow::anyhow!("Invalid BodyLength tag format"))?;
+    .ok_or_else(|| crate::Error::invalid_message("Invalid BodyLength tag format"))?;
 
   if tag != "9" {
-    anyhow::bail!("Expected BodyLength tag (9), found {}", tag)
+    return Err(crate::Error::invalid_message(format!("Expected BodyLength tag (9), found {}", tag)));
   }
 
   let body_length = body_length
     .parse::<usize>()
-    .map_err(|_| anyhow::anyhow!("Invalid BodyLength value"))?;
+    .map_err(|_| crate::Error::invalid_message("Invalid BodyLength value"))?;
 
   Ok((
     Some(fix_version),
@@ -361,25 +361,25 @@ pub fn peek_checksum(
   _repo: &repository::FixRepository,
   s: &[u8],
   delimiter: u8,
-) -> anyhow::Result<(Option<u8>, usize)> {
+) -> crate::Result<(Option<u8>, usize)> {
   let Some(first_tag_delim) = s.iter().position(|c| *c == delimiter) else {
     return Ok((None, 0));
   };
 
   let first_tag = std::str::from_utf8(&s[..first_tag_delim])
-    .map_err(|_| anyhow::anyhow!("Invalid Checksum value"))?;
+    .map_err(|_| crate::Error::invalid_message("Invalid Checksum value"))?;
 
   let (tag, checksum) = first_tag.split_once('=').ok_or_else(|| {
-    anyhow::anyhow!("Invalid Checksum tag format in {}", first_tag)
+    crate::Error::invalid_message(format!("Invalid Checksum tag format in {}", first_tag))
   })?;
 
   if tag != "10" {
-    anyhow::bail!("Expected Checksum tag (8), found {}", tag)
+    return Err(crate::Error::invalid_message(format!("Expected Checksum tag (8), found {}", tag)));
   }
 
   let checksum = checksum
     .parse::<u8>()
-    .map_err(|_| anyhow::anyhow!("Invalid Checksum value"))?;
+    .map_err(|_| crate::Error::invalid_message("Invalid Checksum value"))?;
 
   Ok((Some(checksum), first_tag_delim + 1))
 }
@@ -416,7 +416,7 @@ impl FixMessage {
   pub fn from_bytes(
     fix: Arc<repository::FixVersion>,
     data: Bytes,
-  ) -> Result<(Self, usize), anyhow::Error> {
+  ) -> Result<(Self, usize), crate::Error> {
     Self::from_bytes_delimited(fix, data, b'\x01')
   }
 
@@ -425,7 +425,7 @@ impl FixMessage {
     fix: Arc<repository::FixVersion>,
     data: Bytes,
     delimiter: u8,
-  ) -> Result<(Self, usize), anyhow::Error> {
+  ) -> Result<(Self, usize), crate::Error> {
     let mut msg = FixMessage {
       fix_version: fix,
       data: data.clone(),
@@ -448,16 +448,16 @@ impl FixMessage {
 
       if tag == 0 && c == b'=' {
         if i < tag_start {
-          return Err(anyhow::anyhow!("Invalid tag"));
+          return Err(crate::Error::invalid_message("Invalid tag"));
         }
         tag = std::str::from_utf8(&data[tag_start..i - 1])
           .unwrap()
           .parse::<u32>()
           .map_err(|_| {
-            anyhow::anyhow!(
+            crate::Error::invalid_message(format!(
               "Invalid message: Unable to parse a tag number from {}",
               String::from_utf8_lossy(&data[tag_start..i - 1])
-            )
+            ))
           })?;
         tag_start = i;
 
@@ -478,7 +478,7 @@ impl FixMessage {
         }
       } else if c == delimiter {
         if tag == 0 {
-          return Err(anyhow::anyhow!("Missing tag"));
+          return Err(crate::Error::invalid_message("Missing tag"));
         }
         msg.tags.push((
           tag,
@@ -490,11 +490,11 @@ impl FixMessage {
 
         if tag == 8 {
           if msg.get_being_string() != msg.fix_version.begin_string {
-            return Err(anyhow::anyhow!(
+            return Err(crate::Error::invalid_message(format!(
               "Invalid FIX version: expected {}, got {}",
-              &msg.fix_version.begin_string,
+              msg.fix_version.begin_string,
               msg.get_being_string()
-            ));
+            )));
           }
         } else if tag == 10 {
           // end of the message
@@ -508,10 +508,10 @@ impl FixMessage {
               .unwrap()
               .parse::<usize>()
               .map_err(|_| {
-                anyhow::anyhow!(
+                crate::Error::invalid_message(format!(
                   "Invalid message: Unable to parse a data length from {}",
                   String::from_utf8_lossy(&data[tag_start..i - 1])
-                )
+                ))
               })?;
             raw_data_len = len;
           }
@@ -614,7 +614,7 @@ impl FixMessage {
     &self,
     out: &mut bytes::BytesMut,
     delimiter: u8,
-  ) -> anyhow::Result<()> {
+  ) -> crate::Result<()> {
     use std::fmt::Write;
 
     use bytes::BufMut;
@@ -909,11 +909,11 @@ pub mod builder {
     pub fn new(
       repo: Arc<repository::FixVersion>,
       msg_type: &str,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::Result<Self> {
       let mut s = Self {
         fix_message: repo
           .get_message(msg_type)
-          .ok_or(anyhow::anyhow!("Invalid message type"))?,
+          .ok_or_else(|| crate::Error::invalid_message("Invalid message type"))?,
         fix_version: repo,
         body: Block::default(),
         header: Block::default(),
@@ -927,7 +927,7 @@ pub mod builder {
     pub fn from_bytes(
       fix: Arc<repository::FixVersion>,
       s: &[u8],
-    ) -> Result<Self, anyhow::Error> {
+    ) -> Result<Self, crate::Error> {
       let (msg, _) =
         FixMessage::from_bytes(fix.clone(), Bytes::copy_from_slice(s))?;
       Self::from_message(&msg)
@@ -938,7 +938,7 @@ pub mod builder {
       fix: Arc<repository::FixVersion>,
       s: &[u8],
       delimiter: u8,
-    ) -> Result<Self, anyhow::Error> {
+    ) -> Result<Self, crate::Error> {
       let (msg, _) = FixMessage::from_bytes_delimited(
         fix.clone(),
         Bytes::copy_from_slice(s),
@@ -947,7 +947,7 @@ pub mod builder {
       Self::from_message(&msg)
     }
 
-    pub fn from_message(msg: &FixMessage) -> Result<Self, anyhow::Error> {
+    pub fn from_message(msg: &FixMessage) -> Result<Self, crate::Error> {
       fn parse_typed_value(
         fix: &repository::FixVersion,
         tag: u32,
@@ -997,7 +997,7 @@ pub mod builder {
         msg: &FixMessage,
         begin: usize,
         elements: &mut Block,
-      ) -> Result<usize, anyhow::Error> /* consumed */ {
+      ) -> Result<usize, crate::Error> /* consumed */ {
         let mut i = 0;
         while begin + i < msg.tags.len() {
           let (tag, val) = &msg.tags[begin + i];
@@ -1034,11 +1034,11 @@ pub mod builder {
                 let group = fix
                   .get_group_by_num_in_group_tag(fixmessage, field.id)
                   .ok_or_else(|| {
-                    anyhow::anyhow!(
+                    crate::Error::invalid_message(format!(
                       "Invalid group {} in message {}",
                       field.id,
                       fixmessage.name
-                    )
+                    ))
                   })?;
 
                 let num_entries: u32 = val.parse(&msg.data)?;
@@ -1071,8 +1071,8 @@ pub mod builder {
                   ));
                   i += 1;
                 } else {
-                  return Err(anyhow::anyhow!(
-                    "Invalid length tag: No data tag"
+                  return Err(crate::Error::invalid_message(
+                    "Invalid length tag: No data tag",
                   ));
                 }
               }
@@ -1120,10 +1120,10 @@ pub mod builder {
       Ok(message)
     }
 
-    pub fn as_message(&self) -> Result<FixMessage, anyhow::Error> {
+    pub fn as_message(&self) -> Result<FixMessage, crate::Error> {
       let mut msg = FixMessage::new(self.fix_version.clone());
 
-      fn flatten(elements: &Block, msg: &mut FixMessage) -> anyhow::Result<()> {
+      fn flatten(elements: &Block, msg: &mut FixMessage) -> crate::Result<()> {
         for element in &elements.0 {
           match element {
             Element::Tag((tag, val)) => {
@@ -1158,10 +1158,10 @@ pub mod builder {
       Ok(msg)
     }
 
-    pub fn into_message(self) -> Result<FixMessage, anyhow::Error> {
+    pub fn into_message(self) -> Result<FixMessage, crate::Error> {
       let mut msg = FixMessage::new(self.fix_version.clone());
 
-      fn flatten(elements: Block, msg: &mut FixMessage) -> anyhow::Result<()> {
+      fn flatten(elements: Block, msg: &mut FixMessage) -> crate::Result<()> {
         for element in elements.0 {
           if !element.is_set() {
             continue;
@@ -1256,9 +1256,9 @@ pub mod builder {
       &mut self,
       tag: u32,
       value: T,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
       if self.has_tag(tag) {
-        return Err(anyhow::anyhow!("Tag {} already exists in block", tag));
+        return Err(crate::Error::invalid_message(format!("Tag {} already exists in block", tag)));
       }
       self.push(Element::Tag((tag, value.into())));
       Ok(())
@@ -1372,7 +1372,7 @@ pub mod builder {
     ///
     /// This enables reliable message diffing by ensuring consistent ordering
     /// regardless of the original message's tag sequence.
-    pub fn normalize(&self) -> anyhow::Result<Message> {
+    pub fn normalize(&self) -> crate::Result<Message> {
       let mut normalized = Message {
         fix_message: self.fix_message.clone(),
         fix_version: self.fix_version.clone(),
@@ -1385,10 +1385,10 @@ pub mod builder {
         .fix_version
         .get_component_by_name("StandardHeader")
         .ok_or_else(|| {
-          anyhow::anyhow!(
+          crate::Error::invalid_message(format!(
             "FIX version {} does not define StandardHeader component",
             self.fix_version.begin_string
-          )
+          ))
         })?;
 
       normalized.header = self
@@ -1407,7 +1407,7 @@ pub mod builder {
       &self,
       block: &Block,
       definition: &T,
-    ) -> anyhow::Result<Block> {
+    ) -> crate::Result<Block> {
       use std::collections::HashMap;
 
       let mut normalized = Block::new();
@@ -1463,10 +1463,10 @@ pub mod builder {
               .fix_version
               .get_group_by_num_in_group_tag(definition, num_in_group_tag)
               .ok_or_else(|| {
-                anyhow::anyhow!(
+                crate::Error::invalid_message(format!(
                   "Group definition not found for NumInGroup tag {}",
                   num_in_group_tag
-                )
+                ))
               })?;
 
             // Normalize each group entry using the group definition
@@ -1889,7 +1889,7 @@ mod tests {
     let Err(s) = peek_infer_version_and_length(&repo, data, b'|') else {
       panic!("Should have failed")
     };
-    assert_eq!(s.to_string().as_str(), "Unknown FIX version");
+    assert_eq!(s.to_string().as_str(), "Invalid message: Unknown FIX version");
 
     Ok(())
   }

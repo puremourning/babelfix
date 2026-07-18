@@ -10,7 +10,7 @@ use tracing::error;
 
 pub async fn wrap_and_bail<F, T>(future: F) -> T
 where
-  F: Future<Output = Result<T, anyhow::Error>> + Send + 'static,
+  F: Future<Output = Result<T, crate::Error>> + Send + 'static,
 {
   match future.await {
     Ok(result) => result,
@@ -24,7 +24,7 @@ where
 
 pub async fn wrap_and_report<F, T>(future: F) -> Option<T>
 where
-  F: Future<Output = Result<T, anyhow::Error>> + Send + 'static,
+  F: Future<Output = Result<T, crate::Error>> + Send + 'static,
 {
   match future.await {
     Ok(result) => Some(result),

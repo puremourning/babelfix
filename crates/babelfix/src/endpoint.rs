@@ -94,12 +94,12 @@ struct FixDecoder {
 
 impl tokio_util::codec::Decoder for FixDecoder {
   type Item = crate::message::FixMessage;
-  type Error = anyhow::Error;
+  type Error = Error;
 
   fn decode(
     &mut self,
     data: &mut bytes::BytesMut,
-  ) -> Result<Option<Self::Item>, Self::Error> {
+  ) -> std::result::Result<Option<Self::Item>, Self::Error> {
     // FIXME: PIGGY PIGGY PIGGY PORKER SO MANY UNNECESSARY PARSES IN THE CASE OF
     // FRAGMENT
     //  We can store the begin_string_len and body_len after parsing and skip
@@ -150,9 +150,9 @@ impl tokio_util::codec::Decoder for FixDecoder {
     }
 
     if checksum != calc_checksum {
-      anyhow::bail!(
-        "Invalid checksum; expected {calc_checksum} but got {checksum}"
-      );
+      return Err(Error::invalid_message(format!(
+        "Invalid checksum; expected {calc_checksum} but got {checksum}",
+      )));
     }
 
     // Convert BytesMut to Bytes (zero-copy)
@@ -161,11 +161,12 @@ impl tokio_util::codec::Decoder for FixDecoder {
       fix_version.clone(),
       bytes,
       self.delimiter.unwrap_or(b'\x01'),
-    )
-    .map_err(|e| anyhow::anyhow!("Invalid message data: {}", e))?;
+    )?;
 
     if consumed != begin_string_len + msg_len + checksum_len {
-      anyhow::bail!("Consumed length does not match expected length");
+      return Err(Error::invalid_message(
+        "Consumed length does not match expected length",
+      ));
     }
 
     debug!("Decoded FIX message: {:?}", fix_msg);
@@ -178,16 +179,14 @@ struct FixEncoder {
 }
 
 impl tokio_util::codec::Encoder<crate::message::FixMessage> for FixEncoder {
-  type Error = anyhow::Error;
+  type Error = Error;
 
   fn encode(
     &mut self,
     item: crate::message::FixMessage,
     dst: &mut bytes::BytesMut,
-  ) -> Result<(), Self::Error> {
-    item
-      .write_to(dst, self.delimiter.unwrap_or(b'\x01'))
-      .map_err(|e| anyhow::anyhow!("Failed to encode message: {}", e))?;
+  ) -> std::result::Result<(), Self::Error> {
+    item.write_to(dst, self.delimiter.unwrap_or(b'\x01'))?;
 
     debug!("Encoded FIX message: {:?}", dst);
     Ok(())
@@ -202,7 +201,7 @@ pub async fn connect(
   session_id: session::SessionIdentifier,
   session: session::Session,
   mut cancellation_token: futures::channel::oneshot::Receiver<()>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
   for (host, port) in endpoints.iter().cycle() {
     for backoff in [10, 100, 1000, 5000, 5000] {
       info!("Connecting to {}:{}", host, port);
@@ -241,16 +240,16 @@ pub async fn connect(
     }
   }
 
-  Err(anyhow::anyhow!(
+  Err(Error::connection_failed(format!(
     "Failed to connect to any endpoint: {:?}",
     endpoints
-  ))
+  )))
 }
 
 fn make_logon_message(
   fix_version: &Arc<crate::repository::FixVersion>,
   session: &session::Session,
-) -> anyhow::Result<crate::message::builder::Message> {
+) -> Result<crate::message::builder::Message> {
   let mut logon_msg =
     crate::message::builder::Message::new(fix_version.clone(), "A")?;
 
@@ -281,7 +280,7 @@ async fn initiate_connection(
   delimiter: Option<u8>,
   session_id: session::SessionIdentifier,
   mut session: session::Session,
-) -> anyhow::Result<()> {
+) -> Result<()> {
   let peer_addr = stream
     .peer_addr()
     .map_or("Unknown".to_string(), |addr| addr.to_string());
@@ -326,24 +325,24 @@ async fn initiate_connection(
     // First message has to be a logon
     let logon_fix_msg = tokio::select! {
       _ = connect_timer.tick() => {
-        anyhow::bail!("Connection timed out after 30 seconds");
+        return Err(Error::connection_failed("Connection timed out after 30 seconds"));
       },
       msg_event = rx.next() => {
         match msg_event {
           Some(Ok(msg)) => msg,
           Some(Err(e)) => {
-            anyhow::bail!("Failed to read first message: {e}");
+            return Err(Error::connection_failed(format!("Failed to read first message: {e}")));
           }
           None => {
             event_sender.send(EndpointEvent::SessionInvalid(
               peer_addr
             )).await?;
-            anyhow::bail!("Connection closed before first message");
+            return Err(Error::connection_failed("Connection closed before first message"));
           }
         }
       },
       else => {
-        anyhow::bail!("First mesasge was not a logon, or invalid data received")
+        return Err(Error::protocol_violation("First mesasge was not a logon, or invalid data received"));
       }
     };
 
@@ -378,7 +377,10 @@ async fn initiate_connection(
     };
 
     if logon_msg.fix_message.msg_type.as_str() != "A" {
-      anyhow::bail!("First message was not a logon, got: {:?}", logon_msg);
+      return Err(Error::protocol_violation(format!(
+        "First message was not a logon, got: {:?}",
+        logon_msg
+      )));
     }
 
     let mut session_manager = session::SessionManager::new(
@@ -415,7 +417,7 @@ async fn accept_connection(
   mut event_sender: mpsc::Sender<EndpointEvent>,
   repo: Arc<crate::repository::FixRepository>,
   delimiter: Option<u8>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
   info!("Handling new client connection");
   let partner = stream
     .peer_addr()
@@ -445,22 +447,22 @@ async fn accept_connection(
   // First message has to be a logon
   let logon_fix_msg = tokio::select! {
     _ = connect_timer.tick() => {
-      anyhow::bail!("Connection timed out after 30 seconds");
+      return Err(Error::connection_failed("Connection timed out after 30 seconds"));
     },
     msg_event = rx.next() => {
       match msg_event {
         Some(Ok(msg)) => msg,
         Some(Err(e)) => {
-          anyhow::bail!("Failed to read first message: {e}");
+          return Err(Error::connection_failed(format!("Failed to read first message: {e}")));
         }
         None => {
           event_sender.send(EndpointEvent::SessionInvalid(partner)).await?;
-          anyhow::bail!("Connection closed before first message");
+          return Err(Error::connection_failed("Connection closed before first message"));
         }
       }
     },
     else => {
-      anyhow::bail!("First mesasge was not a logon, or invalid data received")
+      return Err(Error::protocol_violation("First mesasge was not a logon, or invalid data received"));
     }
   };
 
@@ -481,17 +483,17 @@ async fn accept_connection(
     begin_string: logon_msg
       .header
       .tag(crate::schema::FIX_Latest::Fields::BeginString)
-      .ok_or(anyhow::anyhow!("Logon message missing BeginString"))?
+      .ok_or_else(|| Error::protocol_violation("Logon message missing BeginString"))?
       .as_string(),
     sender_comp_id: logon_msg
       .header
       .tag(crate::schema::FIX_Latest::Fields::TargetCompID)
-      .ok_or(anyhow::anyhow!("Logon message missing TargetCompID"))?
+      .ok_or_else(|| Error::protocol_violation("Logon message missing TargetCompID"))?
       .as_string(),
     target_comp_id: logon_msg
       .header
       .tag(crate::schema::FIX_Latest::Fields::SenderCompID)
-      .ok_or(anyhow::anyhow!("Logon message missing SenderCompID"))?
+      .ok_or_else(|| Error::protocol_violation("Logon message missing SenderCompID"))?
       .as_string(),
   };
 
@@ -529,7 +531,10 @@ async fn accept_connection(
       .await?;
 
     if logon_msg.fix_message.msg_type.as_str() != "A" {
-      anyhow::bail!("First message was not a logon, got: {:?}", logon_msg);
+      return Err(Error::protocol_violation(format!(
+        "First message was not a logon, got: {:?}",
+        logon_msg
+      )));
     }
 
     session
@@ -562,7 +567,7 @@ pub async fn serve(
   host: Option<String>,
   repo: Arc<crate::repository::FixRepository>,
   delimieter: Option<u8>,
-) -> anyhow::Result<Endpoint> {
+) -> Result<Endpoint> {
   let (event_sender, event_receiver) = mpsc::channel::<EndpointEvent>(100);
   let (command_sender, mut command_receiver) =
     mpsc::channel::<EndpointCommand>(100);

@@ -14,7 +14,6 @@ description = "FIX repository and Orchestra XML parsing for the babelfix FIX pro
 proc-macro2.workspace = true
 syn.workspace = true
 quote.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 quick-xml = "0.37"
 include_dir = { version = "0.7", features = ["glob"] }
