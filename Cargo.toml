@@ -14,6 +14,16 @@ license = "MIT"
 authors = ["Ben Jackson <puremourning@gmail.com>"]
 repository = "https://github.com/puremourning/babelfix"
 
+# `cargo release` configuration. All three crates share one version and are
+# published together in dependency order (babelfix-repo -> babelfix-repogen ->
+# babelfix); the internal `version = "..."` pins in [workspace.dependencies] are
+# rewritten automatically on each bump. Only the umbrella crate is tagged, so a
+# release produces a single `v{version}` tag (see the per-crate `tag = false`).
+[workspace.metadata.release]
+shared-version = true
+tag-name = "v{{version}}"
+pre-release-commit-message = "Release v{{version}}"
+
 [workspace.dependencies]
 anyhow = "1.0"
 futures = "0.3"

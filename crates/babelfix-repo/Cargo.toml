@@ -10,6 +10,11 @@ authors.workspace = true
 repository.workspace = true
 description = "FIX repository and Orchestra XML parsing for the babelfix FIX protocol implementation"
 
+# Published by `cargo release` alongside the workspace, but the shared tag is
+# created once by the umbrella `babelfix` crate.
+[package.metadata.release]
+tag = false
+
 [dependencies]
 proc-macro2.workspace = true
 syn.workspace = true

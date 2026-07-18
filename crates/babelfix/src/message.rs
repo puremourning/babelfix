@@ -268,7 +268,13 @@ impl fmt::Debug for FixMessage {
   }
 }
 
-pub(crate) fn peek_infer_version_and_length(
+/// Peek at the start of a (possibly partial) FIX byte stream to infer the FIX
+/// version and the declared body length, without allocating or fully parsing.
+///
+/// Used by the framing codec to decide how many bytes make up the next message.
+/// Returns `(version, body_length, header_length)` where `version`/`body_length`
+/// are `None` if not enough bytes are available yet.
+pub fn peek_infer_version_and_length(
   repo: &repository::FixRepository,
   s: &[u8],
   delimiter: u8,
@@ -337,7 +343,11 @@ pub(crate) fn peek_infer_version_and_length(
   ))
 }
 
-pub(crate) fn peek_checksum(
+/// Peek at the trailing `CheckSum` (tag 10) field of a FIX message.
+///
+/// Returns `(checksum, field_length)`, with `checksum` being `None` if the
+/// terminating checksum field is not yet fully present in the buffer.
+pub fn peek_checksum(
   _repo: &repository::FixRepository,
   s: &[u8],
   delimiter: u8,

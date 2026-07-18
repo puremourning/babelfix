@@ -10,6 +10,11 @@ authors.workspace = true
 repository.workspace = true
 description = "Build-time code generation of static FIX schema definitions for the babelfix FIX protocol implementation"
 
+# Published by `cargo release` alongside the workspace, but the shared tag is
+# created once by the umbrella `babelfix` crate.
+[package.metadata.release]
+tag = false
+
 [build-dependencies]
 babelfix-repo.workspace = true
 quote.workspace = true
