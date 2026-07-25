@@ -60,7 +60,7 @@ use crate::repository::FieldBlock;
 pub enum EndpointEvent {
   NewSession {
     session_id: session::SessionIdentifier,
-    response: oneshot::Sender<session::Session>,
+    response: oneshot::Sender<Result<session::Session>>,
   },
   SessionInvalid(String), // Partner address{
   SessionConnected(session::SessionHandle),
@@ -73,16 +73,7 @@ pub enum EndpointCommand {
 pub struct Endpoint {
   pub events: mpsc::Receiver<EndpointEvent>,
   pub commands: mpsc::Sender<EndpointCommand>,
-}
-
-impl Drop for Endpoint {
-  fn drop(&mut self) {
-    // Send a last-ditch shutdown request and bail.
-    self
-      .commands
-      .try_send(EndpointCommand::Shutdown)
-      .unwrap_or(());
-  }
+  pub local_addr: std::net::SocketAddr,
 }
 
 #[derive(Default)]
@@ -503,14 +494,15 @@ async fn accept_connection(
       .as_string(),
   };
 
-  let (set_session, get_session) = oneshot::channel::<session::Session>();
+  let (set_session, get_session) =
+    oneshot::channel::<Result<session::Session>>();
   event_sender
     .send(EndpointEvent::NewSession {
       session_id: session_id.clone(),
       response: set_session,
     })
     .await?;
-  let mut session = get_session.await?;
+  let mut session = get_session.await??;
 
   session_event_sender
     .send(session::SessionEvent::RawMessageReceived(
@@ -578,10 +570,13 @@ pub async fn serve(
   let (command_sender, mut command_receiver) =
     mpsc::channel::<EndpointCommand>(100);
 
+  let listener =
+    tokio::net::TcpListener::bind((host.unwrap_or("0.0.0.0".into()), port))
+      .await?;
+
+  let local_addr = listener.local_addr()?;
+
   tokio::spawn(crate::util::wrap_and_bail(async move {
-    let listener =
-      tokio::net::TcpListener::bind((host.unwrap_or("0.0.0.0".into()), port))
-        .await?;
     loop {
       tokio::select! {
         maybe_command = command_receiver.next() => {
@@ -625,5 +620,6 @@ pub async fn serve(
   Ok(Endpoint {
     commands: command_sender,
     events: event_receiver,
+    local_addr,
   })
 }

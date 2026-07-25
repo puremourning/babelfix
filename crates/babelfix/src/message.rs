@@ -384,6 +384,7 @@ impl FixMessage {
   pub fn new(fix_version: Arc<repository::FixVersion>) -> Self {
     Self {
       fix_version,
+      tags: Vec::with_capacity(DEFAULT_MSG_CAPACITY),
       ..FixMessage::default()
     }
   }
@@ -430,8 +431,6 @@ impl FixMessage {
         data.len() / 10,
       )),
     };
-
-    msg.tags.reserve(data.len() / 10);
 
     let mut tag_start: usize = 0;
     let mut tag: u32 = 0;
@@ -1281,7 +1280,7 @@ pub mod builder {
     }
 
     pub fn into_message(self) -> Result<FixMessage, crate::Error> {
-      let mut msg = FixMessage::new(self.fix_version.clone());
+      let mut msg = FixMessage::new(self.fix_version);
 
       fn flatten(elements: Block, msg: &mut FixMessage) -> crate::Result<()> {
         for element in elements.0 {
@@ -1317,6 +1316,23 @@ pub mod builder {
       flatten(self.body, &mut msg)?;
 
       Ok(msg)
+    }
+
+    pub fn with_header_field(
+      mut self,
+      tag: u32,
+      value: impl Into<TypedValue>,
+    ) -> Self {
+      self.header.set_tag(tag, value);
+      self
+    }
+    pub fn with_body_field(
+      mut self,
+      tag: u32,
+      value: impl Into<TypedValue>,
+    ) -> Self {
+      self.body.set_tag(tag, value);
+      self
     }
   }
 

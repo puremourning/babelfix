@@ -56,12 +56,23 @@ pub struct SessionIdentifier {
   pub target_comp_id: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Session {
   pub next_out_seq_num: u32,
   pub next_in_seq_num: u32,
   pub heartbeat_interval: std::time::Duration,
   pub fix_version: Arc<crate::repository::FixVersion>,
+}
+
+impl std::fmt::Debug for Session {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("Session")
+      .field("next_out_seq_num", &self.next_out_seq_num)
+      .field("next_in_seq_num", &self.next_in_seq_num)
+      .field("heartbeat_interval", &self.heartbeat_interval)
+      .field("fix_version", &self.fix_version.name)
+      .finish()
+  }
 }
 
 impl Session {
@@ -152,7 +163,7 @@ pub enum SessionCommand {
   GetSessionState(oneshot::Sender<Session>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum SessionEvent {
   /// A connection has been established and logon message received from the

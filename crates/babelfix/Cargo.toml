@@ -26,6 +26,8 @@ chrono.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 anyhow.workspace = true
+googletest.workspace = true
+test-log.workspace = true
 
 [[bench]]
 name = "message_benchmarks"
