@@ -3,8 +3,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use googletest::matcher::Matcher;
-use googletest::{assert_that, expect_that, verify_that};
+use googletest::matcher::MatcherResult;
+use googletest::prelude::*;
 
 pub static FIX_REPO: std::sync::LazyLock<Arc<fix::repository::FixRepository>> =
   std::sync::LazyLock::new(|| Arc::new(fix::repository::orchestrate().unwrap()));
@@ -31,15 +31,17 @@ impl Session {
     expected: impl for<'a> Matcher<&'a fix::session::SessionEvent>,
     skipping: &[&dyn for<'a> Matcher<&'a fix::session::SessionEvent>],
   ) -> anyhow::Result<()> {
-    'outer: loop {
-      let timeout = tokio::time::sleep(std::time::Duration::from_secs(5));
-      let event = self.handle.events.recv();
+    let deadline =
+      std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let timeout = tokio::time::sleep_until(deadline.into());
+    tokio::pin!(timeout);
 
+    'outer: loop {
       tokio::select! {
-        _ = timeout => {
+        _ = &mut timeout => {
           anyhow::bail!("Timed out waiting for event");
         }
-        event = event => {
+        event = self.handle.events.recv() => {
           let event = match event {
             Ok(event) => event,
             Err(e) => {
@@ -48,8 +50,7 @@ impl Session {
           };
           self.events.push_back(event.clone());
           for skip in skipping {
-            if let googletest::matcher::MatcherResult::Match =
-              skip.matches(&event)
+            if let MatcherResult::Match = skip.matches(&event)
             {
               continue 'outer;
             }
@@ -96,14 +97,16 @@ impl Session {
     //   }
     // }
 
-    let timeout = tokio::time::sleep(std::time::Duration::from_secs(5));
-    let event = self.handle.events.recv();
+    let deadline =
+      std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let timeout = tokio::time::sleep_until(deadline.into());
+    tokio::pin!(timeout);
 
     tokio::select! {
-      _ = timeout => {
+      _ = &mut timeout => {
         anyhow::bail!("Timed out waiting for event");
       }
-      event = event => {
+      event = self.handle.events.recv() => {
         let event = match event {
           Ok(event) => event,
           Err(e) => {
