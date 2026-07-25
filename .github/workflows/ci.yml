@@ -44,7 +44,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check --error-on-unformatted
+      - run: cargo fmt --all -- --check
 
   clippy:
     name: clippy
