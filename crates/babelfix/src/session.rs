@@ -665,10 +665,12 @@ where
         }
         self.replay = Some(Replay {
           begin_seq_no,
+          // EndSeqNo of 0 means "everything since BeginSeqNo", which is
+          // everything we have sent so far.
           end_seq_no: if end_seq_no > 0 {
             end_seq_no
           } else {
-            self.session.next_out_seq_num - 1
+            self.session.next_out_seq_num.saturating_sub(1)
           },
           next_expected_seq_num: begin_seq_no,
           gap_fill_count: 0,
@@ -807,6 +809,11 @@ where
       })? as u32;
     if msg_seq_num < replay.next_expected_seq_num {
       // Already processed
+      return Ok(());
+    }
+    if msg_seq_num > replay.end_seq_no {
+      // Beyond what the peer asked for. Retransmitting it would put a sequence
+      // number on the wire that we are about to reuse for a new message.
       return Ok(());
     }
     replay.gap_fill_count += msg_seq_num - replay.next_expected_seq_num;

@@ -358,6 +358,113 @@ async fn inbound_gap_fill_advances_the_expected_sequence_number()
   Ok(())
 }
 
+/// An application that replays past the end of the requested range must not
+/// have those messages transmitted: their sequence numbers have not been
+/// consumed yet, and reusing them would put the same MsgSeqNum on the wire
+/// twice.
+#[test_log::test(tokio::test)]
+async fn replay_beyond_the_requested_range_is_not_transmitted()
+-> anyhow::Result<()> {
+  let (server_session_id, server, port) =
+    session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
+      .await?;
+
+  let mut peer =
+    RawPeer::connect_and_logon(port, fix44(), "CLIENT", "SERVER").await?;
+  session::wait_for_session(&server, &server_session_id).await?;
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .settle()
+    .await?;
+
+  peer
+    .send(
+      RawMessage::new("2")
+        .body(Fields::BeginSeqNo, "1")
+        .body(Fields::EndSeqNo, "2"),
+    )
+    .await?;
+
+  expect_events! {
+    { server(server_session_id) awaiting
+      << fix::session::SessionEvent::ResendRequest {
+        resend_request: anything(),
+        begin_seq_no: eq(&1),
+        end_seq_no: eq(&2),
+      }
+    };
+  };
+
+  // Only 1 and 2 were asked for; 3 has not been sent yet.
+  for seq_num in [1, 2, 3] {
+    server
+      .lock()
+      .await
+      .session(&server_session_id)
+      .unwrap()
+      .command(fix::session::SessionCommand::Replay(replayed(
+        "D", seq_num,
+      )?))
+      .await?;
+  }
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .command(fix::session::SessionCommand::ReplayComplete)
+    .await?;
+
+  for seq_num in ["1", "2"] {
+    let replayed = peer.recv().await?;
+    verify_that!(
+      &replayed,
+      all!(
+        message::tag(Fields::MsgType, eq("D")),
+        message::tag(Fields::MsgSeqNum, eq(seq_num)),
+        message::tag(Fields::PossDupFlag, eq("Y")),
+      )
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+  }
+
+  // Completing a resend re-confirms synchronisation, which consumes sequence
+  // number 3 — the one the out-of-range replay would have reused.
+  let test_request = peer.recv().await?;
+  verify_that!(
+    &test_request,
+    all!(
+      message::tag(Fields::MsgType, eq("1")),
+      message::tag(Fields::MsgSeqNum, eq("3")),
+    )
+  )
+  .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .command(fix::session::SessionCommand::Send(order("brand-new")?))
+    .await?;
+
+  let new_order = peer.recv().await?;
+  verify_that!(
+    &new_order,
+    all!(
+      message::tag(Fields::MsgSeqNum, eq("4")),
+      message::tag(Fields::ClOrdID, eq("brand-new")),
+      not(message::has_tag(Fields::PossDupFlag)),
+    )
+  )
+  .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+  Ok(())
+}
+
 /// Replay is only meaningful in response to a ResendRequest; outside one it is
 /// a programming error in the application and terminates the session rather
 /// than silently corrupting the outbound sequence.
