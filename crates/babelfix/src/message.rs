@@ -718,6 +718,8 @@ impl std::fmt::Display for FixMessage {
   }
 }
 
+// TODO: Add fix_msg! macro which can build a message from a series of
+// expressions
 pub mod builder {
   use super::*;
 

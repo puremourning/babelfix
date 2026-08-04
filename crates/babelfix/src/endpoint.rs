@@ -299,6 +299,10 @@ async fn initiate_connection(
     let (mut session_event_sender, session_event_recv) =
       mpsc::channel::<session::SessionEvent>(100);
 
+    session_event_sender
+      .send(session::SessionEvent::ConnectionEstablished)
+      .await?;
+
     session
       .send(
         make_logon_message(&session.fix_version, &session)?,
@@ -355,10 +359,6 @@ async fn initiate_connection(
 
     event_sender
       .send(EndpointEvent::SessionConnected(session_handle))
-      .await?;
-
-    session_event_sender
-      .send(session::SessionEvent::ConnectionEstablished)
       .await?;
 
     // Create a disconnecter to ensure we send a disconnect event when the

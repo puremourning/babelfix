@@ -26,11 +26,10 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
-  pub async fn expect_next(
+  pub async fn next_event(
     &mut self,
-    expected: impl for<'a> Matcher<&'a fix::session::SessionEvent>,
     skipping: &[&dyn for<'a> Matcher<&'a fix::session::SessionEvent>],
-  ) -> anyhow::Result<()> {
+  ) -> anyhow::Result<fix::session::SessionEvent> {
     let deadline =
       std::time::Instant::now() + std::time::Duration::from_secs(5);
     let timeout = tokio::time::sleep_until(deadline.into());
@@ -55,71 +54,12 @@ impl Session {
               continue 'outer;
             }
           }
-          expect_that!(&event, &expected);
-          return Ok(());
+          return Ok(event);
         }
         _ = self.cancellation_token.cancelled() => {
           anyhow::bail!("Cancelled waiting for event");
         }
       };
-    }
-  }
-
-  // TODO: we want
-  // - expect_next(event, skipping [...])
-  //   checks for an event matching event while skipping any that match the
-  //   list of skpps; equivalent to expect_in_order([event], skipping)
-  // = expect_in_order(events, skipping) -
-  //   checks for events matching the list of events in order, skipping any
-  //   that match the list of skips
-  // - expect_in_any_order(events, skipping) -
-  //   checks for events matching the list of events in any order, skipping
-  //   any that match the list of skips
-  //
-  // And we should probably adopt googletest-rust for its hamcrest-like
-  // matchers. But be careful it looks like it breaks a lot.
-  //
-  // matching is done either by a matcher fn(event, expected) -> bool
-  // and we have a template match for messages which requires any specified
-  // fields to match and ignores all others. then again, this quicky gets
-  // cmplex. i wonder if there is something like hamcrest for rust.
-  pub async fn expect_event(
-    &mut self,
-    expected: impl for<'a> Matcher<&'a fix::session::SessionEvent>,
-  ) -> anyhow::Result<()> {
-    // First check/consume buffered events?
-    // loop {
-    //   let Some(event) = self.events.pop_front() else {
-    //     break;
-    //   };
-    //   if event_matches(&event, &expected) {
-    //     return Ok(());
-    //   }
-    // }
-
-    let deadline =
-      std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let timeout = tokio::time::sleep_until(deadline.into());
-    tokio::pin!(timeout);
-
-    tokio::select! {
-      _ = &mut timeout => {
-        anyhow::bail!("Timed out waiting for event");
-      }
-      event = self.handle.events.recv() => {
-        let event = match event {
-          Ok(event) => event,
-          Err(e) => {
-            anyhow::bail!("Session event channel died: {e}");
-          }
-        };
-        assert_that!(&event, &expected);
-        self.events.push_back(event.clone());
-        Ok(())
-      }
-      _ = self.cancellation_token.cancelled() => {
-        anyhow::bail!("Cancelled waiting for event");
-      }
     }
   }
 }
@@ -310,9 +250,9 @@ impl Drop for Client {
 
 pub async fn establish(
   client_comp_id: impl Into<String>,
-  client_seq_no: Option<(u32, u32)>,
+  client_out_in: Option<(u32, u32)>,
   server_comp_id: impl Into<String>,
-  server_seq_no: Option<(u32, u32)>,
+  server_out_in: Option<(u32, u32)>,
   fix_version: Arc<fix::repository::FixVersion>,
 ) -> anyhow::Result<(
   (fix::session::SessionIdentifier, Client),
@@ -321,8 +261,8 @@ pub async fn establish(
   let client_comp_id = client_comp_id.into();
   let server_comp_id = server_comp_id.into();
 
-  let client_seq_no = client_seq_no.unwrap_or((1, 1));
-  let server_seq_no = server_seq_no.unwrap_or((1, 1));
+  let (client_out, client_in) = client_out_in.unwrap_or((1, 1));
+  let (server_out, server_in) = server_out_in.unwrap_or((1, 1));
 
   let server = Server::new(0).await?;
   let port = server.lock().await.local_addr.port();
@@ -344,8 +284,8 @@ pub async fn establish(
     server_session_id.clone(),
     fix::session::Session {
       fix_version: fix_version.clone(),
-      next_in_seq_num: server_seq_no.0,
-      next_out_seq_num: server_seq_no.1,
+      next_in_seq_num: server_in,
+      next_out_seq_num: server_out,
       heartbeat_interval: std::time::Duration::from_secs(30),
     },
   );
@@ -356,8 +296,8 @@ pub async fn establish(
     client_session_id.clone(),
     fix::session::Session {
       fix_version,
-      next_in_seq_num: client_seq_no.0,
-      next_out_seq_num: client_seq_no.1,
+      next_in_seq_num: client_in,
+      next_out_seq_num: client_out,
       heartbeat_interval: std::time::Duration::from_secs(30),
     },
   )

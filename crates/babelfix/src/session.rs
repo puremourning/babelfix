@@ -166,20 +166,15 @@ pub enum SessionCommand {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum SessionEvent {
-  /// A connection has been established and logon message received from the
-  /// remote party, but no recovery has been performed.
+  /// A connection has been established to the peer, but no logon exchange has
+  /// been performed yet.
   ConnectionEstablished,
 
-  // A recovery has been started, either due to a ResendRequest or a gap in
-  // sequence numbers.
-  //
-  // FIXME: Not actually used yet.
-  // RecoveryStarted,
+  /// Local recovery has completed - the remote has sent all messages missed on
+  /// the session. Note that this does not mean the remote has recevied, or even
+  /// requested, any missing messages from us.
+  RecoveryCompleted,
 
-  // A recovery has been completed, and the session is now ready to be used
-  //
-  // FIXME: Not actually used yet.
-  // RecoveryCompleted
   /// Occasionally emitted to indicate the current state of the session,
   /// including the next expected inbound and outbound sequence numbers.
   /// The state is also included in other events and should be persisted by
@@ -271,6 +266,8 @@ struct Replay {
 
   next_expected_seq_num: u32,
   gap_fill_count: u32,
+
+  queue: Vec<crate::message::builder::Message>,
 }
 
 pub(crate) struct SessionManager<'stream, E, D> {
@@ -280,7 +277,8 @@ pub(crate) struct SessionManager<'stream, E, D> {
   session: Session,
   session_event_sender: mpsc::Sender<SessionEvent>,
   session_msg_recv: mpsc::Receiver<SessionCommand>,
-  queued_messages: Vec<crate::message::builder::Message>,
+  rerequest_in_progress: Option<u32>, // seq num after which replay is complete
+  recovery_tr_id: Option<String>,
   replay: Option<Replay>,
 }
 
@@ -305,7 +303,8 @@ where
       session,
       session_event_sender,
       session_msg_recv,
-      queued_messages: Vec::new(),
+      rerequest_in_progress: None,
+      recovery_tr_id: None,
       replay: None,
     }
   }
@@ -317,6 +316,30 @@ where
     if !self.handle_session_message(logon_msg_in).await? {
       return Ok(());
     }
+
+    let tr_id = format!(
+      "HELO-{}",
+      chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or(chrono::Utc::now().timestamp_millis() * 1_000_000)
+    );
+    let mut test_request = crate::message::builder::Message::new(
+      self.session.fix_version.clone(),
+      "1",
+    )?;
+    test_request
+      .body
+      .set_tag(crate::schema::FIX_Latest::Fields::TestReqID, tr_id.clone());
+    self
+      .session
+      .send(
+        test_request,
+        &self.session_id,
+        &mut self.tx,
+        &mut self.session_event_sender,
+      )
+      .await?;
+    self.recovery_tr_id = Some(tr_id);
 
     let mut out_heartbeat_timer = tokio::time::interval_at(
       tokio::time::Instant::now() + self.session.heartbeat_interval,
@@ -336,12 +359,7 @@ where
             crate::message::builder::Message::new(
               self.session.fix_version.clone(),
               "0")?;
-          self.session.send(
-            heartbeat,
-            &self.session_id,
-            &mut self.tx,
-            &mut self.session_event_sender,
-            ).await?;
+          self.send(heartbeat).await?;
         },
         _ = in_heartbeat_timer.tick() => {
           missed_heartbeats += 1;
@@ -359,12 +377,7 @@ where
                 crate::schema::FIX_Latest::Fields::TestReqID,
                 format!("HB{}", chrono::Utc::now().timestamp_millis()),
               );
-              self.session.send(
-                test_request,
-                &self.session_id,
-                &mut self.tx,
-                &mut self.session_event_sender,
-                ).await?;
+              self.send(test_request).await?;
             }
             3.. => {
               error!("Missed third heartbeat, logging out");
@@ -376,12 +389,7 @@ where
                 crate::schema::FIX_Latest::Fields::Text,
                 "Heartbeat timeout",
               );
-              self.session.send(
-                logout,
-                &self.session_id,
-                &mut self.tx,
-                &mut self.session_event_sender,
-                ).await?;
+              self.send(logout).await?;
               break;
             }
             _ => { unreachable!() }
@@ -391,26 +399,8 @@ where
           out_heartbeat_timer.reset();
           if let Some(cmd) = cmd {
             match cmd {
-              SessionCommand::Send(mut msg) => {
-                if self.replay.is_some() {
-                  error!("Cannot send message while replay is in progress; use Resend");
-                  break;
-                }
-                msg
-                  .header
-                  .remove_tag(crate::schema::FIX_Latest::Fields::MsgSeqNum);
-                msg
-                  .header
-                  .remove_tag(crate::schema::FIX_Latest::Fields::PossDupFlag);
-
-                debug!("Sending message to session: {:?}", msg);
-                if let Err(e) = self.session.send(msg,
-                                                  &self.session_id,
-                                                  &mut self.tx,
-                                                  &mut self.session_event_sender).await {
-                  error!("Failed to send message: {e}");
-                  break;
-                }
+              SessionCommand::Send(msg) => {
+                self.send(msg).await?;
               }
               SessionCommand::Replay(msg) => {
                 self.replay(msg).await?;
@@ -482,42 +472,42 @@ where
         crate::Error::protocol_violation("MsgSeqNum is not an integer")
       })? as u32;
 
-    if msg_seq_num == self.session.next_in_seq_num {
-      if msg.fix_message.msg_type == "4" {
-        // gap fill
-        if msg
-          .body
-          .tag(crate::schema::FIX_Latest::Fields::GapFillFlag)
-          .ok_or_else(|| {
-            crate::Error::protocol_violation("Missing GapFillFlag")
-          })?
-          .as_string()
-          != "Y"
-        {
-          return Err(crate::Error::protocol_violation(
-            "Sequence reset message is garbage and not supported",
-          ));
-        }
-
-        let new_seq_num = msg
-          .body
-          .tag(crate::schema::FIX_Latest::Fields::NewSeqNo)
-          .ok_or_else(|| crate::Error::protocol_violation("Missing NewSeqNo"))?
-          .as_int()
-          .ok_or_else(|| crate::Error::protocol_violation("Expected integer"))?
-          as u32;
-        if new_seq_num <= self.session.next_in_seq_num {
-          return Err(crate::Error::protocol_violation(format!(
-            "Invalid NewSeqNo in GapFill; expected greater than {} but got {}",
-            self.session.next_in_seq_num, new_seq_num
-          )));
-        }
-        self.session.next_in_seq_num = new_seq_num;
-      } else {
-        self.session.next_in_seq_num += 1;
+    if msg.fix_message.msg_type == "4" {
+      // sequence reset
+      if msg
+        .body
+        .tag(crate::schema::FIX_Latest::Fields::GapFillFlag)
+        .ok_or_else(|| crate::Error::protocol_violation("Missing GapFillFlag"))?
+        .as_string()
+        != "Y"
+      {
+        return Err(crate::Error::protocol_violation(
+          "Sequence reset message is garbage and not supported",
+        ));
       }
+
+      let new_seq_num = msg
+        .body
+        .tag(crate::schema::FIX_Latest::Fields::NewSeqNo)
+        .ok_or_else(|| crate::Error::protocol_violation("Missing NewSeqNo"))?
+        .as_int()
+        .ok_or_else(|| crate::Error::protocol_violation("Expected integer"))?
+        as u32;
+      if new_seq_num <= self.session.next_in_seq_num {
+        return Err(crate::Error::protocol_violation(format!(
+          "Invalid NewSeqNo in GapFill; expected greater than {} but got {}",
+          self.session.next_in_seq_num, new_seq_num
+        )));
+      }
+      self.session.next_in_seq_num = new_seq_num;
+      info!(
+        "GapFill received, advancing next_in_seq_num to {}",
+        new_seq_num
+      );
+    } else if msg_seq_num == self.session.next_in_seq_num {
+      self.session.next_in_seq_num += 1;
     } else if msg_seq_num > self.session.next_in_seq_num {
-      if self.queued_messages.is_empty() {
+      if self.rerequest_in_progress.is_none() {
         // start resend request
         let mut rr =
           crate::message::builder::Message::new(msg.fix_version.clone(), "2")?;
@@ -525,8 +515,11 @@ where
           crate::schema::FIX_Latest::Fields::BeginSeqNo,
           self.session.next_in_seq_num,
         );
+        // open-ended request includes _this_ message, which we drop (along with
+        // all other messages > session.next_expected_seq_num)
         rr.body
-          .set_tag(crate::schema::FIX_Latest::Fields::EndSeqNo, "0");
+          .set_tag(crate::schema::FIX_Latest::Fields::EndSeqNo, 0);
+        self.rerequest_in_progress = Some(msg_seq_num);
         self
           .session
           .send(
@@ -537,11 +530,6 @@ where
           )
           .await?;
       }
-      debug!(
-        "Queueing out-of-order message {:?} with MsgSeqNum {}, next expected: {}",
-        msg, msg_seq_num, self.session.next_in_seq_num
-      );
-      self.queued_messages.push(msg);
       return Ok(true);
     } else if msg_seq_num < self.session.next_in_seq_num {
       // Invalid; send a logout message
@@ -567,35 +555,15 @@ where
       return Ok(false);
     }
 
+    if self
+      .rerequest_in_progress
+      .is_some_and(|replay_seq| self.session.next_in_seq_num >= replay_seq)
+    {
+      self.rerequest_in_progress = None;
+    }
+
     // TODO: Validate message matches session_id
     self.dispatch_message(msg).await?;
-
-    let drain = if let Some(first_queued) = self.queued_messages.first() {
-      let first_queued_seq_num = first_queued
-        .header
-        .tag(crate::schema::FIX_Latest::Fields::MsgSeqNum)
-        .ok_or_else(|| crate::Error::protocol_violation("Missing MsgSeqNum"))?
-        .as_int()
-        .ok_or_else(|| crate::Error::protocol_violation("Expected integer"))?
-        as u32;
-      debug!(
-        "First queued message has MsgSeqNum {}, next expected is {}",
-        first_queued_seq_num, self.session.next_in_seq_num
-      );
-
-      first_queued_seq_num <= self.session.next_in_seq_num
-    } else {
-      false
-    };
-
-    if drain {
-      let queued = std::mem::take(&mut self.queued_messages);
-      for msg in queued {
-        if !self.dispatch_message(msg).await? {
-          return Ok(false);
-        }
-      }
-    }
 
     Ok(true)
   }
@@ -613,7 +581,26 @@ where
         // we already mostly handled this
       }
       // Heartbeat
-      "0" => {}
+      "0" => {
+        if let Some(test_req_id) = msg
+          .body
+          .tag(crate::schema::FIX_Latest::Fields::TestReqID)
+          .map(|v| v.as_string())
+        {
+          if let Some(recovery_tr_id) = &self.recovery_tr_id {
+            if &test_req_id == recovery_tr_id {
+              debug!(
+                "Received heartbeat for recovery test request, session is now established"
+              );
+              self.recovery_tr_id = None;
+              self
+                .session_event_sender
+                .send(SessionEvent::RecoveryCompleted)
+                .await?;
+            }
+          }
+        }
+      }
       // TestRequest
       "1" => {
         let mut heartbeat =
@@ -628,15 +615,7 @@ where
             })?
             .as_string(),
         );
-        self
-          .session
-          .send(
-            heartbeat,
-            &self.session_id,
-            &mut self.tx,
-            &mut self.session_event_sender,
-          )
-          .await?;
+        self.send(heartbeat).await?;
       }
       // ResendRequest
       "2" => {
@@ -675,6 +654,7 @@ where
           },
           next_expected_seq_num: begin_seq_no,
           gap_fill_count: 0,
+          queue: Vec::new(),
         });
         self
           .session_event_sender
@@ -703,6 +683,9 @@ where
           )
           .await?;
         return Ok(false);
+      }
+      _ if msg.is_admin_message() => {
+        // Ignore other admin messages
       }
       &_ => {
         self
@@ -733,11 +716,39 @@ where
       .set_tag(crate::schema::FIX_Latest::Fields::MsgSeqNum, begin_seq_no);
     gap_fill
       .body
-      .set_tag(crate::schema::FIX_Latest::Fields::NewSeqNo, end_seq_no);
+      .set_tag(crate::schema::FIX_Latest::Fields::NewSeqNo, end_seq_no + 1);
     self
       .session
       .send(
         gap_fill,
+        &self.session_id,
+        &mut self.tx,
+        &mut self.session_event_sender,
+      )
+      .await
+  }
+
+  async fn send(
+    &mut self,
+    mut msg: crate::message::builder::Message,
+  ) -> crate::Result<()> {
+    if let Some(replay) = self.replay.as_mut() {
+      replay.queue.push(msg);
+      return Ok(());
+    }
+
+    msg
+      .header
+      .remove_tag(crate::schema::FIX_Latest::Fields::MsgSeqNum);
+    msg
+      .header
+      .remove_tag(crate::schema::FIX_Latest::Fields::PossDupFlag);
+
+    debug!("Sending message to session: {:?}", msg);
+    self
+      .session
+      .send(
+        msg,
         &self.session_id,
         &mut self.tx,
         &mut self.session_event_sender,
@@ -818,14 +829,43 @@ where
     let replay = self.replay.as_mut().ok_or_else(|| {
       crate::Error::protocol_violation("No replay in progress")
     })?;
-    replay.gap_fill_count +=
-      replay.end_seq_no + 1 - replay.next_expected_seq_num;
-    if replay.gap_fill_count > 0 {
+    let queue = std::mem::take(&mut replay.queue);
+    if (replay.next_expected_seq_num - replay.gap_fill_count)
+      <= replay.end_seq_no
+    {
       let begin_seq_no = replay.next_expected_seq_num - replay.gap_fill_count;
-      let end_seq_no = replay.next_expected_seq_num;
+      let end_seq_no = replay.end_seq_no;
       self.send_gap_fill(begin_seq_no, end_seq_no).await?;
     }
     self.replay = None;
+    for msg in queue {
+      self.send(msg).await?;
+    }
+
+    let tr_id = format!(
+      "HELO-{}",
+      chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or(chrono::Utc::now().timestamp_millis() * 1_000_000)
+    );
+    let mut test_request = crate::message::builder::Message::new(
+      self.session.fix_version.clone(),
+      "1",
+    )?;
+    test_request
+      .body
+      .set_tag(crate::schema::FIX_Latest::Fields::TestReqID, tr_id.clone());
+    self
+      .session
+      .send(
+        test_request,
+        &self.session_id,
+        &mut self.tx,
+        &mut self.session_event_sender,
+      )
+      .await?;
+    self.recovery_tr_id = Some(tr_id);
+
     Ok(())
   }
 }
