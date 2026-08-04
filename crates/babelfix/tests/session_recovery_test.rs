@@ -465,6 +465,128 @@ async fn replay_beyond_the_requested_range_is_not_transmitted()
   Ok(())
 }
 
+/// A ResendRequest arriving while we are ourselves recovering must still be
+/// serviced. It cannot simply be discarded and waited for again: a
+/// ResendRequest is a session layer message, so the peer will gap fill over it
+/// rather than retransmit it, and the request would be lost for good.
+#[test_log::test(tokio::test)]
+async fn resend_request_inside_a_gap_is_still_serviced() -> anyhow::Result<()> {
+  let (server_session_id, server, port) =
+    session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
+      .await?;
+
+  // Logging on at 5 leaves the acceptor expecting 1, so it is recovering.
+  let mut peer = RawPeer::connect(port, fix44(), "CLIENT", "SERVER")
+    .await?
+    .starting_at(5);
+  peer.logon(Duration::from_secs(30)).await?;
+
+  let ack = peer.recv().await?;
+  anyhow::ensure!(ack.get_type() == "A");
+  let our_resend_request = peer.recv().await?;
+  verify_that!(&our_resend_request, message::tag(Fields::MsgType, eq("2")))
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+  let test_request = peer.recv().await?;
+  anyhow::ensure!(test_request.get_type() == "1");
+
+  // The peer needs a resend too, and its request falls inside the gap the
+  // acceptor is still recovering.
+  peer
+    .send(
+      RawMessage::new("2")
+        .body(Fields::BeginSeqNo, "1")
+        .body(Fields::EndSeqNo, "0"),
+    )
+    .await?;
+
+  expect_events! {
+    { server(server_session_id) awaiting
+      << fix::session::SessionEvent::ResendRequest {
+        resend_request: anything(),
+        begin_seq_no: eq(&1),
+        end_seq_no: anything(),
+      }
+    };
+  };
+
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .command(fix::session::SessionCommand::ReplayComplete)
+    .await?;
+
+  let gap_fill = peer.recv().await?;
+  verify_that!(
+    &gap_fill,
+    all!(
+      message::tag(Fields::MsgType, eq("4")),
+      message::tag(Fields::MsgSeqNum, eq("1")),
+    )
+  )
+  .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+  Ok(())
+}
+
+/// Both peers resuming a session with unsent messages outstanding is the
+/// ordinary case after a disconnection: each asks the other for a resend, each
+/// answers, and both end up synchronised.
+#[test_log::test(tokio::test)]
+async fn mutual_recovery_completes_on_both_sides() -> anyhow::Result<()> {
+  let ((client_session_id, mut client), (server_session_id, server)) =
+    session::establish(
+      "CLIENT",
+      SessionOptions::at(5, 1),
+      "SERVER",
+      SessionOptions::at(5, 1),
+      fix44(),
+    )
+    .await?;
+
+  // Each side is told to resend, and each declines, gap filling the range.
+  expect_events! {
+    { client awaiting
+      << fix::session::SessionEvent::ResendRequest {
+        resend_request: anything(),
+        begin_seq_no: eq(&1),
+        end_seq_no: anything(),
+      }
+    };
+    { server(server_session_id) awaiting
+      << fix::session::SessionEvent::ResendRequest {
+        resend_request: anything(),
+        begin_seq_no: eq(&1),
+        end_seq_no: anything(),
+      }
+    };
+  };
+
+  client
+    .session
+    .command(fix::session::SessionCommand::ReplayComplete)
+    .await?;
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .command(fix::session::SessionCommand::ReplayComplete)
+    .await?;
+
+  client.session.settle().await?;
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .settle()
+    .await?;
+
+  Ok(())
+}
+
 /// A gap fill occupies a slot in the message stream like any other message, so
 /// it has to arrive in sequence. One that arrives too high must not be applied:
 /// doing so would skip over the messages between the expected sequence number

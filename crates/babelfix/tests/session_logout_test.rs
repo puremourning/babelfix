@@ -60,6 +60,67 @@ async fn unsolicited_logout_is_acknowledged_once_and_ends_the_session()
   Ok(())
 }
 
+/// A Logout that arrives while we are recovering must not be answered
+/// immediately: the messages still missing precede it, and acknowledging first
+/// would abandon them. Recovery runs to completion and only then is the Logout
+/// acknowledged.
+///
+/// It also cannot be discarded and waited for again — a Logout is a session
+/// layer message, so the peer gap fills over it rather than retransmitting it,
+/// and the request would be lost.
+#[test_log::test(tokio::test)]
+async fn logout_inside_a_gap_is_acknowledged_once_recovery_completes()
+-> anyhow::Result<()> {
+  let (server_session_id, server, port) =
+    session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
+      .await?;
+
+  // Logging on at 5 leaves the acceptor expecting 1, so it is recovering.
+  let mut peer = RawPeer::connect(port, fix44(), "CLIENT", "SERVER")
+    .await?
+    .starting_at(5);
+  peer.logon(Duration::from_secs(30)).await?;
+
+  let ack = peer.recv().await?;
+  anyhow::ensure!(ack.get_type() == "A");
+  let resend_request = peer.recv().await?;
+  verify_that!(&resend_request, message::tag(Fields::MsgType, eq("2")))
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+  let test_request = peer.recv().await?;
+  anyhow::ensure!(test_request.get_type() == "1");
+
+  // The Logout falls inside the gap.
+  peer
+    .send(RawMessage::new("5").body(Fields::Text, "shutting down"))
+    .await?;
+
+  // No acknowledgement yet: the acceptor is still missing messages 1 to 5.
+  peer.expect_silence(Duration::from_millis(200)).await?;
+
+  // Gap fill over 1 to 6, which is everything including the Logout itself.
+  peer
+    .send(
+      RawMessage::new("4")
+        .seq(1)
+        .body(Fields::GapFillFlag, "Y")
+        .body(Fields::NewSeqNo, "7"),
+    )
+    .await?;
+
+  let logout_ack = peer.recv().await?;
+  verify_that!(&logout_ack, message::tag(Fields::MsgType, eq("5")))
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+  peer.expect_closed().await?;
+
+  expect_events! {
+    { server(server_session_id) awaiting
+      << fix::session::SessionEvent::Disconnected };
+  };
+
+  Ok(())
+}
+
 /// Terminating a session sends a Logout before closing the transport layer, so
 /// the peer can distinguish an orderly shutdown from a network failure.
 #[test_log::test(tokio::test)]

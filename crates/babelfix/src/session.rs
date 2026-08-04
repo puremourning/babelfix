@@ -280,6 +280,9 @@ pub(crate) struct SessionManager<'stream, E, D> {
   rerequest_in_progress: Option<u32>, // seq num after which replay is complete
   recovery_tr_id: Option<String>,
   replay: Option<Replay>,
+  /// The peer sent a Logout that arrived inside a sequence gap. It is
+  /// acknowledged, and the session ended, once the gap has been recovered.
+  peer_logout_pending: bool,
 }
 
 impl<'stream, E, D> SessionManager<'stream, E, D>
@@ -306,6 +309,7 @@ where
       rerequest_in_progress: None,
       recovery_tr_id: None,
       replay: None,
+      peer_logout_pending: false,
     }
   }
 
@@ -548,7 +552,24 @@ where
             .await?;
         }
 
-        return Ok(true);
+        // ResendRequest and Logout are the exceptions to discarding. Neither
+        // is ever retransmitted — the peer gap fills over them instead — so
+        // discarding one loses it for good, and this is the only opportunity
+        // to act on it. Neither consumes the sequence number: the gap fill
+        // that eventually covers it will.
+        return match msg.fix_message.msg_type.as_str() {
+          // Service the retransmission the peer asked for. Our own request for
+          // the messages we are missing has already gone out above.
+          "2" => self.dispatch_message(msg).await,
+          // The messages still missing precede the Logout, so acknowledging it
+          // now would abandon them. Recover first, acknowledge afterwards.
+          "5" => {
+            info!("Logout received inside a gap; deferring acknowledgement");
+            self.peer_logout_pending = true;
+            Ok(true)
+          }
+          _ => Ok(true),
+        };
       }
       std::cmp::Ordering::Less => {
         // One of the two peers has lost session state and the connection is no
@@ -573,7 +594,19 @@ where
     // TODO: Validate message matches session_id
     // The dispatch result decides whether the session continues: an inbound
     // Logout ends it once acknowledged.
-    self.dispatch_message(msg).await
+    if !self.dispatch_message(msg).await? {
+      return Ok(false);
+    }
+
+    // The gap that deferred a Logout acknowledgement has now closed.
+    if self.peer_logout_pending && self.rerequest_in_progress.is_none() {
+      self
+        .send_logout("Logout message received. Closing session.")
+        .await?;
+      return Ok(false);
+    }
+
+    Ok(true)
   }
 
   /// Read `NewSeqNo` from an inbound SequenceReset(35=4).
