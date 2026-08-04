@@ -1,3 +1,14 @@
+//! Loopback harness for the session-layer integration tests.
+//!
+//! [`establish`] wires a real babelfix initiator to a real babelfix acceptor
+//! over an ephemeral loopback port and hands back a [`Client`] and a [`Server`],
+//! each exposing the session's [`fix::session::SessionEvent`] stream via
+//! [`Session::next_event`].
+//!
+//! Tests that need to be a *non-babelfix* counterparty — sending messages
+//! babelfix would never generate, or observing exactly what appears on the wire
+//! — use [`raw::RawPeer`] against a [`Server`] created by [`serve`].
+
 use super::fix;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -6,8 +17,67 @@ use tokio::sync::Mutex;
 use googletest::matcher::MatcherResult;
 use googletest::prelude::*;
 
+pub mod raw;
+
 pub static FIX_REPO: std::sync::LazyLock<Arc<fix::repository::FixRepository>> =
   std::sync::LazyLock::new(|| Arc::new(fix::repository::orchestrate().unwrap()));
+
+/// How long any single `expect`-style helper waits before giving up. Generous
+/// enough to absorb a loaded CI machine, short enough that a genuinely stuck
+/// session fails the test rather than the harness timeout.
+pub const EVENT_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(5);
+
+/// Starting state for one side of a session under test.
+///
+/// `Default` is a fresh session (both sequence numbers at 1) with a heartbeat
+/// interval long enough that no heartbeat fires during a test. Timing tests
+/// override `heartbeat_interval` with something in the low hundreds of
+/// milliseconds.
+#[derive(Debug, Clone)]
+pub struct SessionOptions {
+  pub next_out_seq_num: u32,
+  pub next_in_seq_num: u32,
+  pub heartbeat_interval: std::time::Duration,
+}
+
+impl Default for SessionOptions {
+  fn default() -> Self {
+    Self {
+      next_out_seq_num: 1,
+      next_in_seq_num: 1,
+      heartbeat_interval: std::time::Duration::from_secs(30),
+    }
+  }
+}
+
+impl SessionOptions {
+  /// Start mid-session, as if recovering persisted state.
+  pub fn at(next_out_seq_num: u32, next_in_seq_num: u32) -> Self {
+    Self {
+      next_out_seq_num,
+      next_in_seq_num,
+      ..Default::default()
+    }
+  }
+
+  pub fn heartbeat(mut self, interval: std::time::Duration) -> Self {
+    self.heartbeat_interval = interval;
+    self
+  }
+
+  fn into_session(
+    self,
+    fix_version: Arc<fix::repository::FixVersion>,
+  ) -> fix::session::Session {
+    fix::session::Session {
+      fix_version,
+      next_in_seq_num: self.next_in_seq_num,
+      next_out_seq_num: self.next_out_seq_num,
+      heartbeat_interval: self.heartbeat_interval,
+    }
+  }
+}
 
 pub struct Session {
   pub handle: fix::session::SessionHandle,
@@ -26,19 +96,24 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
+  /// Return the next event, discarding any that match one of `skipping`.
+  ///
+  /// Every event seen — skipped or not — is appended to `self.events`, so a
+  /// test can inspect the full history afterwards.
   pub async fn next_event(
     &mut self,
     skipping: &[&dyn for<'a> Matcher<&'a fix::session::SessionEvent>],
   ) -> anyhow::Result<fix::session::SessionEvent> {
-    let deadline =
-      std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + EVENT_TIMEOUT;
     let timeout = tokio::time::sleep_until(deadline.into());
     tokio::pin!(timeout);
 
     'outer: loop {
       tokio::select! {
         _ = &mut timeout => {
-          anyhow::bail!("Timed out waiting for event");
+          anyhow::bail!(
+            "Timed out waiting for event. Events seen so far: {:#?}",
+            self.events);
         }
         event = self.handle.events.recv() => {
           let event = match event {
@@ -62,6 +137,105 @@ impl Session {
       };
     }
   }
+
+  /// Consume events until one matches `matcher`, and return it.
+  ///
+  /// Use this only where the session genuinely has no defined ordering between
+  /// the event of interest and the events preceding it — for example when
+  /// waiting for a peer-driven event that races with locally generated
+  /// traffic. Prefer [`Session::next_event`] elsewhere: it asserts the order as
+  /// well as the content.
+  pub async fn next_event_matching(
+    &mut self,
+    matcher: &dyn for<'a> Matcher<&'a fix::session::SessionEvent>,
+  ) -> anyhow::Result<fix::session::SessionEvent> {
+    let deadline = std::time::Instant::now() + EVENT_TIMEOUT;
+    let timeout = tokio::time::sleep_until(deadline.into());
+    tokio::pin!(timeout);
+
+    loop {
+      tokio::select! {
+        _ = &mut timeout => {
+          anyhow::bail!(
+            "Timed out waiting for a matching event. Events seen so far: {:#?}",
+            self.events);
+        }
+        event = self.handle.events.recv() => {
+          let event = match event {
+            Ok(event) => event,
+            Err(e) => anyhow::bail!("Session event channel died: {e}"),
+          };
+          self.events.push_back(event.clone());
+          if let MatcherResult::Match = matcher.matches(&event) {
+            return Ok(event);
+          }
+        }
+        _ = self.cancellation_token.cancelled() => {
+          anyhow::bail!("Cancelled waiting for event");
+        }
+      };
+    }
+  }
+
+  /// Assert that no event matching `matcher` arrives within `window`.
+  ///
+  /// Non-matching events are consumed and recorded as usual, so this doubles as
+  /// a way to drain a quiet period.
+  pub async fn expect_no_event(
+    &mut self,
+    window: std::time::Duration,
+    matcher: &dyn for<'a> Matcher<&'a fix::session::SessionEvent>,
+  ) -> anyhow::Result<()> {
+    let timeout = tokio::time::sleep(window);
+    tokio::pin!(timeout);
+
+    loop {
+      tokio::select! {
+        _ = &mut timeout => return Ok(()),
+        event = self.handle.events.recv() => {
+          let Ok(event) = event else {
+            // The session ended; nothing further can arrive.
+            return Ok(());
+          };
+          self.events.push_back(event.clone());
+          if let MatcherResult::Match = matcher.matches(&event) {
+            anyhow::bail!("Unexpected event: {event:?}");
+          }
+        }
+        _ = self.cancellation_token.cancelled() => return Ok(()),
+      };
+    }
+  }
+
+  /// Consume events up to and including `RecoveryCompleted`.
+  ///
+  /// Every connection begins with a TestRequest/Heartbeat exchange that
+  /// confirms both peers are synchronised, so tests interested in what happens
+  /// *after* logon start by settling both sides.
+  pub async fn settle(&mut self) -> anyhow::Result<()> {
+    loop {
+      match self.next_event(&[]).await? {
+        fix::session::SessionEvent::RecoveryCompleted => return Ok(()),
+        fix::session::SessionEvent::Disconnected => {
+          anyhow::bail!(
+            "Session disconnected before recovery completed. Events: {:#?}",
+            self.events
+          );
+        }
+        _ => {}
+      }
+    }
+  }
+
+  /// Send a command to the session under test.
+  pub async fn command(
+    &mut self,
+    command: fix::session::SessionCommand,
+  ) -> anyhow::Result<()> {
+    use futures::SinkExt;
+    self.handle.tx.send(command).await?;
+    Ok(())
+  }
 }
 
 pub struct Server {
@@ -69,9 +243,12 @@ pub struct Server {
   configured_sessions:
     Vec<(fix::session::SessionIdentifier, fix::session::Session)>,
   live_sessions: Vec<Session>,
+  /// Peers rejected before a session could be identified, by peer address.
+  invalid_sessions: Vec<String>,
   sessions_cancel: tokio_util::sync::CancellationToken,
   pub local_addr: std::net::SocketAddr,
 }
+
 impl Server {
   pub fn push_session(
     &mut self,
@@ -89,6 +266,19 @@ impl Server {
       .live_sessions
       .iter_mut()
       .find(|session| session.handle.session_id == *session_id)
+  }
+
+  pub fn invalid_sessions(&self) -> &[String] {
+    &self.invalid_sessions
+  }
+
+  pub async fn shutdown(&mut self) -> anyhow::Result<()> {
+    use futures::SinkExt;
+    self
+      .commands
+      .send(fix::endpoint::EndpointCommand::Shutdown)
+      .await?;
+    Ok(())
   }
 
   pub async fn new(port: u16) -> anyhow::Result<Arc<Mutex<Self>>> {
@@ -110,6 +300,7 @@ impl Server {
       sessions_cancel: cancellation_token.clone(),
       configured_sessions: Vec::new(),
       live_sessions: Vec::new(),
+      invalid_sessions: Vec::new(),
       local_addr,
     }));
 
@@ -142,7 +333,9 @@ impl Server {
                         format!("No configured session for {:?}", session_id)));
                   response.send(session).unwrap();
                 }
-                babelfix::endpoint::EndpointEvent::SessionInvalid(_) => todo!(),
+                babelfix::endpoint::EndpointEvent::SessionInvalid(peer) => {
+                  server.lock().await.invalid_sessions.push(peer);
+                }
                 babelfix::endpoint::EndpointEvent::SessionConnected(session_handle) => {
                   let mut server = server.lock().await;
                   let state = server.configured_sessions.iter().find_map(|(id, session)| {
@@ -180,6 +373,7 @@ pub struct Client {
   cancellation_token: tokio_util::sync::CancellationToken,
   pub session: Session,
 }
+
 impl Client {
   pub async fn new(
     port: u16,
@@ -202,7 +396,7 @@ impl Client {
       client_cancellation_token,
     ));
 
-    let timeout = tokio::time::sleep(std::time::Duration::from_secs(5));
+    let timeout = tokio::time::sleep(EVENT_TIMEOUT);
     let session_handle = tokio::select! {
       event = client_rx.recv() => {
           let event = match event {
@@ -239,6 +433,7 @@ impl Drop for Server {
     self.sessions_cancel.cancel();
   }
 }
+
 impl Drop for Client {
   fn drop(&mut self) {
     self.cancellation_token.cancel();
@@ -248,11 +443,70 @@ impl Drop for Client {
   }
 }
 
+/// Wait for the acceptor to register a live session under `session_id`.
+///
+/// The acceptor publishes a session asynchronously once the peer has logged
+/// on, so a test driving a [`raw::RawPeer`] has no natural synchronisation
+/// point before its first assertion. Returns `server` so this composes into an
+/// expression.
+pub async fn wait_for_session<'a>(
+  server: &'a Arc<Mutex<Server>>,
+  session_id: &fix::session::SessionIdentifier,
+) -> anyhow::Result<&'a Arc<Mutex<Server>>> {
+  let deadline = std::time::Instant::now() + EVENT_TIMEOUT;
+  loop {
+    if server.lock().await.session(session_id).is_some() {
+      return Ok(server);
+    }
+    anyhow::ensure!(
+      std::time::Instant::now() < deadline,
+      "Timed out waiting for the acceptor to publish session {session_id:?}"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+  }
+}
+
+/// Start an acceptor on an ephemeral port with one session pre-configured.
+///
+/// Returns the acceptor's view of the session identifier (its own CompID is the
+/// sender) alongside the server and the port to connect to. Use this when the
+/// counterparty is a [`raw::RawPeer`] rather than a babelfix [`Client`].
+pub async fn serve(
+  server_comp_id: impl Into<String>,
+  server_options: SessionOptions,
+  client_comp_id: impl Into<String>,
+  fix_version: Arc<fix::repository::FixVersion>,
+) -> anyhow::Result<(fix::session::SessionIdentifier, Arc<Mutex<Server>>, u16)>
+{
+  let server = Server::new(0).await?;
+  let port = server.lock().await.local_addr.port();
+
+  let server_session_id = fix::session::SessionIdentifier {
+    begin_string: fix_version.begin_string.clone(),
+    sender_comp_id: server_comp_id.into(),
+    target_comp_id: client_comp_id.into(),
+  };
+
+  server.lock().await.push_session(
+    server_session_id.clone(),
+    server_options.into_session(fix_version),
+  );
+
+  tracing::info!("Server listening on port {port}");
+
+  Ok((server_session_id, server, port))
+}
+
+/// Connect a babelfix initiator to a babelfix acceptor over loopback.
+///
+/// Returns each side's session identifier together with its driver. The
+/// returned identifiers are from the owner's point of view, so the client's
+/// `sender_comp_id` is `client_comp_id` and the server's is `server_comp_id`.
 pub async fn establish(
   client_comp_id: impl Into<String>,
-  client_out_in: Option<(u32, u32)>,
+  client_options: SessionOptions,
   server_comp_id: impl Into<String>,
-  server_out_in: Option<(u32, u32)>,
+  server_options: SessionOptions,
   fix_version: Arc<fix::repository::FixVersion>,
 ) -> anyhow::Result<(
   (fix::session::SessionIdentifier, Client),
@@ -261,49 +515,114 @@ pub async fn establish(
   let client_comp_id = client_comp_id.into();
   let server_comp_id = server_comp_id.into();
 
-  let (client_out, client_in) = client_out_in.unwrap_or((1, 1));
-  let (server_out, server_in) = server_out_in.unwrap_or((1, 1));
+  let (server_session_id, server, port) = serve(
+    server_comp_id.clone(),
+    server_options,
+    client_comp_id.clone(),
+    fix_version.clone(),
+  )
+  .await?;
 
-  let server = Server::new(0).await?;
-  let port = server.lock().await.local_addr.port();
-
-  tracing::info!("Server listening on port {}", port);
-
-  let server_session_id = fix::session::SessionIdentifier {
-    begin_string: fix_version.begin_string.clone(),
-    sender_comp_id: server_comp_id.clone(),
-    target_comp_id: client_comp_id.clone(),
-  };
   let client_session_id = fix::session::SessionIdentifier {
     begin_string: fix_version.begin_string.clone(),
     sender_comp_id: client_comp_id,
     target_comp_id: server_comp_id,
   };
 
-  server.lock().await.push_session(
-    server_session_id.clone(),
-    fix::session::Session {
-      fix_version: fix_version.clone(),
-      next_in_seq_num: server_in,
-      next_out_seq_num: server_out,
-      heartbeat_interval: std::time::Duration::from_secs(30),
-    },
-  );
-
-  tracing::info!("Starting client on port {}", port);
+  tracing::info!("Starting client on port {port}");
   let client = Client::new(
     port,
     client_session_id.clone(),
-    fix::session::Session {
-      fix_version,
-      next_in_seq_num: client_in,
-      next_out_seq_num: client_out,
-      heartbeat_interval: std::time::Duration::from_secs(30),
-    },
+    client_options.into_session(fix_version),
   )
   .await?;
 
-  tracing::info!("Client connected to server on port {}", port);
+  tracing::info!("Client connected to server on port {port}");
 
   Ok(((client_session_id, client), (server_session_id, server)))
 }
+
+/// Assert that the next event from a session matches a `matches_pattern!`
+/// pattern.
+///
+/// Four forms, for the two session flavours (a `Server`, which owns many
+/// sessions and is behind a mutex, and a `Client`, which owns exactly one):
+///
+/// ```ignore
+/// expect_event!(server(session_id) << SessionEvent::ConnectionEstablished);
+/// expect_event!(server(session_id) ignoring_state << SessionEvent::RecoveryCompleted);
+/// expect_event!(client << SessionEvent::ConnectionEstablished);
+/// expect_event!(client skipping [ SessionEvent::SessionState(anything()) ]
+///               << SessionEvent::RecoveryCompleted);
+/// ```
+///
+/// `ignoring_state` is shorthand for skipping `SessionState`, which the session
+/// emits on its own schedule and which is therefore almost never what a test
+/// wants to synchronise on.
+macro_rules! expect_event {
+  ( $server:ident ( $session_id:expr ) << $($event:tt)+ ) => {
+    let event = crate::session::wait_for_session(&$server, &$session_id)
+      .await?
+      .lock()
+      .await
+      .session(&$session_id)
+      .ok_or_else(|| anyhow::anyhow!("Session not found"))?
+      .next_event(&[])
+      .await?;
+     verify_that!(&event, matches_pattern!($($event)+)).map_err(|e|
+       anyhow::anyhow!("Expected server event '{}' not received\n{e}", stringify!($($event)+)))?;
+  };
+
+  ( $server:ident ( $session_id:expr ) skipping [ $($($skip:tt)+),* ] << $($event:tt)+ ) => {
+    let event = crate::session::wait_for_session(&$server, &$session_id)
+      .await?
+      .lock()
+      .await
+      .session(&$session_id)
+      .ok_or_else(|| anyhow::anyhow!("Session not found"))?
+      .next_event(&[$(&matches_pattern!($($skip)+)),*])
+      .await?;
+     verify_that!(&event, matches_pattern!($($event)+)).map_err(|e|
+       anyhow::anyhow!("Expected server event '{}' not received\n{e}", stringify!($($event)+)))?;
+  };
+
+  ( $server:ident ( $session_id:expr ) ignoring_state << $($event:tt)+ ) => {
+    expect_event!($server($session_id)
+      skipping [ fix::session::SessionEvent::SessionState(anything()) ]
+      << $($event)+);
+  };
+
+  ( $client:ident << $($event:tt)+ ) => {
+    let event = $client
+      .session
+      .next_event(&[])
+      .await?;
+    verify_that!(&event, matches_pattern!($($event)+)).map_err(|e|
+      anyhow::anyhow!("Expected client event '{}' not received\n{e}", stringify!($($event)+)))?;
+  };
+
+  ( $client:ident skipping [ $($($skip:tt)+),* ] << $($event:tt)+ ) => {
+    let event = $client
+      .session
+      .next_event(&[$(&matches_pattern!($($skip)+)),*])
+      .await?;
+    verify_that!(&event, matches_pattern!($($event)+)).map_err(|e|
+      anyhow::anyhow!("Expected client event '{}' not received\n{e}", stringify!($($event)+)))?;
+  };
+
+  ( $client:ident ignoring_state << $($event:tt)+ ) => {
+    expect_event!($client
+      skipping [ fix::session::SessionEvent::SessionState(anything()) ]
+      << $($event)+);
+  };
+}
+
+/// Apply [`expect_event`] to a sequence of expectations, in order.
+macro_rules! expect_events {
+  ( $( { $($item:tt)+ } ; )* ) => {
+    $( expect_event!($($item)+); )*
+  };
+}
+
+pub(crate) use expect_event;
+pub(crate) use expect_events;
