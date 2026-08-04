@@ -396,19 +396,27 @@ where
           }
         }
         cmd = self.session_msg_recv.next() => {
-          out_heartbeat_timer.reset();
+          // The outbound heartbeat timer is reset by commands that put a
+          // message on the wire, since that message is itself evidence of
+          // liveness. Commands that transmit nothing must leave it alone, or
+          // an application polling the session would silence its own
+          // heartbeats and be declared dead by the peer.
           if let Some(cmd) = cmd {
             match cmd {
               SessionCommand::Send(msg) => {
+                out_heartbeat_timer.reset();
                 self.send(msg).await?;
               }
               SessionCommand::Replay(msg) => {
+                out_heartbeat_timer.reset();
                 self.replay(msg).await?;
               }
               SessionCommand::ReplayComplete => {
+                out_heartbeat_timer.reset();
                 self.complete_replay().await?;
               }
               SessionCommand::Disconnect => {
+                out_heartbeat_timer.reset();
                 info!("Session disconnect requested");
                 // Always announce the intent to disconnect, so the peer can
                 // tell an orderly shutdown from a network failure.
