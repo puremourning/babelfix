@@ -410,7 +410,17 @@ where
               }
               SessionCommand::Disconnect => {
                 info!("Session disconnect requested");
-                // TODO: Send logout...
+                // Always announce the intent to disconnect, so the peer can
+                // tell an orderly shutdown from a network failure.
+                let mut logout =
+                  crate::message::builder::Message::new(
+                    self.session.fix_version.clone(),
+                    "5")?;
+                logout.body.set_tag(
+                  crate::schema::FIX_Latest::Fields::Text,
+                  "Disconnect requested by application",
+                );
+                self.send(logout).await?;
                 break;
               }
               SessionCommand::GetSessionState(resp) => {
@@ -563,9 +573,9 @@ where
     }
 
     // TODO: Validate message matches session_id
-    self.dispatch_message(msg).await?;
-
-    Ok(true)
+    // The dispatch result decides whether the session continues: an inbound
+    // Logout ends it once acknowledged.
+    self.dispatch_message(msg).await
   }
 
   async fn dispatch_message(

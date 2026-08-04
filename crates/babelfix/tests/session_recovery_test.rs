@@ -48,34 +48,6 @@ fn replayed(
   Ok(msg)
 }
 
-/// Bring an acceptor and a raw counterparty to the point where the session is
-/// established and synchronised, returning the peer.
-///
-/// Leaves the acceptor's next outbound sequence number at 3: 1 was the Logon
-/// acknowledgement and 2 the synchronisation TestRequest.
-async fn logged_on_peer(port: u16) -> anyhow::Result<RawPeer> {
-  let mut peer = RawPeer::connect(port, fix44(), "CLIENT", "SERVER").await?;
-  peer.logon(Duration::from_secs(30)).await?;
-
-  let ack = peer.recv().await?;
-  anyhow::ensure!(ack.get_type() == "A", "expected a Logon acknowledgement");
-
-  let test_request = peer.recv().await?;
-  anyhow::ensure!(
-    test_request.get_type() == "1",
-    "expected a synchronisation TestRequest"
-  );
-  let test_req_id = session::raw::tag_value(&test_request, Fields::TestReqID)
-    .ok_or_else(|| anyhow::anyhow!("TestRequest without a TestReqID"))?
-    .to_string();
-
-  peer
-    .send(RawMessage::new("0").body(Fields::TestReqID, test_req_id))
-    .await?;
-
-  Ok(peer)
-}
-
 /// A resend spanning both session layer and application messages must gap fill
 /// over exactly the messages that are not retransmitted, and no further.
 ///
@@ -92,7 +64,8 @@ async fn gap_fill_stops_short_of_the_next_retransmitted_message()
     session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
       .await?;
 
-  let mut peer = logged_on_peer(port).await?;
+  let mut peer =
+    RawPeer::connect_and_logon(port, fix44(), "CLIENT", "SERVER").await?;
   session::wait_for_session(&server, &server_session_id).await?;
   server
     .lock()
@@ -192,7 +165,8 @@ async fn declining_to_replay_gap_fills_the_whole_range() -> anyhow::Result<()> {
     session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
       .await?;
 
-  let mut peer = logged_on_peer(port).await?;
+  let mut peer =
+    RawPeer::connect_and_logon(port, fix44(), "CLIENT", "SERVER").await?;
   session::wait_for_session(&server, &server_session_id).await?;
   server
     .lock()
@@ -253,7 +227,8 @@ async fn messages_sent_during_a_replay_are_queued_until_it_completes()
     session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
       .await?;
 
-  let mut peer = logged_on_peer(port).await?;
+  let mut peer =
+    RawPeer::connect_and_logon(port, fix44(), "CLIENT", "SERVER").await?;
   session::wait_for_session(&server, &server_session_id).await?;
   server
     .lock()
@@ -392,7 +367,8 @@ async fn replay_without_a_resend_request_is_rejected() -> anyhow::Result<()> {
     session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
       .await?;
 
-  let mut peer = logged_on_peer(port).await?;
+  let mut peer =
+    RawPeer::connect_and_logon(port, fix44(), "CLIENT", "SERVER").await?;
   session::wait_for_session(&server, &server_session_id).await?;
   server
     .lock()

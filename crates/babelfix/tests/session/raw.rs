@@ -133,6 +133,45 @@ impl RawPeer {
       .await
   }
 
+  /// Connect, log on, and answer the acceptor's synchronisation TestRequest.
+  ///
+  /// On return both sides are synchronised and both next outbound sequence
+  /// numbers are 3: the peer has sent a Logon (1) and a Heartbeat (2), the
+  /// acceptor a Logon acknowledgement (1) and a TestRequest (2).
+  pub async fn connect_and_logon(
+    port: u16,
+    fix_version: Arc<fix::repository::FixVersion>,
+    sender_comp_id: impl Into<String>,
+    target_comp_id: impl Into<String>,
+  ) -> anyhow::Result<Self> {
+    let mut peer =
+      Self::connect(port, fix_version, sender_comp_id, target_comp_id).await?;
+    peer.logon(std::time::Duration::from_secs(30)).await?;
+
+    let ack = peer.recv().await?;
+    anyhow::ensure!(
+      ack.get_type() == "A",
+      "expected a Logon acknowledgement, got {}",
+      ack.to_string_delimited(b'|')
+    );
+
+    let test_request = peer.recv().await?;
+    anyhow::ensure!(
+      test_request.get_type() == "1",
+      "expected a synchronisation TestRequest, got {}",
+      test_request.to_string_delimited(b'|')
+    );
+    let test_req_id = tag_value(&test_request, Fields::TestReqID)
+      .ok_or_else(|| anyhow::anyhow!("TestRequest without a TestReqID"))?
+      .to_string();
+
+    peer
+      .send(RawMessage::new("0").body(Fields::TestReqID, test_req_id))
+      .await?;
+
+    Ok(peer)
+  }
+
   /// Encode and transmit `msg`, returning the `MsgSeqNum` used.
   pub async fn send(&mut self, msg: RawMessage) -> anyhow::Result<u32> {
     let seq_num = msg.seq_num.unwrap_or(self.next_out_seq_num);
