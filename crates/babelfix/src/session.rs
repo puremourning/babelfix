@@ -490,90 +490,77 @@ where
         crate::Error::protocol_violation("MsgSeqNum is not an integer")
       })? as u32;
 
-    if msg.fix_message.msg_type == "4" {
-      // sequence reset
-      if msg
-        .body
-        .tag(crate::schema::FIX_Latest::Fields::GapFillFlag)
-        .ok_or_else(|| crate::Error::protocol_violation("Missing GapFillFlag"))?
-        .as_string()
-        != "Y"
-      {
-        return Err(crate::Error::protocol_violation(
-          "Sequence reset message is garbage and not supported",
-        ));
-      }
+    // A SequenceReset-GapFill stands in for the messages it skips over, so it
+    // occupies a slot in the stream and is subject to the same sequence checks
+    // as any other message. Accepting one differs only in where the expected
+    // inbound sequence number lands: at NewSeqNo rather than one further on.
+    let gap_fill_new_seq_num = if msg.fix_message.msg_type == "4" {
+      Some(Self::gap_fill_new_seq_num(&msg)?)
+    } else {
+      None
+    };
 
-      let new_seq_num = msg
-        .body
-        .tag(crate::schema::FIX_Latest::Fields::NewSeqNo)
-        .ok_or_else(|| crate::Error::protocol_violation("Missing NewSeqNo"))?
-        .as_int()
-        .ok_or_else(|| crate::Error::protocol_violation("Expected integer"))?
-        as u32;
-      if new_seq_num <= self.session.next_in_seq_num {
-        return Err(crate::Error::protocol_violation(format!(
-          "Invalid NewSeqNo in GapFill; expected greater than {} but got {}",
-          self.session.next_in_seq_num, new_seq_num
-        )));
+    match msg_seq_num.cmp(&self.session.next_in_seq_num) {
+      std::cmp::Ordering::Equal => {
+        if let Some(new_seq_num) = gap_fill_new_seq_num {
+          if new_seq_num <= msg_seq_num {
+            return Err(crate::Error::protocol_violation(format!(
+              "Invalid NewSeqNo in GapFill; expected greater than {} but got {}",
+              msg_seq_num, new_seq_num
+            )));
+          }
+          info!(
+            "GapFill received, advancing next_in_seq_num to {}",
+            new_seq_num
+          );
+          self.session.next_in_seq_num = new_seq_num;
+        } else {
+          self.session.next_in_seq_num += 1;
+        }
       }
-      self.session.next_in_seq_num = new_seq_num;
-      info!(
-        "GapFill received, advancing next_in_seq_num to {}",
-        new_seq_num
-      );
-    } else if msg_seq_num == self.session.next_in_seq_num {
-      self.session.next_in_seq_num += 1;
-    } else if msg_seq_num > self.session.next_in_seq_num {
-      // A gap. Request everything from the first missing message onwards with
-      // an open-ended EndSeqNo of 0, and discard this message and every
-      // subsequent one until the gap closes: they all fall inside the range
-      // just requested, so the peer will retransmit them in order. This is the
-      // approach the session layer specification recommends, and it avoids
-      // holding an unbounded queue of out-of-order messages.
-      if self.rerequest_in_progress.is_none() {
-        let mut rr =
-          crate::message::builder::Message::new(msg.fix_version.clone(), "2")?;
-        rr.body.set_tag(
-          crate::schema::FIX_Latest::Fields::BeginSeqNo,
-          self.session.next_in_seq_num,
-        );
-        rr.body
-          .set_tag(crate::schema::FIX_Latest::Fields::EndSeqNo, 0);
-        self.rerequest_in_progress = Some(msg_seq_num);
+      std::cmp::Ordering::Greater => {
+        // A gap. Request everything from the first missing message onwards
+        // with an open-ended EndSeqNo of 0, and discard this message and every
+        // subsequent one until the gap closes: they all fall inside the range
+        // just requested, so the peer will retransmit them in order. This is
+        // the approach the session layer specification recommends, and it
+        // avoids holding an unbounded queue of out-of-order messages.
+        if self.rerequest_in_progress.is_none() {
+          let mut rr = crate::message::builder::Message::new(
+            msg.fix_version.clone(),
+            "2",
+          )?;
+          rr.body.set_tag(
+            crate::schema::FIX_Latest::Fields::BeginSeqNo,
+            self.session.next_in_seq_num,
+          );
+          rr.body
+            .set_tag(crate::schema::FIX_Latest::Fields::EndSeqNo, 0);
+          self.rerequest_in_progress = Some(msg_seq_num);
+          self
+            .session
+            .send(
+              rr,
+              &self.session_id,
+              &mut self.tx,
+              &mut self.session_event_sender,
+            )
+            .await?;
+        }
+
+        return Ok(true);
+      }
+      std::cmp::Ordering::Less => {
+        // One of the two peers has lost session state and the connection is no
+        // longer recoverable.
         self
-          .session
-          .send(
-            rr,
-            &self.session_id,
-            &mut self.tx,
-            &mut self.session_event_sender,
-          )
+          .send_logout(format!(
+            "Invalid MsgSeqNum; too low. Expected {} but got {}.",
+            self.session.next_in_seq_num, msg_seq_num
+          ))
           .await?;
+        return Ok(false);
       }
-      return Ok(true);
-    } else if msg_seq_num < self.session.next_in_seq_num {
-      // Invalid; send a logout message
-
-      let mut logout =
-        crate::message::builder::Message::new(msg.fix_version.clone(), "5")?;
-      logout.body.set_tag(
-        crate::schema::FIX_Latest::Fields::Text,
-        format!(
-          "Invalid MsgSeqNum; too low. Expected {} but got {}.",
-          self.session.next_in_seq_num, msg_seq_num
-        ),
-      );
-      self
-        .session
-        .send(
-          logout,
-          &self.session_id,
-          &mut self.tx,
-          &mut self.session_event_sender,
-        )
-        .await?;
-      return Ok(false);
     }
 
     if self
@@ -587,6 +574,61 @@ where
     // The dispatch result decides whether the session continues: an inbound
     // Logout ends it once acknowledged.
     self.dispatch_message(msg).await
+  }
+
+  /// Read `NewSeqNo` from an inbound SequenceReset(35=4).
+  ///
+  /// Only the gap fill form is supported. A SequenceReset-Reset — GapFillFlag
+  /// of "N", or absent, which the specification defines as the default — asks
+  /// the peer to accept a new sequence number without regard to the message's
+  /// own, and is rejected.
+  fn gap_fill_new_seq_num(
+    msg: &crate::message::builder::Message,
+  ) -> crate::Result<u32> {
+    if msg
+      .body
+      .tag(crate::schema::FIX_Latest::Fields::GapFillFlag)
+      .ok_or_else(|| crate::Error::protocol_violation("Missing GapFillFlag"))?
+      .as_string()
+      != "Y"
+    {
+      return Err(crate::Error::protocol_violation(
+        "Sequence reset message is garbage and not supported",
+      ));
+    }
+
+    Ok(
+      msg
+        .body
+        .tag(crate::schema::FIX_Latest::Fields::NewSeqNo)
+        .ok_or_else(|| crate::Error::protocol_violation("Missing NewSeqNo"))?
+        .as_int()
+        .ok_or_else(|| crate::Error::protocol_violation("Expected integer"))?
+        as u32,
+    )
+  }
+
+  /// Send a Logout(35=5) carrying a diagnostic reason.
+  async fn send_logout(
+    &mut self,
+    text: impl Into<crate::message::builder::TypedValue>,
+  ) -> crate::Result<()> {
+    let mut logout = crate::message::builder::Message::new(
+      self.session.fix_version.clone(),
+      "5",
+    )?;
+    logout
+      .body
+      .set_tag(crate::schema::FIX_Latest::Fields::Text, text);
+    self
+      .session
+      .send(
+        logout,
+        &self.session_id,
+        &mut self.tx,
+        &mut self.session_event_sender,
+      )
+      .await
   }
 
   async fn dispatch_message(
@@ -691,7 +733,7 @@ where
       // Logout
       "5" => {
         let mut logout =
-          crate::message::builder::Message::new(msg.fix_version, "5")?;
+          crate::message::builder::Message::new(msg.fix_version.clone(), "5")?;
         logout.body.set_tag(
           crate::schema::FIX_Latest::Fields::Text,
           "Logout message received. Closing session.",

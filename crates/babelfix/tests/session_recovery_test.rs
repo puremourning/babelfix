@@ -465,6 +465,120 @@ async fn replay_beyond_the_requested_range_is_not_transmitted()
   Ok(())
 }
 
+/// A gap fill occupies a slot in the message stream like any other message, so
+/// it has to arrive in sequence. One that arrives too high must not be applied:
+/// doing so would skip over the messages between the expected sequence number
+/// and the gap fill's own, which were never accounted for by anybody.
+#[test_log::test(tokio::test)]
+async fn out_of_sequence_gap_fill_does_not_skip_messages() -> anyhow::Result<()>
+{
+  let (server_session_id, server, port) =
+    session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
+      .await?;
+
+  let mut peer =
+    RawPeer::connect_and_logon(port, fix44(), "CLIENT", "SERVER").await?;
+  session::wait_for_session(&server, &server_session_id).await?;
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .settle()
+    .await?;
+
+  // The acceptor expects 3. A gap fill claiming to start at 9 leaves 3-8
+  // unaccounted for, so it must be recovered rather than jumped over.
+  peer
+    .send(
+      RawMessage::new("4")
+        .seq(9)
+        .body(Fields::GapFillFlag, "Y")
+        .body(Fields::NewSeqNo, "20"),
+    )
+    .await?;
+
+  let resend_request = peer.recv().await?;
+  verify_that!(
+    &resend_request,
+    all!(
+      message::tag(Fields::MsgType, eq("2")),
+      message::tag(Fields::BeginSeqNo, eq("3")),
+    )
+  )
+  .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+  // The expected inbound sequence number is still 3, so an in-sequence gap
+  // fill closes the gap and the message after it is accepted.
+  peer
+    .send(
+      RawMessage::new("4")
+        .seq(3)
+        .body(Fields::GapFillFlag, "Y")
+        .body(Fields::NewSeqNo, "10"),
+    )
+    .await?;
+  peer
+    .send(
+      RawMessage::new("D")
+        .seq(10)
+        .body(Fields::ClOrdID, "after-gap"),
+    )
+    .await?;
+
+  expect_events! {
+    { server(server_session_id) awaiting
+      << fix::session::SessionEvent::MessageReceived(
+          builder::body(builder::tag(
+            Fields::ClOrdID, typedvalue::string(eq("after-gap"))))) };
+  };
+
+  Ok(())
+}
+
+/// A gap fill below the expected inbound sequence number is a sequence number
+/// error like any other, and terminates the connection with a Logout.
+#[test_log::test(tokio::test)]
+async fn gap_fill_below_the_expected_sequence_number_is_logged_out()
+-> anyhow::Result<()> {
+  let (server_session_id, server, port) =
+    session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
+      .await?;
+
+  let mut peer =
+    RawPeer::connect_and_logon(port, fix44(), "CLIENT", "SERVER").await?;
+  session::wait_for_session(&server, &server_session_id).await?;
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .settle()
+    .await?;
+
+  // The acceptor expects 3.
+  peer
+    .send(
+      RawMessage::new("4")
+        .seq(1)
+        .body(Fields::GapFillFlag, "Y")
+        .body(Fields::NewSeqNo, "2"),
+    )
+    .await?;
+
+  let logout = peer.recv().await?;
+  verify_that!(
+    &logout,
+    all!(
+      message::tag(Fields::MsgType, eq("5")),
+      message::tag(Fields::Text, contains_substring("too low")),
+    )
+  )
+  .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+  Ok(())
+}
+
 /// Replay is only meaningful in response to a ResendRequest; outside one it is
 /// a programming error in the application and terminates the session rather
 /// than silently corrupting the outbound sequence.
