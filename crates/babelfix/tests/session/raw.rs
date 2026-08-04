@@ -27,6 +27,19 @@ const RECV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 const SOH: u8 = b'\x01';
 
+/// Read a tag's value out of a wire message, or `None` if it is absent.
+///
+/// Returns the last occurrence, which is what the session layer's own header
+/// handling effectively sees for the non-repeating tags tests care about.
+pub fn tag_value(msg: &fix::FixMessage, tag: u32) -> Option<&str> {
+  msg
+    .tags
+    .iter()
+    .rev()
+    .find(|(t, _)| *t == tag)
+    .map(|(_, value)| value.as_str(&msg.data))
+}
+
 /// A message to put on the wire, described in terms of raw tags.
 ///
 /// `SenderCompID`, `TargetCompID` and `SendingTime` are filled in by

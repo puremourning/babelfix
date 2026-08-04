@@ -19,6 +19,406 @@ fn fix44() -> Arc<fix::repository::FixVersion> {
   FIX_REPO.get_version("FIX.4.4").unwrap()
 }
 
+/// An application message the session under test can relay.
+fn order(cl_ord_id: &str) -> anyhow::Result<fix::message::builder::Message> {
+  let mut msg = fix::message::builder::Message::new(fix44(), "D")?;
+  msg.body.set_tag(Fields::ClOrdID, cl_ord_id);
+  msg.body.set_tag(Fields::Symbol, "AAPL");
+  msg.body.set_tag(Fields::Side, "1");
+  msg.body.set_tag(Fields::OrderQty, 100i64);
+  Ok(msg)
+}
+
+/// Reconstruct a previously sent message for replay, as an application that
+/// persisted its outbound stream would.
+fn replayed(
+  msg_type: &str,
+  seq_num: u32,
+) -> anyhow::Result<fix::message::builder::Message> {
+  let mut msg = if msg_type == "D" {
+    order(&format!("order-{seq_num}"))?
+  } else {
+    fix::message::builder::Message::new(fix44(), msg_type)?
+  };
+  msg.header.set_tag(Fields::MsgSeqNum, seq_num);
+  // The original SendingTime, which the session moves to OrigSendingTime.
+  msg
+    .header
+    .set_tag(Fields::SendingTime, "20200101-00:00:00.000");
+  Ok(msg)
+}
+
+/// Bring an acceptor and a raw counterparty to the point where the session is
+/// established and synchronised, returning the peer.
+///
+/// Leaves the acceptor's next outbound sequence number at 3: 1 was the Logon
+/// acknowledgement and 2 the synchronisation TestRequest.
+async fn logged_on_peer(port: u16) -> anyhow::Result<RawPeer> {
+  let mut peer = RawPeer::connect(port, fix44(), "CLIENT", "SERVER").await?;
+  peer.logon(Duration::from_secs(30)).await?;
+
+  let ack = peer.recv().await?;
+  anyhow::ensure!(ack.get_type() == "A", "expected a Logon acknowledgement");
+
+  let test_request = peer.recv().await?;
+  anyhow::ensure!(
+    test_request.get_type() == "1",
+    "expected a synchronisation TestRequest"
+  );
+  let test_req_id = session::raw::tag_value(&test_request, Fields::TestReqID)
+    .ok_or_else(|| anyhow::anyhow!("TestRequest without a TestReqID"))?
+    .to_string();
+
+  peer
+    .send(RawMessage::new("0").body(Fields::TestReqID, test_req_id))
+    .await?;
+
+  Ok(peer)
+}
+
+/// A resend spanning both session layer and application messages must gap fill
+/// over exactly the messages that are not retransmitted, and no further.
+///
+/// The acceptor has sent four messages: a Logon acknowledgement (1), a
+/// TestRequest (2) and two orders (3, 4). Session layer messages are never
+/// retransmitted, so 1 and 2 collapse into a single SequenceReset-GapFill whose
+/// NewSeqNo must be 3 — the sequence number of the message sent immediately
+/// after it. A NewSeqNo of 4 would tell the peer to expect 4 next, and the
+/// order that follows with MsgSeqNum 3 would then look like a stale duplicate.
+#[test_log::test(tokio::test)]
+async fn gap_fill_stops_short_of_the_next_retransmitted_message()
+-> anyhow::Result<()> {
+  let (server_session_id, server, port) =
+    session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
+      .await?;
+
+  let mut peer = logged_on_peer(port).await?;
+  session::wait_for_session(&server, &server_session_id).await?;
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .settle()
+    .await?;
+
+  for id in ["order-3", "order-4"] {
+    server
+      .lock()
+      .await
+      .session(&server_session_id)
+      .unwrap()
+      .command(fix::session::SessionCommand::Send(order(id)?))
+      .await?;
+    let sent = peer.recv().await?;
+    verify_that!(&sent, message::tag(Fields::MsgType, eq("D")))
+      .map_err(|e| anyhow::anyhow!("{e}"))?;
+  }
+
+  // Ask for everything from the beginning of the session.
+  peer
+    .send(
+      RawMessage::new("2")
+        .body(Fields::BeginSeqNo, "1")
+        .body(Fields::EndSeqNo, "0"),
+    )
+    .await?;
+
+  expect_events! {
+    { server(server_session_id) awaiting
+      << fix::session::SessionEvent::ResendRequest {
+        resend_request: anything(),
+        begin_seq_no: eq(&1),
+        end_seq_no: eq(&4),
+      }
+    };
+  };
+
+  for (msg_type, seq_num) in [("A", 1), ("1", 2), ("D", 3), ("D", 4)] {
+    server
+      .lock()
+      .await
+      .session(&server_session_id)
+      .unwrap()
+      .command(fix::session::SessionCommand::Replay(replayed(
+        msg_type, seq_num,
+      )?))
+      .await?;
+  }
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .command(fix::session::SessionCommand::ReplayComplete)
+    .await?;
+
+  let gap_fill = peer.recv().await?;
+  verify_that!(
+    &gap_fill,
+    all!(
+      message::tag(Fields::MsgType, eq("4")),
+      message::tag(Fields::GapFillFlag, eq("Y")),
+      message::tag(Fields::MsgSeqNum, eq("1")),
+      message::tag(Fields::NewSeqNo, eq("3")),
+    )
+  )
+  .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+  for seq_num in ["3", "4"] {
+    let order = peer.recv().await?;
+    verify_that!(
+      &order,
+      all!(
+        message::tag(Fields::MsgType, eq("D")),
+        message::tag(Fields::MsgSeqNum, eq(seq_num)),
+        message::tag(Fields::PossDupFlag, eq("Y")),
+        message::tag(Fields::OrigSendingTime, eq("20200101-00:00:00.000")),
+        message::tag(Fields::ClOrdID, eq(format!("order-{seq_num}").as_str())),
+      )
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+  }
+
+  Ok(())
+}
+
+/// An application that declines to retransmit anything still has to eliminate
+/// the gap: the whole requested range collapses into one SequenceReset-GapFill
+/// whose NewSeqNo is one past the end of the range.
+#[test_log::test(tokio::test)]
+async fn declining_to_replay_gap_fills_the_whole_range() -> anyhow::Result<()> {
+  let (server_session_id, server, port) =
+    session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
+      .await?;
+
+  let mut peer = logged_on_peer(port).await?;
+  session::wait_for_session(&server, &server_session_id).await?;
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .settle()
+    .await?;
+
+  peer
+    .send(
+      RawMessage::new("2")
+        .body(Fields::BeginSeqNo, "1")
+        .body(Fields::EndSeqNo, "2"),
+    )
+    .await?;
+
+  expect_events! {
+    { server(server_session_id) awaiting
+      << fix::session::SessionEvent::ResendRequest {
+        resend_request: anything(),
+        begin_seq_no: eq(&1),
+        end_seq_no: eq(&2),
+      }
+    };
+  };
+
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .command(fix::session::SessionCommand::ReplayComplete)
+    .await?;
+
+  let gap_fill = peer.recv().await?;
+  verify_that!(
+    &gap_fill,
+    all!(
+      message::tag(Fields::MsgType, eq("4")),
+      message::tag(Fields::GapFillFlag, eq("Y")),
+      message::tag(Fields::MsgSeqNum, eq("1")),
+      message::tag(Fields::NewSeqNo, eq("3")),
+    )
+  )
+  .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+  Ok(())
+}
+
+/// New messages produced while a resend is in progress must not overtake the
+/// retransmission: they are held back and sent afterwards, with fresh sequence
+/// numbers beyond the requested range.
+#[test_log::test(tokio::test)]
+async fn messages_sent_during_a_replay_are_queued_until_it_completes()
+-> anyhow::Result<()> {
+  let (server_session_id, server, port) =
+    session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
+      .await?;
+
+  let mut peer = logged_on_peer(port).await?;
+  session::wait_for_session(&server, &server_session_id).await?;
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .settle()
+    .await?;
+
+  peer
+    .send(
+      RawMessage::new("2")
+        .body(Fields::BeginSeqNo, "1")
+        .body(Fields::EndSeqNo, "2"),
+    )
+    .await?;
+
+  expect_events! {
+    { server(server_session_id) awaiting
+      << fix::session::SessionEvent::ResendRequest {
+        resend_request: anything(),
+        begin_seq_no: anything(),
+        end_seq_no: anything(),
+      }
+    };
+  };
+
+  // Queued behind the in-flight resend.
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .command(fix::session::SessionCommand::Send(order("new-order")?))
+    .await?;
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .command(fix::session::SessionCommand::ReplayComplete)
+    .await?;
+
+  let gap_fill = peer.recv().await?;
+  verify_that!(&gap_fill, message::tag(Fields::MsgType, eq("4")))
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+  let new_order = peer.recv().await?;
+  verify_that!(
+    &new_order,
+    all!(
+      message::tag(Fields::MsgType, eq("D")),
+      message::tag(Fields::ClOrdID, eq("new-order")),
+      message::tag(Fields::MsgSeqNum, eq("3")),
+    )
+  )
+  .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+  Ok(())
+}
+
+/// A SequenceReset-GapFill received in sequence advances the next expected
+/// inbound sequence number to NewSeqNo, closing the gap without the skipped
+/// messages ever arriving.
+#[test_log::test(tokio::test)]
+async fn inbound_gap_fill_advances_the_expected_sequence_number()
+-> anyhow::Result<()> {
+  // The acceptor expects inbound 1; the peer logs on at 5, so four messages
+  // are missing and the acceptor asks for them.
+  let (server_session_id, server, port) =
+    session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
+      .await?;
+
+  let mut peer = RawPeer::connect(port, fix44(), "CLIENT", "SERVER")
+    .await?
+    .starting_at(5);
+  peer.logon(Duration::from_secs(30)).await?;
+
+  let ack = peer.recv().await?;
+  anyhow::ensure!(ack.get_type() == "A");
+  let resend_request = peer.recv().await?;
+  verify_that!(
+    &resend_request,
+    all!(
+      message::tag(Fields::MsgType, eq("2")),
+      message::tag(Fields::BeginSeqNo, eq("1")),
+      message::tag(Fields::EndSeqNo, eq("0")),
+    )
+  )
+  .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+  // Gap fill over 1-5 inclusive, so the next message the acceptor expects is 6.
+  peer
+    .send(
+      RawMessage::new("4")
+        .seq(1)
+        .body(Fields::GapFillFlag, "Y")
+        .body(Fields::NewSeqNo, "6"),
+    )
+    .await?;
+
+  session::wait_for_session(&server, &server_session_id).await?;
+  expect_events! {
+    { server(server_session_id) awaiting
+      << fix::session::SessionEvent::RawMessageReceived(
+          message::tag(Fields::MsgType, eq("4")), anything()) };
+  };
+
+  // With the gap closed, a message at 6 is accepted and delivered.
+  peer
+    .send(
+      RawMessage::new("D")
+        .seq(6)
+        .body(Fields::ClOrdID, "after-gap")
+        .body(Fields::Symbol, "AAPL")
+        .body(Fields::Side, "1"),
+    )
+    .await?;
+
+  expect_events! {
+    { server(server_session_id) awaiting
+      << fix::session::SessionEvent::MessageReceived(
+          builder::body(builder::tag(
+            Fields::ClOrdID, typedvalue::string(eq("after-gap"))))) };
+  };
+
+  Ok(())
+}
+
+/// Replay is only meaningful in response to a ResendRequest; outside one it is
+/// a programming error in the application and terminates the session rather
+/// than silently corrupting the outbound sequence.
+#[test_log::test(tokio::test)]
+async fn replay_without_a_resend_request_is_rejected() -> anyhow::Result<()> {
+  let (server_session_id, server, port) =
+    session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
+      .await?;
+
+  let mut peer = logged_on_peer(port).await?;
+  session::wait_for_session(&server, &server_session_id).await?;
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .settle()
+    .await?;
+
+  server
+    .lock()
+    .await
+    .session(&server_session_id)
+    .unwrap()
+    .command(fix::session::SessionCommand::Replay(replayed("D", 1)?))
+    .await?;
+
+  expect_events! {
+    { server(server_session_id) awaiting
+      << fix::session::SessionEvent::Disconnected };
+  };
+  peer.expect_closed().await?;
+
+  Ok(())
+}
+
 /// The initiator resumes a session at outbound sequence number 5 while the
 /// acceptor still expects 1, so the acceptor must recover the four messages it
 /// never saw. The application replays a single (admin) message and then

@@ -697,12 +697,17 @@ where
     Ok(true)
   }
 
+  /// Skip over `begin_seq_no..=end_seq_no` with a single SequenceReset-GapFill.
+  ///
+  /// Both bounds are inclusive and name messages that will *not* be
+  /// retransmitted. `NewSeqNo` is therefore `end_seq_no + 1`: the sequence
+  /// number of the next message the peer should expect, which must be the one
+  /// transmitted immediately after this gap fill.
   async fn send_gap_fill(
     &mut self,
     begin_seq_no: u32,
     end_seq_no: u32,
   ) -> crate::Result<()> {
-    // Gap fill
     let mut gap_fill = crate::message::builder::Message::new(
       self.session.fix_version.clone(),
       "4",
@@ -792,10 +797,13 @@ where
       replay.gap_fill_count += 1;
       return Ok(());
     }
-    // Non-admin message, send any gap fill first
+    // Non-admin message: close off the run of skipped messages preceding it
+    // before sending it. The gap fill must stop at msg_seq_num - 1, because
+    // msg_seq_num itself is about to be retransmitted.
     if replay.gap_fill_count > 0 {
-      let end_seq_no = replay.next_expected_seq_num - replay.gap_fill_count - 1;
-      self.send_gap_fill(end_seq_no, msg_seq_num).await?;
+      let first_skipped =
+        replay.next_expected_seq_num - replay.gap_fill_count - 1;
+      self.send_gap_fill(first_skipped, msg_seq_num - 1).await?;
     }
 
     // re-acquire our ref to the replay after send_gap_fill borrowed self

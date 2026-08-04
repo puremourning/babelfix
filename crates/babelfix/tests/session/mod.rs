@@ -592,6 +592,19 @@ macro_rules! expect_event {
       << $($event)+);
   };
 
+  ( $server:ident ( $session_id:expr ) awaiting << $($event:tt)+ ) => {
+    crate::session::wait_for_session(&$server, &$session_id)
+      .await?
+      .lock()
+      .await
+      .session(&$session_id)
+      .ok_or_else(|| anyhow::anyhow!("Session not found"))?
+      .next_event_matching(&matches_pattern!($($event)+))
+      .await
+      .map_err(|e| anyhow::anyhow!(
+        "Expected server event '{}' not received\n{e}", stringify!($($event)+)))?;
+  };
+
   ( $client:ident << $($event:tt)+ ) => {
     let event = $client
       .session
@@ -614,6 +627,15 @@ macro_rules! expect_event {
     expect_event!($client
       skipping [ fix::session::SessionEvent::SessionState(anything()) ]
       << $($event)+);
+  };
+
+  ( $client:ident awaiting << $($event:tt)+ ) => {
+    $client
+      .session
+      .next_event_matching(&matches_pattern!($($event)+))
+      .await
+      .map_err(|e| anyhow::anyhow!(
+        "Expected client event '{}' not received\n{e}", stringify!($($event)+)))?;
   };
 }
 
