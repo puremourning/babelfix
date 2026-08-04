@@ -77,6 +77,9 @@ Full API documentation is on [docs.rs/babelfix](https://docs.rs/babelfix). The
 `message`, `session` and `endpoint` module docs include worked examples for
 building messages, and running the session/recovery machinery.
 
+[CONFORMANCE.md](CONFORMANCE.md) records the known deviations of the session
+layer from the FIX Session Layer Technical Specification.
+
 ## Minimum supported Rust version
 
 Rust 1.85 (edition 2024).
