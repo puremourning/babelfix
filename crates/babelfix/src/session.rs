@@ -13,8 +13,8 @@
 //!   and inbound-message events.
 //!
 //! The session automatically emits heartbeats, answers TestRequests, issues a
-//! ResendRequest on a sequence gap, queues out-of-order messages, and handles
-//! logout — so application code technically only needs to react to
+//! ResendRequest on a sequence gap, and handles logout — so application code
+//! technically only needs to react to
 //! [`SessionEvent::MessageReceived`] (inbound *application* messages),
 //! [`SessionEvent::ResendRequest`] (inbound *resend requests*), and
 //! [`SessionEvent::Disconnected`], though handling
@@ -525,16 +525,19 @@ where
     } else if msg_seq_num == self.session.next_in_seq_num {
       self.session.next_in_seq_num += 1;
     } else if msg_seq_num > self.session.next_in_seq_num {
+      // A gap. Request everything from the first missing message onwards with
+      // an open-ended EndSeqNo of 0, and discard this message and every
+      // subsequent one until the gap closes: they all fall inside the range
+      // just requested, so the peer will retransmit them in order. This is the
+      // approach the session layer specification recommends, and it avoids
+      // holding an unbounded queue of out-of-order messages.
       if self.rerequest_in_progress.is_none() {
-        // start resend request
         let mut rr =
           crate::message::builder::Message::new(msg.fix_version.clone(), "2")?;
         rr.body.set_tag(
           crate::schema::FIX_Latest::Fields::BeginSeqNo,
           self.session.next_in_seq_num,
         );
-        // open-ended request includes _this_ message, which we drop (along with
-        // all other messages > session.next_expected_seq_num)
         rr.body
           .set_tag(crate::schema::FIX_Latest::Fields::EndSeqNo, 0);
         self.rerequest_in_progress = Some(msg_seq_num);
