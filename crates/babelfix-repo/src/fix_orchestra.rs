@@ -47,7 +47,6 @@ struct FixOrchestraParser {
   current_group: Option<Group>,
   current_codeset: Option<(String, Vec<EnumValue>)>,
   block_stack: Vec<Block>,
-  buffer: String,
 }
 
 impl FixOrchestraParser {
@@ -73,9 +72,6 @@ impl FixOrchestraParser {
           let name = String::from_utf8_lossy(e.name().into_inner());
           self.handle_start_element(name.as_ref(), e)?;
           self.handle_end_element(name.as_ref())?;
-        }
-        Ok(Event::Text(e)) => {
-          self.buffer = e.unescape()?.to_string();
         }
         Ok(Event::Eof) => break,
         Err(e) => return Err(FixRepoError::XmlError(e)),
@@ -389,7 +385,14 @@ impl FixOrchestraParser {
     let mut attrs = HashMap::new();
     for attr in e.attributes().flatten() {
       let key = String::from_utf8_lossy(attr.key.into_inner()).to_string();
-      let value = attr.unescape_value().unwrap_or_default().to_string();
+      // The Orchestra files are XML 1.0 (two declare it, the third has no
+      // declaration, for which 1.0 is the specified default). The version only
+      // affects how end-of-line characters and character references are
+      // normalized, and 1.1 is not used in practice.
+      let value = attr
+        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+        .unwrap_or_default()
+        .to_string();
       attrs.insert(key, value);
     }
     attrs

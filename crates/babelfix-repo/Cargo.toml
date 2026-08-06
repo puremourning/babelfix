@@ -20,5 +20,5 @@ proc-macro2.workspace = true
 syn.workspace = true
 quote.workspace = true
 thiserror.workspace = true
-quick-xml = "0.37"
+quick-xml = "0.41"
 include_dir = { version = "0.7", features = ["glob"] }
