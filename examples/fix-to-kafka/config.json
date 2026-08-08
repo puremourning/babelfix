@@ -1,0 +1,20 @@
+{
+  "broker": {
+    "host": "localhost",
+    "port": 9092
+  },
+  "server": {
+    "host": "localhost",
+    "port": 9797
+  },
+  "sessions": [
+    {
+      "session_id": {
+        "sender_comp_id": "YOUR_SENDER_COMP_ID",
+        "target_comp_id": "YOUR_TARGET_COMP_ID",
+        "begin_string": "FIX.4.4"
+      },
+      "heartbeat_interval": 30
+    }
+  ]
+}

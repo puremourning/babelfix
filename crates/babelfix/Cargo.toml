@@ -11,6 +11,10 @@ readme = "README.md"
 categories = ["network-programming"]
 keywords = ["fix-protocol", "financial", "fix", "trading"]
 
+[features]
+default = []
+serde = ["dep:serde"]
+
 [dependencies]
 futures.workspace = true
 async-stream.workspace = true
@@ -22,6 +26,7 @@ tracing.workspace = true
 bytes.workspace = true
 tokio-util.workspace = true
 chrono.workspace = true
+serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true

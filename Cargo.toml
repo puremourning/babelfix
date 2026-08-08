@@ -4,6 +4,7 @@ members = [
   "crates/babelfix",
   "crates/babelfix-repo",
   "crates/babelfix-repogen",
+  "examples/fix-to-kafka",
 ]
 
 [workspace.package]
@@ -29,6 +30,7 @@ anyhow = "1.0"
 futures = "0.3"
 async-stream = "0.3"
 tokio = { version = "1.0", features = ["full"] }
+babelfix = { path = "crates/babelfix", version = "0.1.0" }
 babelfix-repo = { path = "crates/babelfix-repo", version = "0.1.0" }
 babelfix-repogen = { path = "crates/babelfix-repogen", version = "0.1.0" }
 tracing = "0.1"
@@ -42,3 +44,4 @@ syn = { version = "3.0", features = ["full"] }
 thiserror = "2.0"
 googletest = "0.14"
 test-log = {version = "0.2", default-features = false, features = ["trace"]}
+serde  = { version = "1.0", features = ["derive"] }

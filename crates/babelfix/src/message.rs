@@ -409,6 +409,20 @@ impl FixMessage {
     true
   }
 
+  /// Conver to Bytes, serialising if required.
+  ///
+  /// Messages are expected to be either wholly in `data` or wholly in `tags`,
+  /// not a mix of both.
+  pub fn into_bytes(self) -> Bytes {
+    if self.data.is_empty() {
+      let mut buf = bytes::BytesMut::with_capacity(1024);
+      self.write_to(&mut buf, b'\x01').unwrap();
+      buf.freeze()
+    } else {
+      self.data
+    }
+  }
+
   /// Parse from Bytes (zero-copy when coming from network)
   pub fn from_bytes(
     fix: Arc<repository::FixVersion>,
@@ -709,6 +723,12 @@ impl FixMessage {
       }
     }
     ""
+  }
+
+  /// Get the value of a tag, if present. Returns a reference to the Value,
+  /// which may be a StringRef or DataRef.
+  pub fn get_tag(&self, tag: u32) -> Option<&Value> {
+    self.tags.iter().find(|(t, _)| *t == tag).map(|(_, v)| v)
   }
 }
 

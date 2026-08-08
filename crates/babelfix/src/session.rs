@@ -50,6 +50,7 @@ use futures::{Sink, SinkExt};
 use tracing::{debug, error, info};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SessionIdentifier {
   pub begin_string: String,
   pub sender_comp_id: String,
@@ -784,6 +785,7 @@ where
       }
       _ if msg.is_admin_message() => {
         // Ignore other admin messages
+        // FIXME: Not Reject and BusinessMessageReject!
       }
       &_ => {
         self
