@@ -52,7 +52,7 @@ use std::sync::Arc;
 use futures::SinkExt;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
-use tracing::{Instrument, debug, error, info, trace};
+use tracing::{Instrument, error, info, trace};
 
 use super::*;
 use crate::repository::FieldBlock;
@@ -77,12 +77,12 @@ pub struct Endpoint<T: Future<Output = Result<()>> + Send + 'static> {
   pub join_handle: T,
 }
 
+/// Adapts [`babelfix_core::codec::FixDecoder`] to [`tokio_util::codec`].
+///
+/// The framing itself lives in the core crate and is an ordinary synchronous
+/// function; this exists only so `FramedRead` can drive it.
 #[derive(Default)]
-struct FixDecoder {
-  repo: Arc<crate::repository::FixRepository>,
-  delimiter: Option<u8>,
-  fix_version: Option<Arc<crate::repository::FixVersion>>,
-}
+struct FixDecoder(babelfix_core::codec::FixDecoder);
 
 impl tokio_util::codec::Decoder for FixDecoder {
   type Item = crate::message::FixMessage;
@@ -92,83 +92,16 @@ impl tokio_util::codec::Decoder for FixDecoder {
     &mut self,
     data: &mut bytes::BytesMut,
   ) -> std::result::Result<Option<Self::Item>, Self::Error> {
-    // FIXME: PIGGY PIGGY PIGGY PORKER SO MANY UNNECESSARY PARSES IN THE CASE OF
-    // FRAGMENT
-    //  We can store the begin_string_len and body_len after parsing and skip
-    //  it if we already parsed it once, rather than re-parsing the fragment
-    //  every time
-    let begin_string_len;
-    let body_len;
-    if self.fix_version.is_none() {
-      (self.fix_version, body_len, begin_string_len) =
-        crate::message::peek_infer_version_and_length(
-          self.repo.as_ref(),
-          data,
-          self.delimiter.unwrap_or(b'\x01'),
-        )?;
-    } else {
-      (_, body_len, begin_string_len) =
-        crate::message::peek_infer_version_and_length(
-          self.repo.as_ref(),
-          data,
-          self.delimiter.unwrap_or(b'\x01'),
-        )?;
-    }
-
-    let (Some(fix_version), Some(msg_len)) =
-      (self.fix_version.as_ref(), body_len)
-    else {
-      return Ok(None);
-    };
-
-    if data.len() <= begin_string_len + msg_len {
-      // Either part message or no additional checksum
-      return Ok(None);
-    }
-
-    let (Some(checksum), checksum_len) = crate::message::peek_checksum(
-      self.repo.as_ref(),
-      &data[begin_string_len + msg_len..],
-      self.delimiter.unwrap_or(b'\x01'),
-    )?
-    else {
-      return Ok(None);
-    };
-
-    let buf = data.split_to(begin_string_len + msg_len + checksum_len);
-    let mut calc_checksum: u8 = 0;
-    for ch in buf[..begin_string_len + msg_len].iter() {
-      calc_checksum = calc_checksum.wrapping_add(*ch);
-    }
-
-    if checksum != calc_checksum {
-      return Err(Error::invalid_message(format!(
-        "Invalid checksum; expected {calc_checksum} but got {checksum}",
-      )));
-    }
-
-    // Convert BytesMut to Bytes (zero-copy)
-    let bytes = buf.freeze();
-    let (fix_msg, consumed) = FixMessage::from_bytes_delimited(
-      fix_version.clone(),
-      bytes,
-      self.delimiter.unwrap_or(b'\x01'),
-    )?;
-
-    if consumed != begin_string_len + msg_len + checksum_len {
-      return Err(Error::invalid_message(
-        "Consumed length does not match expected length",
-      ));
-    }
-
-    debug!("Decoded FIX message: {:?}", fix_msg);
-    Ok(Some(fix_msg))
+    self.0.decode(data)
   }
 }
 
-struct FixEncoder {
-  delimiter: Option<u8>,
-}
+/// Adapts [`babelfix_core::codec::FixEncoder`] to [`tokio_util::codec`].
+///
+/// Note the core encoder takes the message by reference; `tokio_util`'s trait
+/// insists on by-value, which is one of the reasons the session layer currently
+/// clones every outbound message.
+struct FixEncoder(babelfix_core::codec::FixEncoder);
 
 impl tokio_util::codec::Encoder<crate::message::FixMessage> for FixEncoder {
   type Error = Error;
@@ -178,10 +111,7 @@ impl tokio_util::codec::Encoder<crate::message::FixMessage> for FixEncoder {
     item: crate::message::FixMessage,
     dst: &mut bytes::BytesMut,
   ) -> std::result::Result<(), Self::Error> {
-    item.write_to(dst, self.delimiter.unwrap_or(b'\x01'))?;
-
-    debug!("Encoded FIX message: {:?}", dst);
-    Ok(())
+    self.0.encode(&item, dst)
   }
 }
 
@@ -279,14 +209,16 @@ async fn initiate_connection(
   let (rx, tx) = stream.split();
   let mut rx = tokio_util::codec::FramedRead::new(
     rx,
-    FixDecoder {
-      repo: repo.clone(),
+    FixDecoder(babelfix_core::codec::FixDecoder::with_version(
+      repo.clone(),
       delimiter,
-      fix_version: Some(session.fix_version.clone()),
-    },
+      session.fix_version.clone(),
+    )),
   );
-  let mut tx =
-    tokio_util::codec::FramedWrite::new(tx, FixEncoder { delimiter });
+  let mut tx = tokio_util::codec::FramedWrite::new(
+    tx,
+    FixEncoder(babelfix_core::codec::FixEncoder::new(delimiter)),
+  );
 
   let span = tracing::info_span!(
     "ClientSession",
@@ -417,14 +349,15 @@ async fn accept_connection(
   let (rx, tx) = stream.split();
   let mut rx = tokio_util::codec::FramedRead::new(
     rx,
-    FixDecoder {
-      repo: repo.clone(),
+    FixDecoder(babelfix_core::codec::FixDecoder::new(
+      repo.clone(),
       delimiter,
-      ..Default::default()
-    },
+    )),
   );
-  let mut tx =
-    tokio_util::codec::FramedWrite::new(tx, FixEncoder { delimiter });
+  let mut tx = tokio_util::codec::FramedWrite::new(
+    tx,
+    FixEncoder(babelfix_core::codec::FixEncoder::new(delimiter)),
+  );
 
   let (session_send, session_recv) =
     mpsc::channel::<session::SessionCommand>(100);

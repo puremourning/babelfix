@@ -13,6 +13,7 @@
 //! | Schema | [`schema`] | Compile-time FIX tag-number constants |
 //! | Repository | [`repository`] | Parsed FIX Orchestra metadata |
 //! | Message | [`message`] | Parsing, building and serialising individual messages |
+//! | Codec | [`codec`] | Framing a byte stream into messages and back |
 //! | Time | [`time`] | FIX UTC timestamp formatting (no clock) |
 //!
 //! Most applications should depend on `babelfix` instead, which re-exports this
@@ -22,6 +23,7 @@
 pub use babelfix_repo as repository;
 pub use babelfix_repogen as schema;
 
+pub mod codec;
 pub mod message;
 pub mod time;
 
