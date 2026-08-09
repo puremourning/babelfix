@@ -498,11 +498,11 @@ impl FixMessage {
         ));
 
         if tag == 8 {
-          if msg.get_being_string() != msg.fix_version.begin_string {
+          if msg.begin_string() != msg.fix_version.begin_string {
             return Err(crate::Error::invalid_message(format!(
               "Invalid FIX version: expected {}, got {}",
               msg.fix_version.begin_string,
-              msg.get_being_string()
+              msg.begin_string()
             )));
           }
         } else if tag == 10 {
@@ -701,7 +701,12 @@ impl FixMessage {
     Ok(())
   }
 
-  pub fn get_being_string(&self) -> &str {
+  /// The `BeginString` (tag 8) carried by the message.
+  ///
+  /// # Panics
+  ///
+  /// Panics if tag 8 holds binary data, which no well-formed message does.
+  pub fn begin_string(&self) -> &str {
     for (tag, val) in &self.tags {
       if *tag == 8 {
         return match val {
@@ -1742,7 +1747,7 @@ mod tests {
     )?;
     assert_eq!(consumed, data.len());
 
-    assert_eq!(msg.get_being_string(), "FIX.4.4");
+    assert_eq!(msg.begin_string(), "FIX.4.4");
     assert_eq!(msg.get_type(), "AB");
 
     use crate::schema::FIX_4_4 as FIX44;
@@ -1798,14 +1803,14 @@ mod tests {
     let new = msg.clone();
 
     let data = msg.into_message()?;
-    assert_eq!(data.get_being_string(), "FIX.4.4");
+    assert_eq!(data.begin_string(), "FIX.4.4");
     assert_eq!(
       data.to_string_delimited(b'|'),
       "8=FIX.4.4|9=56|35=AB|49=Sender|56=Target|34=55|555=2|600=FDAX|600=ODAX|10=176|"
     );
 
     let data = new.into_message()?;
-    assert_eq!(data.get_being_string(), "FIX.4.4");
+    assert_eq!(data.begin_string(), "FIX.4.4");
     assert_eq!(
       data.to_string_delimited(b'|'),
       "8=FIX.4.4|9=56|35=AB|49=Sender|56=Target|34=55|555=2|600=FDAX|600=ODAX|10=176|"
@@ -2005,7 +2010,7 @@ mod tests {
     let mut b = builder::Message::new(fix5, "D")?;
     assert!(b.header.push_tag(8, "FIX.4.4").is_err());
     let m = b.into_message()?;
-    assert_eq!(m.get_being_string(), "FIXT.1.1");
+    assert_eq!(m.begin_string(), "FIXT.1.1");
 
     Ok(())
   }

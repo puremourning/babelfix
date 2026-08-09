@@ -17,36 +17,38 @@
 //!
 //! # Server
 //!
-//! ```ignore
+//! ```no_run
 //! use std::sync::Arc;
-//! use babelfix::{endpoint, session, repository};
+//! use babelfix_tokio::{endpoint, session, repository};
 //! use futures::StreamExt;
 //!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let repo = Arc::new(repository::orchestrate()?);
-//!     let mut endpoint = endpoint::serve(9878, None, repo.clone(), None).await?;
+//! # async fn run() -> babelfix_tokio::Result<()> {
+//! let repo = Arc::new(repository::orchestrate()?);
+//! let mut endpoint = endpoint::serve(9878, None, repo.clone(), None).await?;
 //!
-//!     while let Some(event) = endpoint.events.next().await {
-//!         match event {
-//!             endpoint::EndpointEvent::NewSession { session_id, response } => {
-//!                 let fix = repo
-//!                     .get_version(&session_id.begin_string)
-//!                     .ok_or_else(|| anyhow::anyhow!("unknown FIX version"))?;
-//!                 let _ = response.send(session::Session::new(fix));
-//!             }
-//!             endpoint::EndpointEvent::SessionConnected(handle) => {
-//!                 // Drive `handle` — see the `session` module docs.
-//!                 tokio::spawn(async move { let _ = handle; });
-//!             }
-//!             endpoint::EndpointEvent::SessionInvalid(_peer) => {}
+//! while let Some(event) = endpoint.events.next().await {
+//!     match event {
+//!         endpoint::EndpointEvent::NewSession { session_id, response } => {
+//!             // Answer with the sequence numbers you persisted for this peer.
+//!             let session = repo
+//!                 .get_version(&session_id.begin_string)
+//!                 .map(session::Session::new)
+//!                 .ok_or_else(|| babelfix_tokio::Error::unspecified(
+//!                     "unknown FIX version",
+//!                 ));
+//!             let _ = response.send(session);
 //!         }
+//!         endpoint::EndpointEvent::SessionConnected(handle) => {
+//!             // Drive `handle` — see the `session` module docs.
+//!             tokio::spawn(async move { let _ = handle; });
+//!         }
+//!         endpoint::EndpointEvent::SessionInvalid(_peer) => {}
 //!     }
-//!     Ok(())
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
-#![allow(unused_variables)]
 use std::sync::Arc;
 
 use futures::SinkExt;
@@ -457,7 +459,7 @@ pub async fn serve(
   port: u16,
   host: Option<String>,
   repo: Arc<crate::repository::FixRepository>,
-  delimieter: Option<u8>,
+  delimiter: Option<u8>,
 ) -> Result<Endpoint<impl Future<Output = Result<()>> + Send + 'static>> {
   let (event_sender, event_receiver) = mpsc::channel::<EndpointEvent>(100);
   let (command_sender, mut command_receiver) =
@@ -496,7 +498,7 @@ pub async fn serve(
                   stream,
                   event_sender,
                   repo,
-                  delimieter).instrument(s).await
+                  delimiter).instrument(s).await
               }));
             },
             Err(e) => {

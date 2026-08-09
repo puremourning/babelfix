@@ -17,7 +17,9 @@ serde = ["babelfix-core/serde"]
 [dependencies]
 babelfix-core.workspace = true
 futures.workspace = true
-tokio = { workspace = true }
+# Only what the driver actually uses: sockets, timers, the session tasks,
+# `select!` and the AsyncRead/AsyncWrite extension traits.
+tokio = { version = "1.0", default-features = false, features = ["net", "time", "rt", "macros", "io-util"] }
 tokio-util.workspace = true
 bytes.workspace = true
 chrono.workspace = true

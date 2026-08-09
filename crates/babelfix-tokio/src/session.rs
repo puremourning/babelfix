@@ -26,17 +26,17 @@
 //! [`SessionEvent::RawMessageSent`] and [`SessionEvent::SessionState`] are
 //! usually needed in order to correctly recover the session.
 //!
-//! ```ignore
-//! use babelfix::session::{SessionHandle, SessionEvent};
-//! use babelfix::schema::FIX_Latest::Fields;
+//! ```no_run
+//! use babelfix_tokio::session::{SessionHandle, SessionEvent};
+//! use babelfix_tokio::schema::FIX_Latest::Fields;
 //! use futures::StreamExt;
 //!
 //! async fn drive(mut handle: SessionHandle) {
 //!     while let Some(event) = handle.events.next().await {
 //!         match event {
 //!             SessionEvent::MessageReceived(msg) => {
-//!                 if let Some(t) = msg.header.tag(Fields::MsgType) {
-//!                     println!("received {}", t.as_string());
+//!                 if let Some(t) = msg.body.tag(Fields::ClOrdID) {
+//!                     println!("received order {}", t.as_string());
 //!                 }
 //!             }
 //!             SessionEvent::Disconnected => break,
