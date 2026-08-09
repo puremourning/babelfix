@@ -291,12 +291,13 @@ impl Server {
       local_addr,
       join_handle,
     } = fix::endpoint::serve(
-      port,
-      Some(String::from("127.0.0.1")),
+      ("127.0.0.1", port),
       Arc::clone(&FIX_REPO),
-      None,
+      fix::endpoint::EndpointConfig::default(),
     )
     .await?;
+    let local_addr =
+      local_addr.expect("an acceptor always has a bound address");
 
     let cancellation_token = tokio_util::sync::CancellationToken::new();
     let server = Arc::new(Mutex::new(Self {
@@ -374,7 +375,9 @@ impl Server {
 }
 
 pub struct Client {
-  cancel_signal: futures::channel::oneshot::Sender<()>,
+  /// The initiator's command channel. Dropping it, or sending `Shutdown`,
+  /// stops the reconnect loop — the same lever the acceptor uses.
+  cancel_signal: futures::channel::mpsc::Sender<fix::endpoint::EndpointCommand>,
   cancellation_token: tokio_util::sync::CancellationToken,
   pub session: Session,
 }
@@ -385,21 +388,19 @@ impl Client {
     session_id: fix::session::SessionIdentifier,
     state: fix::session::Session,
   ) -> anyhow::Result<Self> {
-    let (cancel_client, client_cancellation_token) =
-      futures::channel::oneshot::channel();
-
     let cancellation_token = tokio_util::sync::CancellationToken::new();
 
-    let (client_tx, mut client_rx) = futures::channel::mpsc::channel(100);
-    tokio::spawn(fix::endpoint::connect(
+    let fix::endpoint::Endpoint {
+      commands: cancel_client,
+      events: mut client_rx,
+      ..
+    } = fix::endpoint::connect(
       vec![("127.0.0.1".to_string(), port)],
-      client_tx,
       Arc::clone(&FIX_REPO),
-      None,
       session_id,
       state.clone(),
-      client_cancellation_token,
-    ));
+      fix::endpoint::EndpointConfig::default(),
+    )?;
 
     let timeout = tokio::time::sleep(EVENT_TIMEOUT);
     let session_handle = tokio::select! {
@@ -442,9 +443,8 @@ impl Drop for Server {
 impl Drop for Client {
   fn drop(&mut self) {
     self.cancellation_token.cancel();
-    let (tx, _) = futures::channel::oneshot::channel();
-    let tx = std::mem::replace(&mut self.cancel_signal, tx);
-    let _ = tx.send(());
+    // Closing the command channel is what stops the initiator.
+    self.cancel_signal.close_channel();
   }
 }
 

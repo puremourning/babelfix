@@ -328,10 +328,9 @@ async fn main() -> anyhow::Result<()> {
 
   let repo = Arc::new(fix::repository::orchestrate()?);
   let mut endpoint = fix::endpoint::serve(
-    config.server.port,
-    Some(config.server.host.clone()),
+    (config.server.host.clone(), config.server.port),
     Arc::clone(&repo),
-    None,
+    fix::endpoint::EndpointConfig::default(),
   )
   .await?;
 

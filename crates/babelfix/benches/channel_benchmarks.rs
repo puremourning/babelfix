@@ -86,7 +86,7 @@ use babelfix::session::{
 };
 use babelfix::{endpoint, repository};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use futures::channel::{mpsc, oneshot};
+use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 
 /// Depth the endpoint gives both session channels, mirrored here so the
@@ -548,10 +548,10 @@ struct Loopback {
   clients: Vec<SessionHandle>,
   order: builder::Message,
   /// Dropping the endpoint's command sender closes its accept loop, and
-  /// dropping a cancellation sender tears the corresponding initiator down, so
-  /// both are held for the lifetime of the benchmark.
+  /// dropping an initiator's command sender closes its reconnect loop, so both
+  /// are held for the lifetime of the benchmark.
   _endpoint_commands: mpsc::Sender<endpoint::EndpointCommand>,
-  _client_cancels: Vec<oneshot::Sender<()>>,
+  _client_cancels: Vec<mpsc::Sender<endpoint::EndpointCommand>>,
 }
 
 impl Loopback {
@@ -568,9 +568,14 @@ impl Loopback {
       mut events,
       local_addr,
       join_handle,
-    } = endpoint::serve(0, Some("127.0.0.1".to_string()), repo.clone(), None)
-      .await
-      .unwrap();
+    } = endpoint::serve(
+      ("127.0.0.1", 0),
+      repo.clone(),
+      endpoint::EndpointConfig::default(),
+    )
+    .await
+    .unwrap();
+    let local_addr = local_addr.expect("an acceptor is always bound");
     // `serve` has already spawned the accept loop; this handle exists only to
     // observe its exit, which the benchmark has no use for.
     drop(join_handle);
@@ -598,21 +603,22 @@ impl Loopback {
     let mut cancels = Vec::with_capacity(sessions);
 
     for i in 0..sessions {
-      let (cancel, cancelled) = oneshot::channel();
-      let (client_events_tx, mut client_events) = mpsc::channel(CHANNEL_DEPTH);
-      tokio::spawn(babelfix::util::wrap_and_report(endpoint::connect(
+      let endpoint::Endpoint {
+        commands: cancel,
+        events: mut client_events,
+        ..
+      } = endpoint::connect(
         vec![("127.0.0.1".to_string(), local_addr.port())],
-        client_events_tx,
         repo.clone(),
-        None,
         SessionIdentifier {
           begin_string: fix.begin_string.clone(),
           sender_comp_id: format!("BENCHCLIENT{i}"),
           target_comp_id: "BENCHSERVER".to_string(),
         },
         bench_session(fix),
-        cancelled,
-      )));
+        endpoint::EndpointConfig::default(),
+      )
+      .unwrap();
 
       let mut client = loop {
         if let endpoint::EndpointEvent::SessionConnected(handle) = client_events

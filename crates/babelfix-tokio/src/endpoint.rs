@@ -13,7 +13,8 @@
 //!   emitting the same [`EndpointEvent::SessionConnected`] once logged on.
 //!
 //! Both take an `Arc<`[`FixRepository`](crate::repository::FixRepository)`>` and
-//! an optional field delimiter (`None` uses SOH, `b'\x01'`).
+//! an [`EndpointConfig`], and both return an [`Endpoint`]: the same events, the
+//! same [`EndpointCommand::Shutdown`], the same awaitable `join_handle`.
 //!
 //! # Server
 //!
@@ -24,7 +25,11 @@
 //!
 //! # async fn run() -> babelfix_tokio::Result<()> {
 //! let repo = Arc::new(repository::orchestrate()?);
-//! let mut endpoint = endpoint::serve(9878, None, repo.clone(), None).await?;
+//! let mut endpoint = endpoint::serve(
+//!     ("0.0.0.0", 9878),
+//!     repo.clone(),
+//!     endpoint::EndpointConfig::default(),
+//! ).await?;
 //!
 //! while let Some(event) = endpoint.events.next().await {
 //!     match event {
@@ -60,10 +65,79 @@ use super::*;
 use crate::repository::FieldBlock;
 use babelfix_core::session::SessionState;
 
-/// How long a peer has to complete the logon exchange.
+use std::time::Duration;
+
+/// Everything an endpoint needs beyond the addresses and the repository.
 ///
-/// TODO: configurable per endpoint — see CONFORMANCE.md deviation 11.
-const LOGON_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// The defaults are the values that used to be hardcoded, so
+/// `EndpointConfig::default()` reproduces the previous behaviour.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct EndpointConfig {
+  /// Field separator on the wire. `None` means SOH (`b'\x01'`), which is what
+  /// production uses; `Some(b'|')` is convenient in tests and logs.
+  pub delimiter: Option<u8>,
+
+  /// How long a peer has to complete the logon exchange before the connection
+  /// is dropped.
+  pub logon_timeout: Duration,
+
+  /// How long to wait for a TCP connection to be established. Initiator only.
+  pub connect_timeout: Duration,
+
+  /// How long to wait between connection attempts, in order. The ladder
+  /// restarts for each host, and the host list is cycled indefinitely, so the
+  /// last entry is the steady-state retry interval. Initiator only.
+  pub backoff: Vec<Duration>,
+
+  /// Depth of the per-session command and event channels.
+  ///
+  /// This is the application's queue: it is how far the session may run ahead
+  /// of a slow consumer before backpressure reaches the peer.
+  pub channel_depth: usize,
+}
+
+impl Default for EndpointConfig {
+  fn default() -> Self {
+    Self {
+      delimiter: None,
+      logon_timeout: Duration::from_secs(30),
+      connect_timeout: Duration::from_secs(10),
+      backoff: [10, 100, 1000, 5000, 5000]
+        .into_iter()
+        .map(Duration::from_millis)
+        .collect(),
+      channel_depth: 100,
+    }
+  }
+}
+
+impl EndpointConfig {
+  pub fn delimiter(mut self, delimiter: u8) -> Self {
+    self.delimiter = Some(delimiter);
+    self
+  }
+
+  pub fn logon_timeout(mut self, timeout: Duration) -> Self {
+    self.logon_timeout = timeout;
+    self
+  }
+
+  pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+    self.connect_timeout = timeout;
+    self
+  }
+
+  pub fn backoff(mut self, ladder: impl IntoIterator<Item = Duration>) -> Self {
+    self.backoff = ladder.into_iter().collect();
+    self
+  }
+
+  pub fn channel_depth(mut self, depth: usize) -> Self {
+    self.channel_depth = depth;
+    self
+  }
+}
 
 pub enum EndpointEvent {
   NewSession {
@@ -75,13 +149,20 @@ pub enum EndpointEvent {
 }
 
 pub enum EndpointCommand {
+  /// Stop accepting or reconnecting, and let the endpoint's task finish.
   Shutdown,
 }
 
+/// A running endpoint, whether it accepts connections or initiates them.
+///
+/// Both [`serve`] and [`connect`] return one of these: the same events, the
+/// same shutdown command, the same awaitable completion. The only asymmetry
+/// left is [`local_addr`](Self::local_addr), which an initiator does not have.
 pub struct Endpoint<T: Future<Output = Result<()>> + Send + 'static> {
   pub events: mpsc::Receiver<EndpointEvent>,
   pub commands: mpsc::Sender<EndpointCommand>,
-  pub local_addr: std::net::SocketAddr,
+  /// The address bound, for an acceptor. `None` for an initiator.
+  pub local_addr: Option<std::net::SocketAddr>,
   pub join_handle: T,
 }
 
@@ -104,57 +185,96 @@ impl tokio_util::codec::Decoder for FixDecoder {
   }
 }
 
-pub async fn connect(
+/// Initiate a session against the first of `endpoints` that answers, retrying
+/// with backoff.
+///
+/// Returns as soon as the attempt is under way; watch `events` for
+/// [`EndpointEvent::SessionConnected`], and send [`EndpointCommand::Shutdown`]
+/// (or drop the `commands` sender) to stop. Awaiting `join_handle` waits for the
+/// session to finish.
+pub fn connect(
   endpoints: Vec<(String, u16)>,
-  event_sender: mpsc::Sender<EndpointEvent>,
   repo: Arc<crate::repository::FixRepository>,
-  delimiter: Option<u8>,
   session_id: session::SessionIdentifier,
   session: session::Session,
-  mut cancellation_token: futures::channel::oneshot::Receiver<()>,
-) -> Result<()> {
-  for (host, port) in endpoints.iter().cycle() {
-    for backoff in [10, 100, 1000, 5000, 5000] {
-      info!("Connecting to {}:{}", host, port);
-      let connect_result = tokio::select! {
-        _ = &mut cancellation_token => return Ok(()),
-        result = tokio::time::timeout(
-          std::time::Duration::from_secs(10),
-          tokio::net::TcpStream::connect((host.as_str(), *port)),
-        ) => result,
-      };
-
-      match connect_result {
-        Ok(Ok(stream)) => {
-          trace!("Connected to {host}:{port}; logging in");
-          stream.set_nodelay(true)?;
-          // TODO: we should maybe handle logon errors differently and retry
-          // etc
-          return initiate_connection(
-            stream,
-            event_sender,
-            repo,
-            delimiter,
-            session_id,
-            session,
-          )
-          .await;
-        }
-        Ok(Err(e)) => trace!("Failed to connect to {host}:{port}: {e}"),
-        Err(_) => trace!("Failed to connect to {host}:{port}: timeout"),
-      }
-
-      tokio::select! {
-        _ = &mut cancellation_token => return Ok(()),
-        _ = tokio::time::sleep(std::time::Duration::from_millis(backoff)) => {}
-      }
-    }
+  config: EndpointConfig,
+) -> Result<Endpoint<impl Future<Output = Result<()>> + Send + 'static>> {
+  if endpoints.is_empty() {
+    return Err(Error::connection_failed("no endpoints to connect to"));
   }
 
-  Err(Error::connection_failed(format!(
-    "Failed to connect to any endpoint: {:?}",
-    endpoints
-  )))
+  let (event_sender, event_receiver) =
+    mpsc::channel::<EndpointEvent>(config.channel_depth);
+  let (command_sender, mut command_receiver) =
+    mpsc::channel::<EndpointCommand>(config.channel_depth);
+
+  let join_handle = tokio::spawn(async move {
+    // Shutdown arrives on the same channel the acceptor uses, rather than a
+    // separate cancellation token, so both endpoints are driven the same way.
+    let mut shutdown = command_receiver.next();
+
+    for (host, port) in endpoints.iter().cycle() {
+      for backoff in config.backoff.iter().copied() {
+        info!("Connecting to {}:{}", host, port);
+        let connect_result = tokio::select! {
+          _ = &mut shutdown => return Ok(()),
+          result = tokio::time::timeout(
+            config.connect_timeout,
+            tokio::net::TcpStream::connect((host.as_str(), *port)),
+          ) => result,
+        };
+
+        match connect_result {
+          Ok(Ok(stream)) => {
+            trace!("Connected to {host}:{port}; logging in");
+            stream.set_nodelay(true)?;
+            // TODO: we should maybe handle logon errors differently and retry
+            // etc
+            return initiate_connection(
+              stream,
+              event_sender,
+              repo,
+              session_id,
+              session,
+              config,
+            )
+            .await;
+          }
+          Ok(Err(e)) => trace!("Failed to connect to {host}:{port}: {e}"),
+          Err(_) => trace!("Failed to connect to {host}:{port}: timeout"),
+        }
+
+        tokio::select! {
+          _ = &mut shutdown => return Ok(()),
+          _ = tokio::time::sleep(backoff) => {}
+        }
+      }
+    }
+
+    Err(Error::connection_failed(format!(
+      "Failed to connect to any endpoint: {:?}",
+      endpoints
+    )))
+  });
+
+  Ok(Endpoint {
+    events: event_receiver,
+    commands: command_sender,
+    local_addr: None,
+    join_handle: resolve_join_handle(join_handle, "Initiator"),
+  })
+}
+
+/// Flatten a `JoinHandle` into the endpoint's own error type.
+async fn resolve_join_handle(
+  handle: tokio::task::JoinHandle<Result<()>>,
+  what: &'static str,
+) -> Result<()> {
+  match handle.await {
+    Ok(Ok(())) => Ok(()),
+    Ok(Err(e)) => Err(e),
+    Err(e) => Err(Error::unspecified(format!("{what} task panicked: {e:?}"))),
+  }
 }
 
 /// Build a Logon carrying the session's negotiated settings.
@@ -189,10 +309,11 @@ async fn initiate_connection(
   mut stream: tokio::net::TcpStream,
   mut event_sender: mpsc::Sender<EndpointEvent>,
   repo: Arc<crate::repository::FixRepository>,
-  delimiter: Option<u8>,
   session_id: session::SessionIdentifier,
   session: session::Session,
+  config: EndpointConfig,
 ) -> Result<()> {
+  let delimiter = config.delimiter;
   let peer_addr = stream
     .peer_addr()
     .map_or("Unknown".to_string(), |addr| addr.to_string());
@@ -214,9 +335,9 @@ async fn initiate_connection(
 
   async {
     let (session_send, mut session_recv) =
-      mpsc::channel::<session::SessionCommand>(100);
+      mpsc::channel::<session::SessionCommand>(config.channel_depth);
     let (session_event_sender, session_event_recv) =
-      mpsc::channel::<session::SessionEvent>(100);
+      mpsc::channel::<session::SessionEvent>(config.channel_depth);
 
     let logon_message = logon_message(&session.fix_version, &session)?;
     let state = SessionState::new(
@@ -238,8 +359,10 @@ async fn initiate_connection(
 
     // First message has to be a logon
     let logon_fix_msg = tokio::select! {
-      _ = tokio::time::sleep(LOGON_TIMEOUT) => {
-        return Err(Error::connection_failed("Connection timed out after 30 seconds"));
+      _ = tokio::time::sleep(config.logon_timeout) => {
+        return Err(Error::connection_failed(format!(
+          "Logon exchange timed out after {:?}", config.logon_timeout,
+        )));
       },
       msg_event = rx.next() => {
         match msg_event {
@@ -317,8 +440,9 @@ async fn accept_connection(
   mut stream: tokio::net::TcpStream,
   mut event_sender: mpsc::Sender<EndpointEvent>,
   repo: Arc<crate::repository::FixRepository>,
-  delimiter: Option<u8>,
+  config: EndpointConfig,
 ) -> Result<()> {
+  let delimiter = config.delimiter;
   info!("Handling new client connection");
   let partner = stream
     .peer_addr()
@@ -333,14 +457,16 @@ async fn accept_connection(
   );
 
   let (session_send, mut session_recv) =
-    mpsc::channel::<session::SessionCommand>(100);
+    mpsc::channel::<session::SessionCommand>(config.channel_depth);
   let (mut session_event_sender, session_event_recv) =
-    mpsc::channel::<session::SessionEvent>(100);
+    mpsc::channel::<session::SessionEvent>(config.channel_depth);
 
   // First message has to be a logon
   let logon_fix_msg = tokio::select! {
-    _ = tokio::time::sleep(LOGON_TIMEOUT) => {
-      return Err(Error::connection_failed("Connection timed out after 30 seconds"));
+    _ = tokio::time::sleep(config.logon_timeout) => {
+      return Err(Error::connection_failed(format!(
+          "Logon exchange timed out after {:?}", config.logon_timeout,
+        )));
     },
     msg_event = rx.next() => {
       match msg_event {
@@ -454,20 +580,23 @@ async fn accept_connection(
   .await
 }
 
-// TODO: Buidler pattern, or config obejct?
+/// Accept FIX connections on `addr`.
+///
+/// Answer each [`EndpointEvent::NewSession`] with the sequence numbers you have
+/// persisted for that peer, then take the
+/// [`SessionHandle`](session::SessionHandle) from
+/// [`EndpointEvent::SessionConnected`].
 pub async fn serve(
-  port: u16,
-  host: Option<String>,
+  addr: impl tokio::net::ToSocketAddrs,
   repo: Arc<crate::repository::FixRepository>,
-  delimiter: Option<u8>,
+  config: EndpointConfig,
 ) -> Result<Endpoint<impl Future<Output = Result<()>> + Send + 'static>> {
-  let (event_sender, event_receiver) = mpsc::channel::<EndpointEvent>(100);
+  let (event_sender, event_receiver) =
+    mpsc::channel::<EndpointEvent>(config.channel_depth);
   let (command_sender, mut command_receiver) =
-    mpsc::channel::<EndpointCommand>(100);
+    mpsc::channel::<EndpointCommand>(config.channel_depth);
 
-  let listener =
-    tokio::net::TcpListener::bind((host.unwrap_or("0.0.0.0".into()), port))
-      .await?;
+  let listener = tokio::net::TcpListener::bind(addr).await?;
 
   let local_addr = listener.local_addr()?;
 
@@ -493,12 +622,13 @@ pub async fn serve(
               let s = tracing::info_span!("ClientConnection", %sockaddr);
               let event_sender = event_sender.clone();
               let repo = repo.clone();
+              let config = config.clone();
               tokio::spawn(crate::util::wrap_and_report(async move {
                 accept_connection(
                   stream,
                   event_sender,
                   repo,
-                  delimiter).instrument(s).await
+                  config).instrument(s).await
               }));
             },
             Err(e) => {
@@ -512,18 +642,10 @@ pub async fn serve(
     Ok(())
   });
 
-  let resolve_join_handle = async move {
-    match join_handle.await {
-      Ok(Ok(())) => Ok(()),
-      Ok(Err(e)) => Err(e),
-      Err(e) => Err(Error::unspecified(format!("Server task panicked: {e:?}"))),
-    }
-  };
-
   Ok(Endpoint {
     commands: command_sender,
     events: event_receiver,
-    local_addr,
-    join_handle: resolve_join_handle,
+    local_addr: Some(local_addr),
+    join_handle: resolve_join_handle(join_handle, "Server"),
   })
 }
