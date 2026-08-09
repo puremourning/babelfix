@@ -575,7 +575,6 @@ impl Loopback {
     )
     .await
     .unwrap();
-    let local_addr = local_addr.expect("an acceptor is always bound");
     // `serve` has already spawned the accept loop; this handle exists only to
     // observe its exit, which the benchmark has no use for.
     drop(join_handle);
@@ -603,9 +602,9 @@ impl Loopback {
     let mut cancels = Vec::with_capacity(sessions);
 
     for i in 0..sessions {
-      let endpoint::Endpoint {
+      let endpoint::Initiator {
+        session: mut client,
         commands: cancel,
-        events: mut client_events,
         ..
       } = endpoint::connect(
         vec![("127.0.0.1".to_string(), local_addr.port())],
@@ -619,16 +618,6 @@ impl Loopback {
         endpoint::EndpointConfig::default(),
       )
       .unwrap();
-
-      let mut client = loop {
-        if let endpoint::EndpointEvent::SessionConnected(handle) = client_events
-          .next()
-          .await
-          .expect("initiator stopped before logon")
-        {
-          break handle;
-        }
-      };
 
       // Logon is followed by a TestRequest/Heartbeat exchange; measure settled
       // sessions rather than ones still recovering.

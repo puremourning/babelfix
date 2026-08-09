@@ -9,12 +9,16 @@
 //!   [`Session`](crate::session::Session) for the negotiated version, then take
 //!   the [`SessionHandle`](crate::session::SessionHandle) from
 //!   [`EndpointEvent::SessionConnected`].
-//! * [`connect`] initiates an outbound connection (with reconnect and backoff),
-//!   emitting the same [`EndpointEvent::SessionConnected`] once logged on.
+//! * [`connect`] initiates an outbound connection (with reconnect and backoff)
+//!   and returns an [`Initiator`], whose
+//!   [`SessionHandle`](crate::session::SessionHandle) is available immediately —
+//!   before the peer has been reached, let alone logged on.
 //!
-//! Both take an `Arc<`[`FixRepository`](crate::repository::FixRepository)`>` and
-//! an [`EndpointConfig`], and both return an [`Endpoint`]: the same events, the
-//! same [`EndpointCommand::Shutdown`], the same awaitable `join_handle`.
+//! The asymmetry is deliberate. An acceptor serves many sessions and cannot
+//! know a peer's identity until its Logon arrives, so it delivers each one
+//! through an event. An initiator has exactly one session and was handed its
+//! identity, so there is nothing to wait for — which is what lets a synchronous
+//! front end call `connect` and wire up the async half afterwards.
 //!
 //! # Server
 //!
@@ -153,16 +157,17 @@ pub enum EndpointCommand {
   Shutdown,
 }
 
-/// A running endpoint, whether it accepts connections or initiates them.
+/// A running acceptor, as returned by [`serve`].
 ///
-/// Both [`serve`] and [`connect`] return one of these: the same events, the
-/// same shutdown command, the same awaitable completion. The only asymmetry
-/// left is [`local_addr`](Self::local_addr), which an initiator does not have.
+/// An acceptor serves many sessions and learns each peer's identity from its
+/// Logon, which is why it hands them over through [`events`](Self::events)
+/// rather than up front. An initiator has exactly one session and already knows
+/// who it is talking to, so [`connect`] returns an [`Initiator`] instead, whose
+/// handle is available immediately.
 pub struct Endpoint<T: Future<Output = Result<()>> + Send + 'static> {
   pub events: mpsc::Receiver<EndpointEvent>,
   pub commands: mpsc::Sender<EndpointCommand>,
-  /// The address bound, for an acceptor. `None` for an initiator.
-  pub local_addr: Option<std::net::SocketAddr>,
+  pub local_addr: std::net::SocketAddr,
   pub join_handle: T,
 }
 
@@ -185,28 +190,65 @@ impl tokio_util::codec::Decoder for FixDecoder {
   }
 }
 
+/// A session being initiated: the handle is available before the peer has
+/// answered, or even been reached.
+///
+/// Unlike an acceptor, an initiator has exactly one session and was told its
+/// identity up front, so there is nothing to wait for before handing the
+/// [`SessionHandle`](session::SessionHandle) back. That matters for a
+/// synchronous front end — a GUI thread, say — which can take the handle from
+/// [`connect`] and wire up the async half afterwards.
+pub struct Initiator<T: Future<Output = Result<()>> + Send + 'static> {
+  /// The session.
+  ///
+  /// Commands sent through `session.tx` before the peer has logged on are
+  /// buffered and delivered once it has. Watch `session.events` for
+  /// [`ConnectionEstablished`](session::SessionEvent::ConnectionEstablished)
+  /// and [`Disconnected`](session::SessionEvent::Disconnected) to follow the
+  /// connection's progress; dropping `session.tx` ends the session.
+  pub session: session::SessionHandle,
+
+  /// Stops the reconnect loop. Sending [`EndpointCommand::Shutdown`], or
+  /// dropping this, gives up on connecting.
+  pub commands: mpsc::Sender<EndpointCommand>,
+
+  /// Resolves when the session ends, or with the error that stopped it being
+  /// established.
+  pub join_handle: T,
+}
+
 /// Initiate a session against the first of `endpoints` that answers, retrying
 /// with backoff.
 ///
-/// Returns as soon as the attempt is under way; watch `events` for
-/// [`EndpointEvent::SessionConnected`], and send [`EndpointCommand::Shutdown`]
-/// (or drop the `commands` sender) to stop. Awaiting `join_handle` waits for the
-/// session to finish.
+/// Returns as soon as the attempt is under way — before anything has been
+/// connected — so the caller need not be async to get hold of the session.
 pub fn connect(
   endpoints: Vec<(String, u16)>,
   repo: Arc<crate::repository::FixRepository>,
   session_id: session::SessionIdentifier,
   session: session::Session,
   config: EndpointConfig,
-) -> Result<Endpoint<impl Future<Output = Result<()>> + Send + 'static>> {
+) -> Result<Initiator<impl Future<Output = Result<()>> + Send + 'static>> {
   if endpoints.is_empty() {
     return Err(Error::connection_failed("no endpoints to connect to"));
   }
 
-  let (event_sender, event_receiver) =
-    mpsc::channel::<EndpointEvent>(config.channel_depth);
   let (command_sender, mut command_receiver) =
     mpsc::channel::<EndpointCommand>(config.channel_depth);
+
+  // Both session channels exist before the socket does. There is exactly one
+  // session and its identity is already known, so deferring these until logon
+  // would buy nothing and would force every caller to be async.
+  let (session_send, session_recv) =
+    mpsc::channel::<session::SessionCommand>(config.channel_depth);
+  let (session_event_sender, session_event_recv) =
+    mpsc::channel::<session::SessionEvent>(config.channel_depth);
+
+  let handle = session::SessionHandle {
+    session_id: session_id.clone(),
+    tx: session_send,
+    events: session_event_recv,
+  };
 
   let join_handle = tokio::spawn(async move {
     // Shutdown arrives on the same channel the acceptor uses, rather than a
@@ -232,11 +274,12 @@ pub fn connect(
             // etc
             return initiate_connection(
               stream,
-              event_sender,
               repo,
               session_id,
               session,
               config,
+              session_recv,
+              session_event_sender,
             )
             .await;
           }
@@ -257,10 +300,9 @@ pub fn connect(
     )))
   });
 
-  Ok(Endpoint {
-    events: event_receiver,
+  Ok(Initiator {
+    session: handle,
     commands: command_sender,
-    local_addr: None,
     join_handle: resolve_join_handle(join_handle, "Initiator"),
   })
 }
@@ -307,16 +349,14 @@ pub(crate) fn logon_message(
 
 async fn initiate_connection(
   mut stream: tokio::net::TcpStream,
-  mut event_sender: mpsc::Sender<EndpointEvent>,
   repo: Arc<crate::repository::FixRepository>,
   session_id: session::SessionIdentifier,
   session: session::Session,
   config: EndpointConfig,
+  mut session_recv: mpsc::Receiver<session::SessionCommand>,
+  session_event_sender: mpsc::Sender<session::SessionEvent>,
 ) -> Result<()> {
   let delimiter = config.delimiter;
-  let peer_addr = stream
-    .peer_addr()
-    .map_or("Unknown".to_string(), |addr| addr.to_string());
   let (rx, tx) = stream.split();
   let mut rx = tokio_util::codec::FramedRead::new(
     rx,
@@ -334,11 +374,6 @@ async fn initiate_connection(
   );
 
   async {
-    let (session_send, mut session_recv) =
-      mpsc::channel::<session::SessionCommand>(config.channel_depth);
-    let (session_event_sender, session_event_recv) =
-      mpsc::channel::<session::SessionEvent>(config.channel_depth);
-
     let logon_message = logon_message(&session.fix_version, &session)?;
     let state = SessionState::new(
       session_id.clone(),
@@ -371,9 +406,6 @@ async fn initiate_connection(
             return Err(Error::connection_failed(format!("Failed to read first message: {e}")));
           }
           None => {
-            event_sender.send(EndpointEvent::SessionInvalid(
-              peer_addr
-            )).await.map_err(crate::chan_closed)?;
             return Err(Error::connection_failed("Connection closed before first message"));
           }
         }
@@ -390,16 +422,6 @@ async fn initiate_connection(
         session_snapshot,
       ))
       .await?;
-
-    let session_handle = session::SessionHandle {
-      session_id: session_id.clone(),
-      tx: session_send,
-      events: session_event_recv,
-    };
-
-    event_sender
-      .send(EndpointEvent::SessionConnected(session_handle))
-      .await.map_err(crate::chan_closed)?;
 
     // Create a disconnecter to ensure we send a disconnect event when the
     // session is dropped
@@ -645,7 +667,7 @@ pub async fn serve(
   Ok(Endpoint {
     commands: command_sender,
     events: event_receiver,
-    local_addr: Some(local_addr),
+    local_addr,
     join_handle: resolve_join_handle(join_handle, "Server"),
   })
 }

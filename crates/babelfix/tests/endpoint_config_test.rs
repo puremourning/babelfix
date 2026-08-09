@@ -27,7 +27,7 @@ async fn the_logon_timeout_is_honoured() -> anyhow::Result<()> {
     EndpointConfig::default().logon_timeout(SHORT_LOGON_TIMEOUT),
   )
   .await?;
-  let addr = endpoint.local_addr.expect("an acceptor is always bound");
+  let addr = endpoint.local_addr;
 
   let started = Instant::now();
   let mut peer = tokio::net::TcpStream::connect(addr).await?;
@@ -60,11 +60,8 @@ async fn the_logon_timeout_is_honoured() -> anyhow::Result<()> {
   Ok(())
 }
 
-/// `connect` is symmetric with `serve`: it returns an [`Endpoint`], and closing
-/// its command channel stops the reconnect loop rather than leaking a task that
-/// retries forever.
-///
-/// [`Endpoint`]: endpoint::Endpoint
+/// Closing an initiator's command channel stops the reconnect loop rather than
+/// leaking a task that retries forever.
 #[test_log::test(tokio::test)]
 async fn shutting_down_an_initiator_stops_it_reconnecting() -> anyhow::Result<()>
 {
@@ -84,16 +81,14 @@ async fn shutting_down_an_initiator_stops_it_reconnecting() -> anyhow::Result<()
       .backoff([Duration::from_millis(10)]),
   )?;
 
-  assert!(
-    initiator.local_addr.is_none(),
-    "an initiator has no bound address"
-  );
-
-  let endpoint::Endpoint {
+  let endpoint::Initiator {
+    session,
     commands,
     join_handle,
-    ..
   } = initiator;
+  // The handle exists before anything has connected, which is the whole point:
+  // a synchronous caller can take it and wire up the async half afterwards.
+  assert_eq!(session.session_id.sender_comp_id, "CLIENT");
 
   // Let it fail a few times, then shut it down.
   tokio::time::sleep(Duration::from_millis(100)).await;

@@ -296,8 +296,6 @@ impl Server {
       fix::endpoint::EndpointConfig::default(),
     )
     .await?;
-    let local_addr =
-      local_addr.expect("an acceptor always has a bound address");
 
     let cancellation_token = tokio_util::sync::CancellationToken::new();
     let server = Arc::new(Mutex::new(Self {
@@ -390,9 +388,9 @@ impl Client {
   ) -> anyhow::Result<Self> {
     let cancellation_token = tokio_util::sync::CancellationToken::new();
 
-    let fix::endpoint::Endpoint {
+    let fix::endpoint::Initiator {
+      session: session_handle,
       commands: cancel_client,
-      events: mut client_rx,
       ..
     } = fix::endpoint::connect(
       vec![("127.0.0.1".to_string(), port)],
@@ -402,33 +400,19 @@ impl Client {
       fix::endpoint::EndpointConfig::default(),
     )?;
 
-    let timeout = tokio::time::sleep(EVENT_TIMEOUT);
-    let session_handle = tokio::select! {
-      event = client_rx.recv() => {
-          let event = match event {
-            Ok(event) => event,
-            Err(e) => {
-              anyhow::bail!("Client event channel closed unexpectedly: {e}");
-            }
-          };
-          let fix::endpoint::EndpointEvent::SessionConnected(session_handle) = event else {
-            anyhow::bail!("Expected SessionConnected event");
-          };
-          session_handle
-      }
-      _ = timeout => {
-        anyhow::bail!("Timed out waiting for client to connect");
-      }
+    // No waiting: the handle is live from the moment `connect` returns, and the
+    // connection announces itself with `ConnectionEstablished`, which is the
+    // first event a test sees. Consuming it here would hide it from them.
+    let session = Session {
+      handle: session_handle,
+      events: VecDeque::new(),
+      state,
+      cancellation_token: cancellation_token.clone(),
     };
 
     Ok(Self {
       cancel_signal: cancel_client,
-      session: Session {
-        handle: session_handle,
-        events: VecDeque::new(),
-        state,
-        cancellation_token: cancellation_token.clone(),
-      },
+      session,
       cancellation_token,
     })
   }
