@@ -15,6 +15,7 @@
 //! | Codec | [`codec`] (`babelfix-core`) | Framing a byte stream into messages and back |
 //! | Session | [`session`] (`babelfix-core`) | Sequence numbers, heartbeats, test requests, resend/replay |
 //! | Endpoint | [`endpoint`] (`babelfix-tokio`) | TCP acceptor/initiator that spawns sessions |
+//! | Connection | [`connection`] (`babelfix-tokio`) | The same session driven inline, without channels |
 //!
 //! ## Which crate do I want?
 //!
@@ -107,4 +108,4 @@ pub use babelfix_tokio::session;
 pub use babelfix_core::session;
 
 #[cfg(feature = "tokio")]
-pub use babelfix_tokio::{endpoint, util};
+pub use babelfix_tokio::{connection, endpoint, util};

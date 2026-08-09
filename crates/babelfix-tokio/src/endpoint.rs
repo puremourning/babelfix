@@ -155,7 +155,8 @@ pub async fn connect(
   )))
 }
 
-fn make_logon_message(
+/// Build a Logon carrying the session's negotiated settings.
+pub(crate) fn logon_message(
   fix_version: &Arc<crate::repository::FixVersion>,
   session: &session::Session,
 ) -> Result<crate::message::builder::Message> {
@@ -215,7 +216,7 @@ async fn initiate_connection(
     let (session_event_sender, session_event_recv) =
       mpsc::channel::<session::SessionEvent>(100);
 
-    let logon_message = make_logon_message(&session.fix_version, &session)?;
+    let logon_message = logon_message(&session.fix_version, &session)?;
     let state = SessionState::new(
       session_id.clone(),
       session,
@@ -435,7 +436,7 @@ async fn accept_connection(
       )));
     }
 
-    let logon_message = make_logon_message(&session.fix_version, &session)?;
+    let logon_message = logon_message(&session.fix_version, &session)?;
     let state =
       SessionState::new(session_id.clone(), session, std::time::Instant::now());
     let mut runner =

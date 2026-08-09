@@ -14,6 +14,8 @@
 //!   [`session::SessionHandle`] once a peer has logged on.
 //! * [`session`] is the driver, plus the owned command and event types the
 //!   handle carries.
+//! * [`connection`] is the same session without the channels or the task, for
+//!   applications whose own loop is the hot loop.
 //!
 //! Most applications should depend on the `babelfix` umbrella crate, which
 //! re-exports this alongside the core. Depend on this one directly if you want
@@ -23,6 +25,7 @@ pub use babelfix_core::{
   Error, FixMessage, Result, Value, codec, message, repository, schema, time,
 };
 
+pub mod connection;
 pub mod endpoint;
 pub mod session;
 pub mod util;
