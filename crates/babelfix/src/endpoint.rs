@@ -56,6 +56,12 @@ use tracing::{Instrument, error, info, trace};
 
 use super::*;
 use crate::repository::FieldBlock;
+use babelfix_core::session::SessionState;
+
+/// How long a peer has to complete the logon exchange.
+///
+/// TODO: configurable per endpoint — see CONFORMANCE.md deviation 11.
+const LOGON_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub enum EndpointEvent {
   NewSession {
@@ -93,25 +99,6 @@ impl tokio_util::codec::Decoder for FixDecoder {
     data: &mut bytes::BytesMut,
   ) -> std::result::Result<Option<Self::Item>, Self::Error> {
     self.0.decode(data)
-  }
-}
-
-/// Adapts [`babelfix_core::codec::FixEncoder`] to [`tokio_util::codec`].
-///
-/// Note the core encoder takes the message by reference; `tokio_util`'s trait
-/// insists on by-value, which is one of the reasons the session layer currently
-/// clones every outbound message.
-struct FixEncoder(babelfix_core::codec::FixEncoder);
-
-impl tokio_util::codec::Encoder<crate::message::FixMessage> for FixEncoder {
-  type Error = Error;
-
-  fn encode(
-    &mut self,
-    item: crate::message::FixMessage,
-    dst: &mut bytes::BytesMut,
-  ) -> std::result::Result<(), Self::Error> {
-    self.0.encode(&item, dst)
   }
 }
 
@@ -201,7 +188,7 @@ async fn initiate_connection(
   repo: Arc<crate::repository::FixRepository>,
   delimiter: Option<u8>,
   session_id: session::SessionIdentifier,
-  mut session: session::Session,
+  session: session::Session,
 ) -> Result<()> {
   let peer_addr = stream
     .peer_addr()
@@ -215,10 +202,6 @@ async fn initiate_connection(
       session.fix_version.clone(),
     )),
   );
-  let mut tx = tokio_util::codec::FramedWrite::new(
-    tx,
-    FixEncoder(babelfix_core::codec::FixEncoder::new(delimiter)),
-  );
 
   let span = tracing::info_span!(
     "ClientSession",
@@ -227,32 +210,32 @@ async fn initiate_connection(
   );
 
   async {
-    let (session_send, session_recv) =
+    let (session_send, mut session_recv) =
       mpsc::channel::<session::SessionCommand>(100);
-    let (mut session_event_sender, session_event_recv) =
+    let (session_event_sender, session_event_recv) =
       mpsc::channel::<session::SessionEvent>(100);
 
-    session_event_sender
-      .send(session::SessionEvent::ConnectionEstablished)
-      .await.map_err(crate::chan_closed)?;
-
-    session
-      .send(
-        make_logon_message(&session.fix_version, &session)?,
-        &session_id,
-        &mut tx,
-        &mut session_event_sender,
-      )
-      .await?;
-
-    let mut connect_timer = tokio::time::interval_at(
-      tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-      std::time::Duration::from_secs(30),
+    let logon_message = make_logon_message(&session.fix_version, &session)?;
+    let state = SessionState::new(
+      session_id.clone(),
+      session,
+      std::time::Instant::now(),
     );
+    let mut runner = session::SessionRunner::new(
+      state,
+      tx,
+      session_event_sender.clone(),
+      delimiter,
+    );
+
+    runner
+      .emit(session::SessionEvent::ConnectionEstablished)
+      .await?;
+    runner.send_logon(logon_message).await?;
 
     // First message has to be a logon
     let logon_fix_msg = tokio::select! {
-      _ = connect_timer.tick() => {
+      _ = tokio::time::sleep(LOGON_TIMEOUT) => {
         return Err(Error::connection_failed("Connection timed out after 30 seconds"));
       },
       msg_event = rx.next() => {
@@ -269,20 +252,18 @@ async fn initiate_connection(
           }
         }
       },
-      else => {
-        return Err(Error::protocol_violation("First mesasge was not a logon, or invalid data received"));
-      }
     };
 
     let logon_msg =
       crate::message::builder::Message::from_message(&logon_fix_msg)?;
 
-    session_event_sender
-      .send(session::SessionEvent::RawMessageReceived(
+    let session_snapshot = runner.state().session().clone();
+    runner
+      .emit(session::SessionEvent::RawMessageReceived(
         logon_fix_msg,
-        session.clone(),
+        session_snapshot,
       ))
-      .await.map_err(crate::chan_closed)?;
+      .await?;
 
     let session_handle = session::SessionHandle {
       session_id: session_id.clone(),
@@ -295,7 +276,7 @@ async fn initiate_connection(
       .await.map_err(crate::chan_closed)?;
 
     // Create a disconnecter to ensure we send a disconnect event when the
-    // SessionManager is dropped
+    // session is dropped
     let disconnector = Disconnector {
       session_event_sender: session_event_sender.clone(),
     };
@@ -307,16 +288,9 @@ async fn initiate_connection(
       )));
     }
 
-    let mut session_manager = session::SessionManager::new(
-      rx,
-      tx,
-      session_id,
-      session,
-      session_event_sender,
-      session_recv,
-    );
-
-    session_manager.run(logon_msg).await
+    let result = runner.run(&mut rx, &mut session_recv, logon_msg).await;
+    drop(disconnector);
+    result
   }
   .instrument(span)
   .await
@@ -354,24 +328,15 @@ async fn accept_connection(
       delimiter,
     )),
   );
-  let mut tx = tokio_util::codec::FramedWrite::new(
-    tx,
-    FixEncoder(babelfix_core::codec::FixEncoder::new(delimiter)),
-  );
 
-  let (session_send, session_recv) =
+  let (session_send, mut session_recv) =
     mpsc::channel::<session::SessionCommand>(100);
   let (mut session_event_sender, session_event_recv) =
     mpsc::channel::<session::SessionEvent>(100);
 
-  let mut connect_timer = tokio::time::interval_at(
-    tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-    std::time::Duration::from_secs(30),
-  );
-
   // First message has to be a logon
   let logon_fix_msg = tokio::select! {
-    _ = connect_timer.tick() => {
+    _ = tokio::time::sleep(LOGON_TIMEOUT) => {
       return Err(Error::connection_failed("Connection timed out after 30 seconds"));
     },
     msg_event = rx.next() => {
@@ -386,9 +351,6 @@ async fn accept_connection(
         }
       }
     },
-    else => {
-      return Err(Error::protocol_violation("First mesasge was not a logon, or invalid data received"));
-    }
   };
 
   session_event_sender
@@ -397,7 +359,7 @@ async fn accept_connection(
     .map_err(crate::chan_closed)?;
 
   // Create a disconnecter to ensure we send a disconnect event when the
-  // SessionManager is dropped
+  // session is dropped
   let disconnector = Disconnector {
     session_event_sender: session_event_sender.clone(),
   };
@@ -438,7 +400,7 @@ async fn accept_connection(
     })
     .await
     .map_err(crate::chan_closed)?;
-  let mut session = get_session.await.map_err(crate::chan_closed)??;
+  let session = get_session.await.map_err(crate::chan_closed)??;
 
   session_event_sender
     .send(session::SessionEvent::RawMessageReceived(
@@ -473,25 +435,17 @@ async fn accept_connection(
       )));
     }
 
-    session
-      .send(
-        make_logon_message(&session.fix_version, &session)?,
-        &session_id,
-        &mut tx,
-        &mut session_event_sender,
-      )
-      .await?;
+    let logon_message = make_logon_message(&session.fix_version, &session)?;
+    let state =
+      SessionState::new(session_id.clone(), session, std::time::Instant::now());
+    let mut runner =
+      session::SessionRunner::new(state, tx, session_event_sender, delimiter);
 
-    let mut session_manager = session::SessionManager::new(
-      rx,
-      tx,
-      session_id,
-      session,
-      session_event_sender,
-      session_recv,
-    );
+    runner.send_logon(logon_message).await?;
 
-    session_manager.run(logon_msg).await
+    let result = runner.run(&mut rx, &mut session_recv, logon_msg).await;
+    drop(disconnector);
+    result
   }
   .instrument(span)
   .await

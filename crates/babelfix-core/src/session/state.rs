@@ -154,6 +154,21 @@ impl SessionState {
     Some(self.timers.next_out.min(self.timers.next_in))
   }
 
+  /// Transmit a message belonging to the logon exchange.
+  ///
+  /// The handshake — reading the first frame, deriving the session identity
+  /// from it, and asking the application for the persisted sequence numbers —
+  /// still lives in the driver, so the driver needs a way to put its Logon on
+  /// the wire with the session's sequence number and header fields applied.
+  /// This is that seam, and it closes when logon moves in here.
+  pub fn send_logon(
+    &mut self,
+    msg: builder::Message,
+    out: &mut impl SessionOutput,
+  ) -> Result<()> {
+    self.transmit(msg, out)
+  }
+
   /// Process the peer's Logon and send the synchronisation TestRequest that
   /// establishes whether either side has missed anything.
   pub fn start(

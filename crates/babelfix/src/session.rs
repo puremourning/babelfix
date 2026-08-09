@@ -1,5 +1,10 @@
 //! FIX session layer: sequence numbers, heartbeats and message recovery.
 //!
+//! The protocol itself lives in [`babelfix_core::session`] as a sans-io state
+//! machine. This module is the tokio driver for it: it owns the socket, the
+//! clock and the channels, feeds the state machine, and flushes whatever it
+//! produces.
+//!
 //! A [`Session`] holds the mutable per-connection state — inbound/outbound
 //! sequence numbers, the heartbeat interval and the negotiated
 //! [`FixVersion`](crate::repository::FixVersion). The [`crate::endpoint`] layer
@@ -42,111 +47,20 @@
 //! }
 //! ```
 
-use std::sync::Arc;
+use std::collections::VecDeque;
 
+use bytes::BytesMut;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
-use futures::{Sink, SinkExt};
-use tracing::{debug, error, info};
+use tokio::io::AsyncWriteExt;
+use tracing::debug;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct SessionIdentifier {
-  pub begin_string: String,
-  pub sender_comp_id: String,
-  pub target_comp_id: String,
-}
+use babelfix_core::codec::FixEncoder;
+use babelfix_core::session::{
+  Command, Event, Progress, SessionOutput, SessionState,
+};
 
-#[derive(Clone, Default)]
-pub struct Session {
-  pub next_out_seq_num: u32,
-  pub next_in_seq_num: u32,
-  pub heartbeat_interval: std::time::Duration,
-  pub fix_version: Arc<crate::repository::FixVersion>,
-  /// Fractional-second precision for the `SendingTime` this session stamps on
-  /// outbound messages. Defaults to nanoseconds.
-  ///
-  /// Some counterparties reject a `SendingTime` carrying more precision than
-  /// they expect, so this is per-session rather than global.
-  pub time_precision: crate::time::TimePrecision,
-}
-
-impl std::fmt::Debug for Session {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("Session")
-      .field("next_out_seq_num", &self.next_out_seq_num)
-      .field("next_in_seq_num", &self.next_in_seq_num)
-      .field("heartbeat_interval", &self.heartbeat_interval)
-      .field("fix_version", &self.fix_version.name)
-      .field("time_precision", &self.time_precision)
-      .finish()
-  }
-}
-
-impl Session {
-  pub fn new(fix_version: Arc<crate::repository::FixVersion>) -> Self {
-    Self {
-      next_out_seq_num: 1,
-      next_in_seq_num: 1,
-      heartbeat_interval: std::time::Duration::from_secs(30),
-      fix_version,
-      time_precision: crate::time::TimePrecision::default(),
-    }
-  }
-
-  pub async fn send(
-    &mut self,
-    mut msg: crate::message::builder::Message,
-    session_id: &SessionIdentifier,
-    writer: &mut (impl Sink<crate::message::FixMessage> + Unpin),
-    session_event_sender: &mut futures::channel::mpsc::Sender<SessionEvent>,
-  ) -> crate::Result<()> {
-    // Only set the seqnum if it's not a gap fill
-    if !msg
-      .header
-      .has_tag(crate::schema::FIX_Latest::Fields::MsgSeqNum)
-    {
-      msg.header.set_tag(
-        crate::schema::FIX_Latest::Fields::MsgSeqNum,
-        self.next_out_seq_num,
-      );
-      self.next_out_seq_num += 1;
-    }
-
-    msg.header.set_tag(
-      crate::schema::FIX_Latest::Fields::SenderCompID,
-      session_id.sender_comp_id.clone(),
-    );
-    msg.header.set_tag(
-      crate::schema::FIX_Latest::Fields::TargetCompID,
-      session_id.target_comp_id.clone(),
-    );
-    // The clock is read here, once per message, rather than once per batch of
-    // work: a single pass over the state machine can emit several messages (a
-    // gap fill and the retransmit that follows it, or a replay queue being
-    // drained), and stamping them all with one timestamp would be wrong.
-    //
-    // It will move later still — into the encoder, so the value is taken as
-    // close to the wire as the sans-io boundary allows. That has to wait until
-    // the session stops writing through a `Sink<FixMessage>`, because the
-    // encoder runs inside the sink and its output is not visible from here.
-    msg.header.set_tag(
-      crate::schema::FIX_Latest::Fields::SendingTime,
-      crate::time::fix_time(chrono::Utc::now(), self.time_precision).as_str(),
-    );
-
-    let msg = msg.as_message()?;
-    debug!("Sending message: {:?}", msg);
-    session_event_sender
-      .send(SessionEvent::RawMessageSent(msg.clone(), self.clone()))
-      .await
-      .map_err(crate::chan_closed)?;
-    writer
-      .send(msg)
-      .await
-      .map_err(|_| crate::Error::connection_failed("Failed to send message"))
-  }
-}
+pub use babelfix_core::session::{Session, SessionIdentifier};
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -179,6 +93,10 @@ pub enum SessionCommand {
 
   /// Request the current state of the session. The session state will be
   /// provided to the supplied [`oneshot::Sender`].
+  ///
+  /// This exists because the session runs in its own task. It is answered by
+  /// the driver without troubling the state machine, so — unlike the commands
+  /// above — it puts nothing on the wire and does not defer the next heartbeat.
   GetSessionState(oneshot::Sender<Session>),
 }
 
@@ -209,11 +127,12 @@ pub enum SessionEvent {
   /// [`SessionEvent::MessageReceived`] event, which emitted for valid,
   /// well-sequenced messages.
   ///
-  /// FIXME: Should include the socket send time
+  /// FIXME: Should include the socket receive time
   RawMessageReceived(crate::message::FixMessage, Session),
 
   /// Emitted when any FIX message was sent to the remote, including admin
-  /// messages. Useful for auditing, logging and display.
+  /// messages. Useful for auditing, logging and display. `SendingTime` is the
+  /// value that went on the wire.
   ///
   /// FIXME: Should include the socket send time.
   ///
@@ -263,11 +182,42 @@ pub enum SessionEvent {
   /// Emitted when the session is disconnected, either due to a logout message
   /// or a network error.
   Disconnected,
-  // Emitted when the session is disconnected due to an error, either a
-  // protocol violation or a network error.
-  //
-  // FIXME: Not actually used yet.
-  // Error(crate::Error),
+}
+
+impl SessionEvent {
+  /// Take an owned copy of a borrowed core event.
+  ///
+  /// This is where the async tier pays for its convenience: the state machine
+  /// hands out borrows, and turning them into owned events for delivery over a
+  /// channel means cloning. A driver that implements
+  /// [`SessionOutput`] directly pays none of it.
+  fn from_core(event: Event<'_>) -> Option<Self> {
+    Some(match event {
+      Event::ConnectionEstablished => SessionEvent::ConnectionEstablished,
+      Event::RecoveryCompleted => SessionEvent::RecoveryCompleted,
+      Event::SessionState(s) => SessionEvent::SessionState(s.clone()),
+      Event::RawMessageReceived(m, s) => {
+        SessionEvent::RawMessageReceived(m.clone(), s.clone())
+      }
+      Event::RawMessageSent(m, s) => {
+        SessionEvent::RawMessageSent(m.clone(), s.clone())
+      }
+      Event::MessageReceived(m) => SessionEvent::MessageReceived(m.clone()),
+      Event::ResendRequest {
+        resend_request,
+        begin_seq_no,
+        end_seq_no,
+      } => SessionEvent::ResendRequest {
+        resend_request: resend_request.clone(),
+        begin_seq_no,
+        end_seq_no,
+      },
+      Event::Disconnected => SessionEvent::Disconnected,
+      // `Event` is `#[non_exhaustive]`; a variant this driver does not know
+      // about is not worth crashing a live session over.
+      _ => return None,
+    })
+  }
 }
 
 #[derive(Debug)]
@@ -278,729 +228,210 @@ pub struct SessionHandle {
   pub events: mpsc::Receiver<SessionEvent>,
 }
 
-#[derive(Debug, Default, Clone)]
-struct Replay {
-  pub begin_seq_no: u32,
-  pub end_seq_no: u32,
-
-  next_expected_seq_num: u32,
-  gap_fill_count: u32,
-
-  queue: Vec<crate::message::builder::Message>,
+/// Collects what the state machine produces during one synchronous pass, so the
+/// driver can flush it afterwards.
+///
+/// The two queues exist because [`SessionOutput`] is synchronous and the socket
+/// and the event channel are not. They are drained after every input, which is
+/// what keeps the peer's backpressure connected to the application's: a slow
+/// consumer blocks the flush, which stops the loop reading the socket.
+pub(crate) struct PendingOutput {
+  encoder: FixEncoder,
+  /// Encoded bytes waiting to go to the socket.
+  bytes: BytesMut,
+  /// Events waiting to go to the application.
+  events: VecDeque<SessionEvent>,
 }
 
-pub(crate) struct SessionManager<'stream, E, D> {
-  rx: tokio_util::codec::FramedRead<tokio::net::tcp::ReadHalf<'stream>, D>,
-  tx: tokio_util::codec::FramedWrite<tokio::net::tcp::WriteHalf<'stream>, E>,
-  session_id: SessionIdentifier,
-  session: Session,
-  session_event_sender: mpsc::Sender<SessionEvent>,
-  session_msg_recv: mpsc::Receiver<SessionCommand>,
-  rerequest_in_progress: Option<u32>, // seq num after which replay is complete
-  recovery_tr_id: Option<String>,
-  replay: Option<Replay>,
-  /// The peer sent a Logout that arrived inside a sequence gap. It is
-  /// acknowledged, and the session ended, once the gap has been recovered.
-  peer_logout_pending: bool,
-}
-
-impl<'stream, E, D> SessionManager<'stream, E, D>
-where
-  D: tokio_util::codec::Decoder<Item = crate::message::FixMessage>,
-  E: tokio_util::codec::Encoder<crate::message::FixMessage>,
-  <D as tokio_util::codec::Decoder>::Error: std::fmt::Display,
-{
-  pub fn new(
-    rx: tokio_util::codec::FramedRead<tokio::net::tcp::ReadHalf<'stream>, D>,
-    tx: tokio_util::codec::FramedWrite<tokio::net::tcp::WriteHalf<'stream>, E>,
-    session_id: SessionIdentifier,
-    session: Session,
-    session_event_sender: mpsc::Sender<SessionEvent>,
-    session_msg_recv: mpsc::Receiver<SessionCommand>,
-  ) -> Self {
+impl PendingOutput {
+  fn new(delimiter: Option<u8>, precision: crate::time::TimePrecision) -> Self {
     Self {
-      rx,
-      tx,
-      session_id,
-      session,
-      session_event_sender,
-      session_msg_recv,
-      rerequest_in_progress: None,
-      recovery_tr_id: None,
-      replay: None,
-      peer_logout_pending: false,
+      encoder: FixEncoder::new(delimiter).with_precision(precision),
+      bytes: BytesMut::with_capacity(4096),
+      events: VecDeque::new(),
+    }
+  }
+}
+
+impl SessionOutput for PendingOutput {
+  fn transmit(
+    &mut self,
+    msg: &mut crate::message::FixMessage,
+    _session: &Session,
+  ) -> crate::Result<()> {
+    // The clock is read here, once per message, immediately before the bytes
+    // are produced — the latest point the sans-io boundary allows.
+    self
+      .encoder
+      .encode_stamped(msg, chrono::Utc::now(), &mut self.bytes)
+  }
+
+  fn event(&mut self, event: Event<'_>) -> crate::Result<()> {
+    if let Some(event) = SessionEvent::from_core(event) {
+      self.events.push_back(event);
+    }
+    Ok(())
+  }
+}
+
+/// Drives a [`SessionState`] over a tokio socket.
+pub(crate) struct SessionRunner<W> {
+  state: SessionState,
+  out: PendingOutput,
+  writer: W,
+  event_sender: mpsc::Sender<SessionEvent>,
+}
+
+impl<W> SessionRunner<W> {
+  pub(crate) fn state(&mut self) -> &mut SessionState {
+    &mut self.state
+  }
+}
+
+impl<W: tokio::io::AsyncWrite + Unpin> SessionRunner<W> {
+  pub(crate) fn new(
+    state: SessionState,
+    writer: W,
+    event_sender: mpsc::Sender<SessionEvent>,
+    delimiter: Option<u8>,
+  ) -> Self {
+    let precision = state.session().time_precision;
+    Self {
+      state,
+      out: PendingOutput::new(delimiter, precision),
+      writer,
+      event_sender,
     }
   }
 
-  pub async fn run(
-    &mut self,
-    logon_msg_in: crate::message::builder::Message,
-  ) -> crate::Result<()> {
-    if !self.handle_session_message(logon_msg_in).await? {
-      return Ok(());
+  /// Deliver everything the last pass produced.
+  ///
+  /// Events go first, then bytes: the application must see
+  /// [`SessionEvent::RawMessageSent`] before the peer could possibly have seen
+  /// the message, which is the order the pre-sans-io session guaranteed.
+  pub(crate) async fn flush(&mut self) -> crate::Result<()> {
+    while let Some(event) = self.out.events.pop_front() {
+      self
+        .event_sender
+        .send(event)
+        .await
+        .map_err(crate::chan_closed)?;
     }
 
-    let tr_id = format!(
-      "HELO-{}",
-      chrono::Utc::now()
-        .timestamp_nanos_opt()
-        .unwrap_or(chrono::Utc::now().timestamp_millis() * 1_000_000)
-    );
-    let mut test_request = crate::message::builder::Message::new(
-      self.session.fix_version.clone(),
-      "1",
-    )?;
-    test_request
-      .body
-      .set_tag(crate::schema::FIX_Latest::Fields::TestReqID, tr_id.clone());
+    if !self.out.bytes.is_empty() {
+      self.writer.write_all(&self.out.bytes).await?;
+      self.writer.flush().await?;
+      self.out.bytes.clear();
+    }
+
+    Ok(())
+  }
+
+  /// Emit a lifecycle event that comes from the driver rather than the protocol.
+  pub(crate) async fn emit(
+    &mut self,
+    event: SessionEvent,
+  ) -> crate::Result<()> {
     self
-      .session
-      .send(
-        test_request,
-        &self.session_id,
-        &mut self.tx,
-        &mut self.session_event_sender,
-      )
-      .await?;
-    self.recovery_tr_id = Some(tr_id);
+      .event_sender
+      .send(event)
+      .await
+      .map_err(crate::chan_closed)
+  }
 
-    let mut out_heartbeat_timer = tokio::time::interval_at(
-      tokio::time::Instant::now() + self.session.heartbeat_interval,
-      self.session.heartbeat_interval,
-    );
+  /// Send a message belonging to the logon exchange, which the driver still
+  /// owns. Everything else goes through the state machine.
+  pub(crate) async fn send_logon(
+    &mut self,
+    msg: crate::message::builder::Message,
+  ) -> crate::Result<()> {
+    self.state.send_logon(msg, &mut self.out)?;
+    self.flush().await
+  }
 
-    let mut in_heartbeat_timer = tokio::time::interval_at(
-      tokio::time::Instant::now() + self.session.heartbeat_interval,
-      self.session.heartbeat_interval,
-    );
-    let mut missed_heartbeats = 0;
+  /// Run the session until it ends.
+  pub(crate) async fn run<R>(
+    &mut self,
+    rx: &mut R,
+    commands: &mut mpsc::Receiver<SessionCommand>,
+    logon: crate::message::builder::Message,
+  ) -> crate::Result<()>
+  where
+    R: Stream<Item = crate::Result<crate::message::FixMessage>> + Unpin,
+  {
+    let progress =
+      self
+        .state
+        .start(logon, std::time::Instant::now(), &mut self.out)?;
+    self.flush().await?;
+    if progress.is_close() {
+      return Ok(());
+    }
 
     loop {
-      tokio::select! {
-        _ = out_heartbeat_timer.tick() => {
-          let heartbeat =
-            crate::message::builder::Message::new(
-              self.session.fix_version.clone(),
-              "0")?;
-          self.send(heartbeat).await?;
-        },
-        _ = in_heartbeat_timer.tick() => {
-          missed_heartbeats += 1;
-          match missed_heartbeats {
-            1 => {
-              debug!("Missed first heartbeat");
-            }
-            2 => {
-              debug!("Missed second heartbeat, sending TestRequest");
-              let mut test_request =
-                crate::message::builder::Message::new(
-                  self.session.fix_version.clone(),
-                  "1")?;
-              test_request.body.set_tag(
-                crate::schema::FIX_Latest::Fields::TestReqID,
-                format!("HB{}", chrono::Utc::now().timestamp_millis()),
-              );
-              self.send(test_request).await?;
-            }
-            3.. => {
-              error!("Missed third heartbeat, logging out");
-              let mut logout =
-                crate::message::builder::Message::new(
-                  self.session.fix_version.clone(),
-                  "5")?;
-              logout.body.set_tag(
-                crate::schema::FIX_Latest::Fields::Text,
-                "Heartbeat timeout",
-              );
-              self.send(logout).await?;
-              break;
-            }
-            _ => { unreachable!() }
-          }
+      // `next_deadline` is never `None` for a live session, but a far-future
+      // fallback keeps the select! arm well-formed either way.
+      let deadline = self
+        .state
+        .next_deadline()
+        .unwrap_or_else(|| std::time::Instant::now() + FAR_FUTURE);
+
+      let progress = tokio::select! {
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+          self.state.on_timeout(std::time::Instant::now(), &mut self.out)?
         }
-        cmd = self.session_msg_recv.next() => {
-          // The outbound heartbeat timer is reset by commands that put a
-          // message on the wire, since that message is itself evidence of
-          // liveness. Commands that transmit nothing must leave it alone, or
-          // an application polling the session would silence its own
-          // heartbeats and be declared dead by the peer.
-          if let Some(cmd) = cmd {
-            match cmd {
-              SessionCommand::Send(msg) => {
-                out_heartbeat_timer.reset();
-                self.send(msg).await?;
-              }
-              SessionCommand::Replay(msg) => {
-                out_heartbeat_timer.reset();
-                self.replay(msg).await?;
-              }
-              SessionCommand::ReplayComplete => {
-                out_heartbeat_timer.reset();
-                self.complete_replay().await?;
-              }
-              SessionCommand::Disconnect => {
-                out_heartbeat_timer.reset();
-                info!("Session disconnect requested");
-                // Always announce the intent to disconnect, so the peer can
-                // tell an orderly shutdown from a network failure.
-                let mut logout =
-                  crate::message::builder::Message::new(
-                    self.session.fix_version.clone(),
-                    "5")?;
-                logout.body.set_tag(
-                  crate::schema::FIX_Latest::Fields::Text,
-                  "Disconnect requested by application",
-                );
-                self.send(logout).await?;
-                break;
-              }
-              SessionCommand::GetSessionState(resp) => {
-                let _ = resp.send(self.session.clone());
-              }
+        cmd = commands.next() => {
+          match cmd {
+            Some(SessionCommand::GetSessionState(resp)) => {
+              // Answered from here rather than the state machine: it transmits
+              // nothing, so it must not defer the outbound heartbeat. An
+              // application polling its own session used to be able to silence
+              // its heartbeats entirely and be declared dead by the peer.
+              let _ = resp.send(self.state.session().clone());
+              Progress::Continue
             }
-          } else {
-            debug!("Session message channel closed, stopping session manager");
-            break;
-          }
-        },
-        socket_event = self.rx.next() => {
-          match socket_event {
-            Some(Ok(fix_message)) => {
-              in_heartbeat_timer.reset();
-              missed_heartbeats = 0;
-              let msg = crate::message::builder::Message::from_message(
-                &fix_message,
-              )?;
-              self.session_event_sender
-                .send(SessionEvent::RawMessageReceived(
-                  fix_message,
-                  self.session.clone()
-                ))
-                .await.map_err(crate::chan_closed)?;
-              if !self.handle_session_message(msg).await? {
-                break;
-              }
-            }
-            Some(Err(e)) => {
-              error!("Error reading from socket: {e}");
-              break;
+            Some(cmd) => {
+              let cmd = match cmd {
+                SessionCommand::Send(m) => Command::Send(m),
+                SessionCommand::Replay(m) => Command::Replay(m),
+                SessionCommand::ReplayComplete => Command::ReplayComplete,
+                SessionCommand::Disconnect => Command::Disconnect,
+                SessionCommand::GetSessionState(_) => unreachable!("handled above"),
+              };
+              self.state.on_command(cmd, std::time::Instant::now(), &mut self.out)?
             }
             None => {
-              info!("Client disconnected");
+              debug!("Session message channel closed, stopping session manager");
               break;
             }
           }
         }
-        else => {
-          // To STFU the errors
-          break;
-        }
-      }
-    }
-    Ok(())
-  }
-
-  async fn handle_session_message(
-    &mut self,
-    msg: crate::message::builder::Message,
-  ) -> crate::Result<bool> {
-    let msg_seq_num = msg
-      .header
-      .tag(crate::schema::FIX_Latest::Fields::MsgSeqNum)
-      .ok_or_else(|| crate::Error::protocol_violation("Missing MsgSeqNum"))?
-      .as_int()
-      .ok_or_else(|| {
-        crate::Error::protocol_violation("MsgSeqNum is not an integer")
-      })? as u32;
-
-    // A SequenceReset-GapFill stands in for the messages it skips over, so it
-    // occupies a slot in the stream and is subject to the same sequence checks
-    // as any other message. Accepting one differs only in where the expected
-    // inbound sequence number lands: at NewSeqNo rather than one further on.
-    let gap_fill_new_seq_num = if msg.fix_message.msg_type == "4" {
-      Some(Self::gap_fill_new_seq_num(&msg)?)
-    } else {
-      None
-    };
-
-    match msg_seq_num.cmp(&self.session.next_in_seq_num) {
-      std::cmp::Ordering::Equal => {
-        if let Some(new_seq_num) = gap_fill_new_seq_num {
-          if new_seq_num <= msg_seq_num {
-            return Err(crate::Error::protocol_violation(format!(
-              "Invalid NewSeqNo in GapFill; expected greater than {} but got {}",
-              msg_seq_num, new_seq_num
-            )));
-          }
-          info!(
-            "GapFill received, advancing next_in_seq_num to {}",
-            new_seq_num
-          );
-          self.session.next_in_seq_num = new_seq_num;
-        } else {
-          self.session.next_in_seq_num += 1;
-        }
-      }
-      std::cmp::Ordering::Greater => {
-        // A gap. Request everything from the first missing message onwards
-        // with an open-ended EndSeqNo of 0, and discard this message and every
-        // subsequent one until the gap closes: they all fall inside the range
-        // just requested, so the peer will retransmit them in order. This is
-        // the approach the session layer specification recommends, and it
-        // avoids holding an unbounded queue of out-of-order messages.
-        if self.rerequest_in_progress.is_none() {
-          let mut rr = crate::message::builder::Message::new(
-            msg.fix_version.clone(),
-            "2",
-          )?;
-          rr.body.set_tag(
-            crate::schema::FIX_Latest::Fields::BeginSeqNo,
-            self.session.next_in_seq_num,
-          );
-          rr.body
-            .set_tag(crate::schema::FIX_Latest::Fields::EndSeqNo, 0);
-          self.rerequest_in_progress = Some(msg_seq_num);
-          self
-            .session
-            .send(
-              rr,
-              &self.session_id,
-              &mut self.tx,
-              &mut self.session_event_sender,
-            )
-            .await?;
-        }
-
-        // ResendRequest and Logout are the exceptions to discarding. Neither
-        // is ever retransmitted — the peer gap fills over them instead — so
-        // discarding one loses it for good, and this is the only opportunity
-        // to act on it. Neither consumes the sequence number: the gap fill
-        // that eventually covers it will.
-        return match msg.fix_message.msg_type.as_str() {
-          // Service the retransmission the peer asked for. Our own request for
-          // the messages we are missing has already gone out above.
-          "2" => self.dispatch_message(msg).await,
-          // The messages still missing precede the Logout, so acknowledging it
-          // now would abandon them. Recover first, acknowledge afterwards.
-          "5" => {
-            info!("Logout received inside a gap; deferring acknowledgement");
-            self.peer_logout_pending = true;
-            Ok(true)
-          }
-          _ => Ok(true),
-        };
-      }
-      std::cmp::Ordering::Less => {
-        // One of the two peers has lost session state and the connection is no
-        // longer recoverable.
-        self
-          .send_logout(format!(
-            "Invalid MsgSeqNum; too low. Expected {} but got {}.",
-            self.session.next_in_seq_num, msg_seq_num
-          ))
-          .await?;
-        return Ok(false);
-      }
-    }
-
-    if self
-      .rerequest_in_progress
-      .is_some_and(|replay_seq| self.session.next_in_seq_num >= replay_seq)
-    {
-      self.rerequest_in_progress = None;
-    }
-
-    // TODO: Validate message matches session_id
-    // The dispatch result decides whether the session continues: an inbound
-    // Logout ends it once acknowledged.
-    if !self.dispatch_message(msg).await? {
-      return Ok(false);
-    }
-
-    // The gap that deferred a Logout acknowledgement has now closed.
-    if self.peer_logout_pending && self.rerequest_in_progress.is_none() {
-      self
-        .send_logout("Logout message received. Closing session.")
-        .await?;
-      return Ok(false);
-    }
-
-    Ok(true)
-  }
-
-  /// Read `NewSeqNo` from an inbound SequenceReset(35=4).
-  ///
-  /// Only the gap fill form is supported. A SequenceReset-Reset — GapFillFlag
-  /// of "N", or absent, which the specification defines as the default — asks
-  /// the peer to accept a new sequence number without regard to the message's
-  /// own, and is rejected.
-  fn gap_fill_new_seq_num(
-    msg: &crate::message::builder::Message,
-  ) -> crate::Result<u32> {
-    if msg
-      .body
-      .tag(crate::schema::FIX_Latest::Fields::GapFillFlag)
-      .ok_or_else(|| crate::Error::protocol_violation("Missing GapFillFlag"))?
-      .as_string()
-      != "Y"
-    {
-      return Err(crate::Error::protocol_violation(
-        "Sequence reset message is garbage and not supported",
-      ));
-    }
-
-    Ok(
-      msg
-        .body
-        .tag(crate::schema::FIX_Latest::Fields::NewSeqNo)
-        .ok_or_else(|| crate::Error::protocol_violation("Missing NewSeqNo"))?
-        .as_int()
-        .ok_or_else(|| crate::Error::protocol_violation("Expected integer"))?
-        as u32,
-    )
-  }
-
-  /// Send a Logout(35=5) carrying a diagnostic reason.
-  async fn send_logout(
-    &mut self,
-    text: impl Into<crate::message::builder::TypedValue>,
-  ) -> crate::Result<()> {
-    let mut logout = crate::message::builder::Message::new(
-      self.session.fix_version.clone(),
-      "5",
-    )?;
-    logout
-      .body
-      .set_tag(crate::schema::FIX_Latest::Fields::Text, text);
-    self
-      .session
-      .send(
-        logout,
-        &self.session_id,
-        &mut self.tx,
-        &mut self.session_event_sender,
-      )
-      .await
-  }
-
-  async fn dispatch_message(
-    &mut self,
-    msg: crate::message::builder::Message,
-  ) -> crate::Result<bool> {
-    self
-      .session_event_sender
-      .send(SessionEvent::SessionState(self.session.clone()))
-      .await
-      .map_err(crate::chan_closed)?;
-    match msg.fix_message.msg_type.as_str() {
-      "A" => {
-        // we already mostly handled this
-      }
-      // Heartbeat
-      "0" => {
-        if let Some(test_req_id) = msg
-          .body
-          .tag(crate::schema::FIX_Latest::Fields::TestReqID)
-          .map(|v| v.as_string())
-        {
-          if let Some(recovery_tr_id) = &self.recovery_tr_id {
-            if &test_req_id == recovery_tr_id {
-              debug!(
-                "Received heartbeat for recovery test request, session is now established"
-              );
-              self.recovery_tr_id = None;
-              self
-                .session_event_sender
-                .send(SessionEvent::RecoveryCompleted)
-                .await
-                .map_err(crate::chan_closed)?;
+        frame = rx.next() => {
+          match frame {
+            Some(Ok(fix_message)) => {
+              self.state.on_message(fix_message, std::time::Instant::now(), &mut self.out)?
             }
+            Some(Err(e)) => {
+              tracing::error!("Error reading from socket: {e}");
+              break;
+            }
+            None => self.state.on_peer_closed(&mut self.out)?,
           }
         }
-      }
-      // TestRequest
-      "1" => {
-        let mut heartbeat =
-          crate::message::builder::Message::new(msg.fix_version, "0")?;
-        heartbeat.body.set_tag(
-          crate::schema::FIX_Latest::Fields::TestReqID,
-          msg
-            .body
-            .tag(crate::schema::FIX_Latest::Fields::TestReqID)
-            .ok_or_else(|| {
-              crate::Error::protocol_violation("Missing TestReqID")
-            })?
-            .as_string(),
-        );
-        self.send(heartbeat).await?;
-      }
-      // ResendRequest
-      "2" => {
-        let begin_seq_no = msg
-          .body
-          .tag(crate::schema::FIX_Latest::Fields::BeginSeqNo)
-          .ok_or_else(|| {
-            crate::Error::protocol_violation("Missing BeginSeqNo")
-          })?
-          .as_int()
-          .ok_or_else(|| crate::Error::protocol_violation("Expected integer"))?
-          as u32;
-        let end_seq_no = msg
-          .body
-          .tag(crate::schema::FIX_Latest::Fields::EndSeqNo)
-          .ok_or_else(|| crate::Error::protocol_violation("Missing EndSeqNo"))?
-          .as_int()
-          .ok_or_else(|| crate::Error::protocol_violation("Expected integer"))?
-          as u32;
-        if end_seq_no > 0 && begin_seq_no > end_seq_no {
-          return Err(crate::Error::protocol_violation(
-            "Invalid ResendRequest",
-          ));
-        }
-        if self.replay.is_some() {
-          return Err(crate::Error::protocol_violation(
-            "ResendRequest while a resend is already in progress",
-          ));
-        }
-        self.replay = Some(Replay {
-          begin_seq_no,
-          // EndSeqNo of 0 means "everything since BeginSeqNo", which is
-          // everything we have sent so far.
-          end_seq_no: if end_seq_no > 0 {
-            end_seq_no
-          } else {
-            self.session.next_out_seq_num.saturating_sub(1)
-          },
-          next_expected_seq_num: begin_seq_no,
-          gap_fill_count: 0,
-          queue: Vec::new(),
-        });
-        self
-          .session_event_sender
-          .send(SessionEvent::ResendRequest {
-            resend_request: msg,
-            begin_seq_no: self.replay.as_ref().unwrap().begin_seq_no,
-            end_seq_no: self.replay.as_ref().unwrap().end_seq_no,
-          })
-          .await
-          .map_err(crate::chan_closed)?
-      }
-      // Logout
-      "5" => {
-        let mut logout =
-          crate::message::builder::Message::new(msg.fix_version.clone(), "5")?;
-        logout.body.set_tag(
-          crate::schema::FIX_Latest::Fields::Text,
-          "Logout message received. Closing session.",
-        );
-        self
-          .session
-          .send(
-            logout,
-            &self.session_id,
-            &mut self.tx,
-            &mut self.session_event_sender,
-          )
-          .await?;
-        return Ok(false);
-      }
-      _ if msg.is_admin_message() => {
-        // Ignore other admin messages
-        // FIXME: Not Reject and BusinessMessageReject!
-      }
-      &_ => {
-        self
-          .session_event_sender
-          .send(SessionEvent::MessageReceived(msg))
-          .await
-          .map_err(crate::chan_closed)?;
+      };
+
+      // Everything the pass produced reaches the peer and the application
+      // before the next input is read. See `PendingOutput`.
+      self.flush().await?;
+
+      if progress.is_close() {
+        break;
       }
     }
-    Ok(true)
-  }
-
-  /// Skip over `begin_seq_no..=end_seq_no` with a single SequenceReset-GapFill.
-  ///
-  /// Both bounds are inclusive and name messages that will *not* be
-  /// retransmitted. `NewSeqNo` is therefore `end_seq_no + 1`: the sequence
-  /// number of the next message the peer should expect, which must be the one
-  /// transmitted immediately after this gap fill.
-  async fn send_gap_fill(
-    &mut self,
-    begin_seq_no: u32,
-    end_seq_no: u32,
-  ) -> crate::Result<()> {
-    let mut gap_fill = crate::message::builder::Message::new(
-      self.session.fix_version.clone(),
-      "4",
-    )
-    .unwrap();
-    gap_fill
-      .body
-      .set_tag(crate::schema::FIX_Latest::Fields::GapFillFlag, "Y");
-    gap_fill
-      .header
-      .set_tag(crate::schema::FIX_Latest::Fields::MsgSeqNum, begin_seq_no);
-    gap_fill
-      .body
-      .set_tag(crate::schema::FIX_Latest::Fields::NewSeqNo, end_seq_no + 1);
-    self
-      .session
-      .send(
-        gap_fill,
-        &self.session_id,
-        &mut self.tx,
-        &mut self.session_event_sender,
-      )
-      .await
-  }
-
-  async fn send(
-    &mut self,
-    mut msg: crate::message::builder::Message,
-  ) -> crate::Result<()> {
-    if let Some(replay) = self.replay.as_mut() {
-      replay.queue.push(msg);
-      return Ok(());
-    }
-
-    msg
-      .header
-      .remove_tag(crate::schema::FIX_Latest::Fields::MsgSeqNum);
-    msg
-      .header
-      .remove_tag(crate::schema::FIX_Latest::Fields::PossDupFlag);
-
-    debug!("Sending message to session: {:?}", msg);
-    self
-      .session
-      .send(
-        msg,
-        &self.session_id,
-        &mut self.tx,
-        &mut self.session_event_sender,
-      )
-      .await
-  }
-
-  async fn replay(
-    &mut self,
-    mut message: crate::message::builder::Message,
-  ) -> crate::Result<()> {
-    // Replay logic:
-    //
-    // Find consecutive runs of admin messages, and send gap fill for that range
-    // For any non-admin message, send the message as-is with PossDupFlag=Y, and
-    // new SendingTime, copying SendingTime to OrigSendingTime If we run out of
-    // records, send a gap fill to the end_seq_no. (though strictly speaking we
-    // should just abort at this point)
-    //
-
-    let replay = self.replay.as_mut().ok_or_else(|| {
-      crate::Error::protocol_violation("No replay in progress")
-    })?;
-    let msg_seq_num = message
-      .header
-      .tag(crate::schema::FIX_Latest::Fields::MsgSeqNum)
-      .ok_or_else(|| {
-        crate::Error::protocol_violation("No MsgSeqNum in replay message")
-      })?
-      .as_int()
-      .ok_or_else(|| {
-        crate::Error::protocol_violation("MsgSeqNum is not an integer")
-      })? as u32;
-    if msg_seq_num < replay.next_expected_seq_num {
-      // Already processed
-      return Ok(());
-    }
-    if msg_seq_num > replay.end_seq_no {
-      // Beyond what the peer asked for. Retransmitting it would put a sequence
-      // number on the wire that we are about to reuse for a new message.
-      return Ok(());
-    }
-    replay.gap_fill_count += msg_seq_num - replay.next_expected_seq_num;
-    replay.next_expected_seq_num = msg_seq_num + 1;
-    if message.is_admin_message() {
-      replay.gap_fill_count += 1;
-      return Ok(());
-    }
-    // Non-admin message: close off the run of skipped messages preceding it
-    // before sending it. The gap fill must stop at msg_seq_num - 1, because
-    // msg_seq_num itself is about to be retransmitted.
-    if replay.gap_fill_count > 0 {
-      let first_skipped =
-        replay.next_expected_seq_num - replay.gap_fill_count - 1;
-      self.send_gap_fill(first_skipped, msg_seq_num - 1).await?;
-    }
-
-    // re-acquire our ref to the replay after send_gap_fill borrowed self
-    let replay = self.replay.as_mut().ok_or_else(|| {
-      crate::Error::protocol_violation("No replay in progress")
-    })?;
-    replay.gap_fill_count = 0;
-    // Send the message as a PossDup
-    use crate::schema::FIX_Latest::Fields;
-    message.header.set_tag(
-      Fields::OrigSendingTime,
-      message
-        .header
-        .tag(Fields::SendingTime)
-        .ok_or_else(|| crate::Error::protocol_violation("Missing SendingTime"))?
-        .clone(),
-    );
-    message.header.set_tag(Fields::PossDupFlag, "Y");
-    self
-      .session
-      .send(
-        message,
-        &self.session_id,
-        &mut self.tx,
-        &mut self.session_event_sender,
-      )
-      .await
-  }
-
-  async fn complete_replay(&mut self) -> crate::Result<()> {
-    let replay = self.replay.as_mut().ok_or_else(|| {
-      crate::Error::protocol_violation("No replay in progress")
-    })?;
-    let queue = std::mem::take(&mut replay.queue);
-    if (replay.next_expected_seq_num - replay.gap_fill_count)
-      <= replay.end_seq_no
-    {
-      let begin_seq_no = replay.next_expected_seq_num - replay.gap_fill_count;
-      let end_seq_no = replay.end_seq_no;
-      self.send_gap_fill(begin_seq_no, end_seq_no).await?;
-    }
-    self.replay = None;
-    for msg in queue {
-      self.send(msg).await?;
-    }
-
-    let tr_id = format!(
-      "HELO-{}",
-      chrono::Utc::now()
-        .timestamp_nanos_opt()
-        .unwrap_or(chrono::Utc::now().timestamp_millis() * 1_000_000)
-    );
-    let mut test_request = crate::message::builder::Message::new(
-      self.session.fix_version.clone(),
-      "1",
-    )?;
-    test_request
-      .body
-      .set_tag(crate::schema::FIX_Latest::Fields::TestReqID, tr_id.clone());
-    self
-      .session
-      .send(
-        test_request,
-        &self.session_id,
-        &mut self.tx,
-        &mut self.session_event_sender,
-      )
-      .await?;
-    self.recovery_tr_id = Some(tr_id);
 
     Ok(())
   }
 }
+
+/// Long enough to mean "no deadline" without risking an `Instant` overflow.
+const FAR_FUTURE: std::time::Duration = std::time::Duration::from_secs(86_400);

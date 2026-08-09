@@ -630,6 +630,12 @@ impl FixMessage {
 
     out.reserve(self.tags.len() * 20);
 
+    // `out` may already hold earlier messages: a driver batching a pass's
+    // worth of output writes several before flushing. Everything below is
+    // relative to this mark, and in particular the checksum covers only the
+    // message written here.
+    let msg_start = out.len();
+
     let delim = delimiter as char;
     // Write the header but with the body length set to 000000, then come back
     // and fill in the actual body length after we know it.
@@ -685,7 +691,7 @@ impl FixMessage {
     out[body_length_pos..body_length_pos + 6]
       .copy_from_slice(format!("{:06}", body_length).as_bytes());
     let mut checksum: u8 = 0;
-    for ch in &out[..] {
+    for ch in &out[msg_start..] {
       checksum = checksum.wrapping_add(*ch);
     }
     out.extend_from_slice(b"10=");
@@ -1665,6 +1671,63 @@ mod tests {
     REPO
       .get_or_init(|| Arc::new(repository::orchestrate().unwrap()))
       .clone()
+  }
+
+  /// `write_to` appends, so several messages may share a buffer before it is
+  /// flushed. Each one's `CheckSum` must cover only itself.
+  ///
+  /// This used to be wrong — the checksum ran over the whole buffer — and went
+  /// unnoticed because the old session flushed the socket after every single
+  /// message, so the buffer was always empty on entry. A driver that batches a
+  /// pass's worth of output hits it immediately, and the peer rejects the
+  /// second message.
+  #[test]
+  fn write_to_appends_without_corrupting_earlier_messages()
+  -> Result<(), anyhow::Error> {
+    let repo = load_repo();
+    let fix44 = repo.get_version("FIX.4.4").unwrap();
+
+    let mut heartbeat = builder::Message::new(fix44.clone(), "0")?;
+    heartbeat.header.set_tag(34u32, 1i64);
+    heartbeat.header.set_tag(49u32, "SENDER");
+    heartbeat.header.set_tag(56u32, "TARGET");
+    heartbeat.header.set_tag(52u32, "20231010-12:00:00.000");
+    let heartbeat = heartbeat.into_message()?;
+
+    let mut test_request = builder::Message::new(fix44.clone(), "1")?;
+    test_request.header.set_tag(34u32, 2i64);
+    test_request.header.set_tag(49u32, "SENDER");
+    test_request.header.set_tag(56u32, "TARGET");
+    test_request.header.set_tag(52u32, "20231010-12:00:01.000");
+    test_request.body.set_tag(112u32, "PING");
+    let test_request = test_request.into_message()?;
+
+    // Written alone, for reference.
+    let mut alone = bytes::BytesMut::new();
+    test_request.write_to(&mut alone, b'|')?;
+
+    // Written after another message into the same buffer.
+    let mut batched = bytes::BytesMut::new();
+    heartbeat.write_to(&mut batched, b'|')?;
+    let offset = batched.len();
+    test_request.write_to(&mut batched, b'|')?;
+
+    assert_eq!(
+      &batched[offset..],
+      &alone[..],
+      "appending changed the bytes of the message written second"
+    );
+
+    // And both must survive a round trip through the decoder, which verifies
+    // the checksum.
+    let mut decoder = crate::codec::FixDecoder::new(repo.clone(), Some(b'|'));
+    let first = decoder.decode(&mut batched)?.expect("first message");
+    assert_eq!(first.get_type(), "0");
+    let second = decoder.decode(&mut batched)?.expect("second message");
+    assert_eq!(second.get_type(), "1");
+    assert!(batched.is_empty(), "trailing bytes left undecoded");
+
+    Ok(())
   }
 
   #[test]
