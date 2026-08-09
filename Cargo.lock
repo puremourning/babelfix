@@ -120,9 +120,7 @@ name = "babelfix"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-stream",
- "babelfix-repo",
- "babelfix-repogen",
+ "babelfix-core",
  "bytes",
  "chrono",
  "criterion",
@@ -130,9 +128,24 @@ dependencies = [
  "googletest",
  "serde",
  "test-log",
- "thiserror 2.0.19",
  "tokio",
  "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "babelfix-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "babelfix-repo",
+ "babelfix-repogen",
+ "bytes",
+ "chrono",
+ "googletest",
+ "serde",
+ "test-log",
+ "thiserror 2.0.19",
  "tracing",
 ]
 

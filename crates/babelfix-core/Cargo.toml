@@ -1,0 +1,39 @@
+[package]
+name = "babelfix-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Sans-io core of the babelfix FIX engine: messages, codec and session state machine"
+categories = ["network-programming"]
+keywords = ["fix-protocol", "financial", "fix", "trading"]
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+thiserror.workspace = true
+babelfix-repo.workspace = true
+babelfix-repogen.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+serde = { workspace = true, optional = true }
+
+# Deliberately NOT inherited from [workspace.dependencies], and deliberately
+# `default-features = false`: that drops chrono's `clock` (and hence `now`)
+# feature, so `Utc::now()` does not exist in this crate at all. The core never
+# reads a wall clock — timestamps are handed to it by the driver. Enforcing that
+# with the feature resolver beats enforcing it by code review.
+#
+# Note this only holds when the crate is built alone (`cargo build -p
+# babelfix-core`); a `--workspace` build unifies features and hands `now` back.
+# CI checks the standalone build for exactly this reason.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+anyhow.workspace = true
+googletest.workspace = true
+test-log.workspace = true

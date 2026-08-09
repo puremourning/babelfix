@@ -13,15 +13,12 @@ keywords = ["fix-protocol", "financial", "fix", "trading"]
 
 [features]
 default = []
-serde = ["dep:serde"]
+serde = ["dep:serde", "babelfix-core/serde"]
 
 [dependencies]
 futures.workspace = true
-async-stream.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
-babelfix-repo.workspace = true
-babelfix-repogen.workspace = true
+babelfix-core.workspace = true
 tracing.workspace = true
 bytes.workspace = true
 tokio-util.workspace = true

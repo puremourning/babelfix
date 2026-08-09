@@ -1,11 +1,13 @@
 //! Assorted helpers used across babelfix.
 //!
-//! FIX UTC timestamp formatting ([`time_now_fix`] and [`fix_time`], producing the
-//! `YYYYMMDD-HH:MM:SS.sss` form used in `SendingTime`/`TransactTime`), plus
-//! [`wrap_and_report`] for logging errors out of spawned background tasks.
+//! The wall clock lives here rather than in `babelfix-core`: the core formats a
+//! timestamp it is handed, and this crate is the one that decides what time it
+//! is. See [`babelfix_core::time`] for the formatting itself.
 
 use futures::prelude::*;
 use tracing::error;
+
+pub use babelfix_core::time::{FixTime, TimePrecision, fix_time};
 
 pub async fn wrap_and_report<F, T>(future: F) -> Option<T>
 where
@@ -20,12 +22,7 @@ where
   }
 }
 
+/// The current UTC time, formatted for `SendingTime`/`TransactTime`.
 pub fn time_now_fix() -> String {
-  // Use chrono to get the current time in UTC and format it as per FIX standard
-  let now = chrono::Utc::now();
-  fix_time(now)
-}
-
-pub fn fix_time(when: chrono::DateTime<chrono::Utc>) -> String {
-  when.format("%Y%m%d-%H:%M:%S.%3f").to_string()
+  fix_time(chrono::Utc::now(), TimePrecision::Millis).into()
 }

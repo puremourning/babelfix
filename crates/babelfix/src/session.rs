@@ -122,7 +122,8 @@ impl Session {
     debug!("Sending message: {:?}", msg);
     session_event_sender
       .send(SessionEvent::RawMessageSent(msg.clone(), self.clone()))
-      .await?;
+      .await
+      .map_err(crate::chan_closed)?;
     writer
       .send(msg)
       .await
@@ -458,7 +459,7 @@ where
                   fix_message,
                   self.session.clone()
                 ))
-                .await?;
+                .await.map_err(crate::chan_closed)?;
               if !self.handle_session_message(msg).await? {
                 break;
               }
@@ -672,7 +673,8 @@ where
     self
       .session_event_sender
       .send(SessionEvent::SessionState(self.session.clone()))
-      .await?;
+      .await
+      .map_err(crate::chan_closed)?;
     match msg.fix_message.msg_type.as_str() {
       "A" => {
         // we already mostly handled this
@@ -693,7 +695,8 @@ where
               self
                 .session_event_sender
                 .send(SessionEvent::RecoveryCompleted)
-                .await?;
+                .await
+                .map_err(crate::chan_closed)?;
             }
           }
         }
@@ -762,7 +765,8 @@ where
             begin_seq_no: self.replay.as_ref().unwrap().begin_seq_no,
             end_seq_no: self.replay.as_ref().unwrap().end_seq_no,
           })
-          .await?
+          .await
+          .map_err(crate::chan_closed)?
       }
       // Logout
       "5" => {
@@ -791,7 +795,8 @@ where
         self
           .session_event_sender
           .send(SessionEvent::MessageReceived(msg))
-          .await?;
+          .await
+          .map_err(crate::chan_closed)?;
       }
     }
     Ok(true)

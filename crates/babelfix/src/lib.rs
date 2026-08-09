@@ -9,9 +9,15 @@
 //! |-------|----------------|----------------|
 //! | Schema | [`schema`] (`babelfix-repogen`) | Compile-time FIX tag-number constants, e.g. [`schema::FIX_Latest::Fields`] |
 //! | Repository | [`repository`] (`babelfix-repo`) | Parsed FIX Orchestra metadata: versions, messages, fields, components, groups |
-//! | Message | [`message`] | Parsing, building and serialising individual FIX messages |
+//! | Message | [`message`] (`babelfix-core`) | Parsing, building and serialising individual FIX messages |
 //! | Session | [`session`] | Sequence numbers, heartbeats, test requests, resend/replay |
 //! | Endpoint | [`endpoint`] | TCP acceptor/initiator that frames the wire protocol and spawns sessions |
+//!
+//! The message representation, the wire codec and (eventually) the session
+//! state machine live in `babelfix-core`, which has no I/O, no timers and no
+//! async runtime. This crate adds the tokio-based transport on top. Depend on
+//! `babelfix-core` directly if you would rather drive the protocol from your
+//! own event loop.
 //!
 //! ## Getting a repository
 //!
@@ -73,108 +79,20 @@
 //! additionally bundle and derive from the Apache-2.0 licensed FIX Orchestra
 //! data, and are therefore released under `MIT AND Apache-2.0`.
 
-pub use babelfix_repo as repository;
-pub use babelfix_repogen as schema;
+pub use babelfix_core::repository;
+pub use babelfix_core::schema;
+pub use babelfix_core::{Error, FixMessage, Result, Value, message, time};
 
 pub mod endpoint;
-pub mod message;
 pub mod session;
 pub mod util;
 
-pub use message::{FixMessage, Value};
-
-/// The error type returned by all fallible babelfix operations.
+/// Map a channel failure onto [`Error::ConnectionFailed`].
 ///
-/// Most variants carry a human-readable description; the `#[from]` variants wrap
-/// the underlying error so it can be propagated with `?`. Downstream code can
-/// match on the semantic variants or simply format the error via [`Display`].
-///
-/// [`Display`]: std::fmt::Display
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum Error {
-  /// An underlying I/O error (socket, framing).
-  #[error("I/O error: {0}")]
-  Io(#[from] std::io::Error),
-
-  /// An error parsing or loading the FIX repository / Orchestra data.
-  #[error("FIX repository error: {0}")]
-  Repository(#[from] repository::FixRepoError),
-
-  /// A message could not be parsed or is structurally invalid.
-  #[error("Invalid message: {0}")]
-  InvalidMessage(std::borrow::Cow<'static, str>),
-
-  /// A well-formed message violated a FIX session/protocol rule
-  /// (e.g. an unexpected message type or a bad sequence number).
-  #[error("Protocol violation: {0}")]
-  ProtocolViolation(std::borrow::Cow<'static, str>),
-
-  /// A connection could not be established, or was lost.
-  #[error("Connection failed: {0}")]
-  ConnectionFailed(std::borrow::Cow<'static, str>),
-
-  /// Any error that does not fit a more specific variant.
-  #[error("Unspecified FIX error: {0}")]
-  Unspecified(std::borrow::Cow<'static, str>),
+/// [`Error`] lives in `babelfix-core`, which knows nothing about `futures`, so
+/// the `From<mpsc::SendError>` / `From<oneshot::Canceled>` impls this crate used
+/// to carry would now break the orphan rule. Channel failures are mapped
+/// explicitly at each call site instead.
+pub(crate) fn chan_closed<E>(_: E) -> Error {
+  Error::connection_failed("session channel closed")
 }
-
-// Internal channels closing is treated as the session/connection going away.
-impl From<futures::channel::mpsc::SendError> for Error {
-  fn from(_: futures::channel::mpsc::SendError) -> Self {
-    Error::ConnectionFailed(std::borrow::Cow::Borrowed(
-      "session channel closed",
-    ))
-  }
-}
-
-impl From<futures::channel::oneshot::Canceled> for Error {
-  fn from(_: futures::channel::oneshot::Canceled) -> Self {
-    Error::ConnectionFailed(std::borrow::Cow::Borrowed(
-      "session channel closed",
-    ))
-  }
-}
-
-// A malformed numeric field in a message surfaces as an invalid message.
-impl From<std::num::ParseIntError> for Error {
-  fn from(e: std::num::ParseIntError) -> Self {
-    Error::InvalidMessage(format!("invalid integer field: {e}").into())
-  }
-}
-
-// Formatting failures while serialising a message are not expected in practice.
-impl From<std::fmt::Error> for Error {
-  fn from(e: std::fmt::Error) -> Self {
-    Error::Unspecified(std::borrow::Cow::Owned(format!(
-      "formatting error: {e}"
-    )))
-  }
-}
-
-impl Error {
-  pub fn unspecified<S: Into<std::borrow::Cow<'static, str>>>(msg: S) -> Self {
-    Error::Unspecified(msg.into())
-  }
-
-  pub fn invalid_message<S: Into<std::borrow::Cow<'static, str>>>(
-    msg: S,
-  ) -> Self {
-    Error::InvalidMessage(msg.into())
-  }
-
-  pub fn connection_failed<S: Into<std::borrow::Cow<'static, str>>>(
-    msg: S,
-  ) -> Self {
-    Error::ConnectionFailed(msg.into())
-  }
-
-  pub fn protocol_violation<S: Into<std::borrow::Cow<'static, str>>>(
-    msg: S,
-  ) -> Self {
-    Error::ProtocolViolation(msg.into())
-  }
-}
-
-/// Convenience alias for a `Result` whose error type is [`enum@Error`].
-pub type Result<T> = std::result::Result<T, Error>;

@@ -11,8 +11,8 @@
 //! flat, ordered `Vec` of `(tag, `[`Value`]`)` pairs (`tags`). Parsing is trivial
 //! and cheap: each [`Value`] is normally just a *slice* into the original buffer
 //! ([`Value::StringRef`] / [`Value::DataRef`]), so there is no per-field
-//! allocation or copying. This is the representation the [`crate::endpoint`]
-//! codec produces and consumes.
+//! allocation or copying. This is the representation the wire codec produces
+//! and consumes.
 //!
 //! Reach for it when you need **very fast reading**: scan `tags` and resolve each
 //! value against `data`. It also supports **fast construction by appending body
@@ -23,8 +23,8 @@
 //! malformed message, so appending by hand is comparatively rare.
 //!
 //! ```no_run
-//! use babelfix::{repository, FixMessage, Value};
-//! use babelfix::schema::FIX_Latest::Fields;
+//! use babelfix_core::{repository, FixMessage, Value};
+//! use babelfix_core::schema::FIX_Latest::Fields;
 //!
 //! let repo = repository::orchestrate().unwrap();
 //! let fix = repo.get_version("FIX.4.4").unwrap();
@@ -50,7 +50,7 @@
 //! ([`builder::Block::group_mut`]). It owns its data and does bookkeeping on every
 //! mutation, so it is **not especially fast** — but it is the right choice for
 //! assembling non-trivial messages or navigating one by structure. This is the
-//! type the [`crate::session`] layer works with.
+//! type the session layer works with.
 //!
 //! Convert between the two with [`builder::Message::from_message`] (`FixMessage` →
 //! builder) and [`builder::Message::as_message`] / [`builder::Message::into_message`]
@@ -59,8 +59,8 @@
 //! # Building
 //!
 //! ```no_run
-//! use babelfix::{repository, message::builder};
-//! use babelfix::schema::FIX_Latest::Fields;
+//! use babelfix_core::{repository, message::builder};
+//! use babelfix_core::schema::FIX_Latest::Fields;
 //!
 //! let repo = repository::orchestrate().unwrap();
 //! let fix = repo.get_version("FIX.4.4").unwrap();
@@ -76,8 +76,8 @@
 //! # Parsing
 //!
 //! ```no_run
-//! use babelfix::{repository, message::builder};
-//! use babelfix::schema::FIX_Latest::Fields;
+//! use babelfix_core::{repository, message::builder};
+//! use babelfix_core::schema::FIX_Latest::Fields;
 //!
 //! let repo = repository::orchestrate().unwrap();
 //! let fix = repo.get_version("FIX.4.4").unwrap();
@@ -97,8 +97,8 @@
 //! [`builder::Block`] pushed onto the group:
 //!
 //! ```no_run
-//! use babelfix::{repository, message::builder};
-//! use babelfix::schema::FIX_Latest::Fields;
+//! use babelfix_core::{repository, message::builder};
+//! use babelfix_core::schema::FIX_Latest::Fields;
 //!
 //! let repo = repository::orchestrate().unwrap();
 //! let fix = repo.get_version("FIX.4.4").unwrap();

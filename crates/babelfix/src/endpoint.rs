@@ -302,7 +302,7 @@ async fn initiate_connection(
 
     session_event_sender
       .send(session::SessionEvent::ConnectionEstablished)
-      .await?;
+      .await.map_err(crate::chan_closed)?;
 
     session
       .send(
@@ -332,7 +332,7 @@ async fn initiate_connection(
           None => {
             event_sender.send(EndpointEvent::SessionInvalid(
               peer_addr
-            )).await?;
+            )).await.map_err(crate::chan_closed)?;
             return Err(Error::connection_failed("Connection closed before first message"));
           }
         }
@@ -350,7 +350,7 @@ async fn initiate_connection(
         logon_fix_msg,
         session.clone(),
       ))
-      .await?;
+      .await.map_err(crate::chan_closed)?;
 
     let session_handle = session::SessionHandle {
       session_id: session_id.clone(),
@@ -360,7 +360,7 @@ async fn initiate_connection(
 
     event_sender
       .send(EndpointEvent::SessionConnected(session_handle))
-      .await?;
+      .await.map_err(crate::chan_closed)?;
 
     // Create a disconnecter to ensure we send a disconnect event when the
     // SessionManager is dropped
@@ -448,7 +448,7 @@ async fn accept_connection(
           return Err(Error::connection_failed(format!("Failed to read first message: {e}")));
         }
         None => {
-          event_sender.send(EndpointEvent::SessionInvalid(partner)).await?;
+          event_sender.send(EndpointEvent::SessionInvalid(partner)).await.map_err(crate::chan_closed)?;
           return Err(Error::connection_failed("Connection closed before first message"));
         }
       }
@@ -460,7 +460,8 @@ async fn accept_connection(
 
   session_event_sender
     .send(session::SessionEvent::ConnectionEstablished)
-    .await?;
+    .await
+    .map_err(crate::chan_closed)?;
 
   // Create a disconnecter to ensure we send a disconnect event when the
   // SessionManager is dropped
@@ -502,15 +503,17 @@ async fn accept_connection(
       session_id: session_id.clone(),
       response: set_session,
     })
-    .await?;
-  let mut session = get_session.await??;
+    .await
+    .map_err(crate::chan_closed)?;
+  let mut session = get_session.await.map_err(crate::chan_closed)??;
 
   session_event_sender
     .send(session::SessionEvent::RawMessageReceived(
       logon_fix_msg,
       session.clone(),
     ))
-    .await?;
+    .await
+    .map_err(crate::chan_closed)?;
 
   let span = tracing::info_span!(
     "ServerSession",
@@ -527,7 +530,8 @@ async fn accept_connection(
 
     event_sender
       .send(EndpointEvent::SessionConnected(session_handle))
-      .await?;
+      .await
+      .map_err(crate::chan_closed)?;
 
     if logon_msg.fix_message.msg_type.as_str() != "A" {
       return Err(Error::protocol_violation(format!(
