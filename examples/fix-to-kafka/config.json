@@ -10,8 +10,8 @@
   "sessions": [
     {
       "session_id": {
-        "sender_comp_id": "YOUR_SENDER_COMP_ID",
-        "target_comp_id": "YOUR_TARGET_COMP_ID",
+        "sender_comp_id": "BabelFIX",
+        "target_comp_id": "Fixation",
         "begin_string": "FIX.4.4"
       },
       "heartbeat_interval": 30
