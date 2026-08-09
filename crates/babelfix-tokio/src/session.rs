@@ -56,11 +56,16 @@ use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
 use babelfix_core::codec::FixEncoder;
-use babelfix_core::session::{
-  Command, Event, Progress, SessionOutput, SessionState,
-};
 
-pub use babelfix_core::session::{Session, SessionIdentifier};
+/// The sans-io protocol, re-exported so `babelfix::session` is one place.
+///
+/// [`SessionState`] is what this module drives; you only need it directly if
+/// you are writing a driver of your own, in which case `babelfix-core` is
+/// probably the dependency you want.
+pub use babelfix_core::session::{
+  Command, Event, Progress, Replay, Session, SessionIdentifier, SessionOutput,
+  SessionState,
+};
 
 #[derive(Debug)]
 #[non_exhaustive]

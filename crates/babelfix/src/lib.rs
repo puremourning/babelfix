@@ -3,21 +3,29 @@
 //! An asynchronous [FIX protocol](https://www.fixtrading.org/) engine for Rust,
 //! driven by the FIX Orchestra metadata repository.
 //!
-//! babelfix is a small stack of layers, each usable on its own:
+//! This crate is an umbrella: it re-exports [`babelfix_core`], which holds the
+//! protocol, and — under the default `tokio` feature — [`babelfix_tokio`],
+//! which holds the transport.
 //!
 //! | Layer | Module / crate | Responsibility |
 //! |-------|----------------|----------------|
 //! | Schema | [`schema`] (`babelfix-repogen`) | Compile-time FIX tag-number constants, e.g. [`schema::FIX_Latest::Fields`] |
 //! | Repository | [`repository`] (`babelfix-repo`) | Parsed FIX Orchestra metadata: versions, messages, fields, components, groups |
 //! | Message | [`message`] (`babelfix-core`) | Parsing, building and serialising individual FIX messages |
-//! | Session | [`session`] | Sequence numbers, heartbeats, test requests, resend/replay |
-//! | Endpoint | [`endpoint`] | TCP acceptor/initiator that frames the wire protocol and spawns sessions |
+//! | Codec | [`codec`] (`babelfix-core`) | Framing a byte stream into messages and back |
+//! | Session | [`session`] (`babelfix-core`) | Sequence numbers, heartbeats, test requests, resend/replay |
+//! | Endpoint | [`endpoint`] (`babelfix-tokio`) | TCP acceptor/initiator that spawns sessions |
 //!
-//! The message representation, the wire codec and (eventually) the session
-//! state machine live in `babelfix-core`, which has no I/O, no timers and no
-//! async runtime. This crate adds the tokio-based transport on top. Depend on
-//! `babelfix-core` directly if you would rather drive the protocol from your
-//! own event loop.
+//! ## Which crate do I want?
+//!
+//! Everything through `babelfix::endpoint` is the batteries-included path: give
+//! it a port and a repository and it runs sessions for you.
+//!
+//! If you want to own the event loop — a busy-polled socket, `io_uring`, a
+//! runtime other than tokio — depend on `babelfix-core` directly. It has no
+//! I/O, no timers, no tasks and no async runtime in its dependency tree; you
+//! feed it bytes and it tells you what to send. See
+//! [`babelfix_core::session`].
 //!
 //! ## Getting a repository
 //!
@@ -79,20 +87,24 @@
 //! additionally bundle and derive from the Apache-2.0 licensed FIX Orchestra
 //! data, and are therefore released under `MIT AND Apache-2.0`.
 
-pub use babelfix_core::repository;
-pub use babelfix_core::schema;
-pub use babelfix_core::{Error, FixMessage, Result, Value, message, time};
+pub use babelfix_core::{
+  Error, FixMessage, Result, Value, codec, message, repository, schema, time,
+};
 
-pub mod endpoint;
-pub mod session;
-pub mod util;
-
-/// Map a channel failure onto [`Error::ConnectionFailed`].
+/// The session layer.
 ///
-/// [`Error`] lives in `babelfix-core`, which knows nothing about `futures`, so
-/// the `From<mpsc::SendError>` / `From<oneshot::Canceled>` impls this crate used
-/// to carry would now break the orphan rule. Channel failures are mapped
-/// explicitly at each call site instead.
-pub(crate) fn chan_closed<E>(_: E) -> Error {
-  Error::connection_failed("session channel closed")
-}
+/// With the default `tokio` feature this is `babelfix-tokio`'s module, which
+/// adds the driver and the owned [`SessionCommand`]/[`SessionEvent`] types on
+/// top of the core's sans-io state machine and re-exports both.
+///
+/// [`SessionCommand`]: session::SessionCommand
+/// [`SessionEvent`]: session::SessionEvent
+#[cfg(feature = "tokio")]
+pub use babelfix_tokio::session;
+
+/// The session layer: `babelfix-core`'s sans-io state machine.
+#[cfg(not(feature = "tokio"))]
+pub use babelfix_core::session;
+
+#[cfg(feature = "tokio")]
+pub use babelfix_tokio::{endpoint, util};

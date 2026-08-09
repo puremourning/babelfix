@@ -12,24 +12,30 @@ categories = ["network-programming"]
 keywords = ["fix-protocol", "financial", "fix", "trading"]
 
 [features]
-default = []
-serde = ["dep:serde", "babelfix-core/serde"]
+default = ["tokio"]
+# The tokio transport. Turn it off for a build that carries only the sans-io
+# core — though depending on `babelfix-core` directly is usually clearer.
+tokio = ["dep:babelfix-tokio"]
+serde = ["babelfix-core/serde", "babelfix-tokio?/serde"]
 
 [dependencies]
-futures.workspace = true
-tokio.workspace = true
 babelfix-core.workspace = true
-tracing.workspace = true
-bytes.workspace = true
-tokio-util.workspace = true
-chrono.workspace = true
-serde = { workspace = true, optional = true }
+babelfix-tokio = { workspace = true, optional = true }
 
+# The integration tests and benchmarks run against the umbrella crate, which is
+# the surface applications actually use, so they double as a check that the
+# facade re-exports everything it should.
 [dev-dependencies]
 criterion.workspace = true
 anyhow.workspace = true
 googletest.workspace = true
 test-log.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+tracing.workspace = true
 
 [[bench]]
 name = "message_benchmarks"

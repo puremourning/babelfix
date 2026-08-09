@@ -1,0 +1,24 @@
+[package]
+name = "babelfix-tokio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Tokio driver for the babelfix FIX engine: TCP transport, timers and session tasks"
+categories = ["network-programming", "asynchronous"]
+keywords = ["fix-protocol", "financial", "fix", "trading", "tokio"]
+
+[features]
+default = []
+serde = ["babelfix-core/serde"]
+
+[dependencies]
+babelfix-core.workspace = true
+futures.workspace = true
+tokio = { workspace = true }
+tokio-util.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+tracing.workspace = true

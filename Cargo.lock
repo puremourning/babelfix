@@ -121,12 +121,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "babelfix-core",
+ "babelfix-tokio",
  "bytes",
  "chrono",
  "criterion",
  "futures",
  "googletest",
- "serde",
  "test-log",
  "tokio",
  "tokio-util",
@@ -167,6 +167,19 @@ version = "0.1.0"
 dependencies = [
  "babelfix-repo",
  "quote",
+]
+
+[[package]]
+name = "babelfix-tokio"
+version = "0.1.0"
+dependencies = [
+ "babelfix-core",
+ "bytes",
+ "chrono",
+ "futures",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
