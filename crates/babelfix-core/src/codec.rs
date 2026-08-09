@@ -22,10 +22,13 @@
 use std::sync::Arc;
 
 use bytes::BytesMut;
+use chrono::{DateTime, Utc};
 use tracing::debug;
 
-use crate::message::{self, FixMessage};
+use crate::message::{self, FixMessage, Value};
 use crate::repository::{FixRepository, FixVersion};
+use crate::schema::FIX_Latest::Fields::SendingTime as SENDING_TIME;
+use crate::time::TimePrecision;
 use crate::{Error, Result};
 
 /// The field separator FIX uses on the wire: ASCII SOH.
@@ -165,17 +168,29 @@ impl FixDecoder {
 #[derive(Default, Clone)]
 pub struct FixEncoder {
   delimiter: u8,
+  precision: TimePrecision,
 }
 
 impl FixEncoder {
   pub fn new(delimiter: Option<u8>) -> Self {
     Self {
       delimiter: delimiter.unwrap_or(SOH),
+      precision: TimePrecision::default(),
     }
+  }
+
+  /// Set the precision used by [`encode_stamped`](Self::encode_stamped).
+  pub fn with_precision(mut self, precision: TimePrecision) -> Self {
+    self.precision = precision;
+    self
   }
 
   pub fn delimiter(&self) -> u8 {
     self.delimiter
+  }
+
+  pub fn precision(&self) -> TimePrecision {
+    self.precision
   }
 
   /// Append `msg`'s wire form to `dst`.
@@ -188,4 +203,48 @@ impl FixEncoder {
     debug!("Encoded FIX message: {:?}", dst);
     Ok(())
   }
+
+  /// Stamp `SendingTime`, then serialise.
+  ///
+  /// This is the form the session layer's output should use: it fills in the
+  /// slot the state machine reserved, so the clock is read once per message and
+  /// as late as possible, and `BodyLength`/`CheckSum` are computed over the
+  /// stamped message rather than the placeholder.
+  pub fn encode_stamped(
+    &mut self,
+    msg: &mut FixMessage,
+    sending_time: DateTime<Utc>,
+    dst: &mut BytesMut,
+  ) -> Result<()> {
+    stamp_sending_time(msg, sending_time, self.precision)?;
+    self.encode(msg, dst)
+  }
+}
+
+/// Overwrite `msg`'s `SendingTime` with `when`.
+///
+/// Always overwrites, never fills-only-if-absent: a replayed message arrives
+/// carrying the timestamp from when it was *originally* sent (which the session
+/// has already copied into `OrigSendingTime`), and it must go back out with a
+/// fresh one.
+///
+/// The field must already be present. The session layer reserves it so it sits
+/// in its proper place in the header; erroring here rather than inserting keeps
+/// a driver that forgets to stamp from silently emitting messages with no
+/// `SendingTime` at all.
+pub fn stamp_sending_time(
+  msg: &mut FixMessage,
+  when: DateTime<Utc>,
+  precision: TimePrecision,
+) -> Result<()> {
+  let stamp = crate::time::fix_time(when, precision);
+  for (tag, value) in msg.tags.iter_mut() {
+    if *tag == SENDING_TIME {
+      *value = Value::String(stamp.as_str().to_owned());
+      return Ok(());
+    }
+  }
+  Err(Error::invalid_message(
+    "outbound message has no SendingTime field to stamp",
+  ))
 }
