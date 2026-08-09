@@ -29,12 +29,42 @@ It is a small stack of layers, each usable on its own:
 |-------|-------|----------------|
 | Schema | `babelfix-repogen` | Compile-time FIX tag-number constants (`schema::FIX_Latest::Fields`) |
 | Repository | `babelfix-repo` | Parsed Orchestra metadata: versions, messages, fields, components, groups |
-| Message | `babelfix::message` | Parse, build and serialise individual messages |
-| Session | `babelfix::session` | Sequence numbers, heartbeats, test requests, resend/replay |
-| Endpoint | `babelfix::endpoint` | TCP acceptor/initiator that frames the wire protocol and drives sessions |
+| Message | `babelfix-core::message` | Parse, build and serialise individual messages |
+| Codec | `babelfix-core::codec` | Frame a byte stream into messages and back |
+| Session | `babelfix-core::session` | Sequence numbers, heartbeats, test requests, resend/replay |
+| Driver | `babelfix-core::driver` | The above assembled: feed bytes, drain bytes |
+| Connection | `babelfix-tokio::connection` | A session driven inline, without channels |
+| Endpoint | `babelfix-tokio::endpoint` | TCP acceptor/initiator that spawns sessions |
 
-Most applications depend only on the `babelfix` crate, which re-exports the other
-two as `babelfix::repository` and `babelfix::schema`.
+Most applications depend only on the `babelfix` crate, which re-exports all of
+the above.
+
+## Which layer do I want?
+
+The protocol lives in `babelfix-core`, which is *sans-io*: no sockets, no
+timers, no tasks, and no async runtime anywhere in its dependency tree. It does
+not even read a clock — timestamps are handed to it. Everything above that is a
+way of feeding it.
+
+| If you | Use | You give up |
+|--------|-----|-------------|
+| own your event loop — `epoll`, `io_uring`, a busy-polled socket | `babelfix-core::driver::SessionDriver` | nothing is done for you: you read, you write, you decide when |
+| want async, but your loop is the hot loop | `babelfix-tokio::connection::SessionConnection` | heartbeats only advance while you are in the loop |
+| want a FIX engine | `babelfix::endpoint` | two channel hops and a task per session |
+
+Measured on one round trip — an order out, an execution report back — the layers
+cost roughly:
+
+| | µs |
+|---|---|
+| serialise and parse alone | 4.8 |
+| + the session layer (`SessionDriver`) | 8.3 |
+| + sockets, tasks and channels (`endpoint`) | 37.4 |
+
+A loopback TCP round trip carrying the same bytes is 19.6µs of that, so most of
+the difference is the transport rather than anything babelfix does. Re-run
+`cargo bench -p babelfix` on the machine you care about before drawing
+conclusions.
 
 ## Quickstart
 
@@ -74,8 +104,9 @@ the resulting [`session::SessionHandle`] — is covered in the `endpoint` and
 ## Documentation
 
 Full API documentation is on [docs.rs/babelfix](https://docs.rs/babelfix). The
-`message`, `session` and `endpoint` module docs include worked examples for
-building messages, and running the session/recovery machinery.
+`message`, `session`, `driver`, `connection` and `endpoint` module docs include
+worked examples for building messages and running the session/recovery
+machinery.
 
 [CONFORMANCE.md](CONFORMANCE.md) records the known deviations of the session
 layer from the FIX Session Layer Technical Specification.

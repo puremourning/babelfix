@@ -9,8 +9,13 @@ test case scenario. **M** marks a requirement the specification states as
 *must*/*shall* or the test cases document marks Mandatory.
 
 Behaviour that *is* implemented and conformant is covered by the integration
-tests in `crates/babelfix/tests/session_*_test.rs`; each test's doc comment
-states the rule it pins down.
+tests in `crates/babelfix/tests/session_*_test.rs` and the sans-io tests in
+`crates/babelfix-core/tests/`; each test's doc comment states the rule it pins
+down.
+
+Source references name a file rather than a line: the protocol lives in
+`babelfix-core` and the transport in `babelfix-tokio`, and line numbers in a
+document rot on the next edit.
 
 ## Scope
 
@@ -33,7 +38,7 @@ deviations:
 ### 1. SequenceReset-Reset is unsupported — **M**
 
 *S§4.8.6, S§4.8.8 Table 3, TC 11.* `SessionManager::gap_fill_new_seq_num`
-(`crates/babelfix/src/session.rs:624`) requires `GapFillFlag(123)` to be present
+(`babelfix-core/src/session/state.rs`) requires `GapFillFlag(123)` to be present
 and equal to `Y`. An absent flag produces `ProtocolViolation("Missing
 GapFillFlag")` and `123=N` produces `ProtocolViolation("Sequence reset message
 is garbage and not supported")`; both terminate the session.
@@ -47,9 +52,9 @@ a warning; `NewSeqNo < NextNumIn` is rejected with `SessionRejectReason(373)` of
 ### 2. Garbled messages terminate the connection — **M**
 
 *S§4.5.2, TC 2d, 2m, 3b, 3c, 3e.* The codec returns `Err` for an incorrect
-checksum (`crates/babelfix/src/endpoint.rs:145`) or an unparseable frame, and
+checksum (`babelfix-tokio/src/endpoint.rs`) or an unparseable frame, and
 the session loop treats a decoder error as fatal
-(`crates/babelfix/src/session.rs:466`).
+(`babelfix-core/src/session/state.rs`).
 
 A garbled message is presumed to be a transmission error rather than a peer
 defect. The specification requires disregarding it, **not** incrementing
@@ -89,7 +94,7 @@ usable.
 ### 4. `PossDupFlag(43)` is not consulted on an inbound message — **M**
 
 *S§4.8.7, TC 2e.* `handle_session_message`
-(`crates/babelfix/src/session.rs:579`) terminates the connection with a Logout
+(`babelfix-core/src/session/state.rs`) terminates the connection with a Logout
 whenever `MsgSeqNum` is below `NextNumIn`, without checking `PossDupFlag`. A
 legitimately retransmitted message that has already been processed should be
 ignored, and the session should continue.
@@ -100,9 +105,9 @@ and no later than `SendingTime(52)` (TC 2f, 2g).
 
 ### 5. Inbound `Reject` and `BusinessMessageReject` are discarded — **M**
 
-*S§4.5.4, TC 7.* `is_admin_message` (`crates/babelfix/src/message.rs:533`)
+*S§4.5.4, TC 7.* `is_admin_message` (`babelfix-core/src/message.rs`)
 includes `3`, `j`, `h`, `Y` and `V`, and `dispatch_message`'s catch-all admin
-arm (`crates/babelfix/src/session.rs:785`) ignores them. Sequence number
+arm (`babelfix-core/src/session/state.rs`) ignores them. Sequence number
 handling is correct — the message is counted and the session continues — but
 the application is never told that a message it sent was rejected.
 
@@ -113,7 +118,7 @@ is present but commented out.
 
 *TC 20.* Receiving a `ResendRequest` while one is already being serviced
 produces `ProtocolViolation("ResendRequest while a resend is already in
-progress")` (`crates/babelfix/src/session.rs:741`). The specification requires
+progress")` (`babelfix-core/src/session/state.rs`). The specification requires
 performing the requested resend and then re-requesting anything still missing.
 
 Note this is distinct from a `ResendRequest` arriving inside a sequence gap,
@@ -122,7 +127,7 @@ which is handled.
 ### 7. A missing `MsgSeqNum` terminates the session abruptly
 
 *S§4.5.3.* `handle_session_message`
-(`crates/babelfix/src/session.rs:491`) returns
+(`babelfix-core/src/session/state.rs`) returns
 `ProtocolViolation("Missing MsgSeqNum")`, dropping the transport layer
 connection. The specification asks for a Logout naming the missing field, since
 this indicates a defect that will only be resolved by changing software.
@@ -130,7 +135,7 @@ this indicates a defect that will only be resolved by changing software.
 ### 8. Message-level identity and timestamp validation is absent — **M**
 
 *S§4.2.2, S§4.2.3, S§4.5.2, TC 2i, 2k, 2n, 2o.* Marked by the `TODO` at
-`crates/babelfix/src/session.rs:594`. Specifically:
+`babelfix-core/src/session/state.rs`. Specifically:
 
 * `SenderCompID(49)` and `TargetCompID(56)` are not checked against the session
   on a per-message basis. A discrepancy should produce a `Reject` with
@@ -139,7 +144,7 @@ this indicates a defect that will only be resolved by changing software.
   so a message from a peer with a badly skewed clock is accepted.
 * `BeginString(8)` is not validated per message. The decoder caches the version
   inferred from the first message
-  (`crates/babelfix/src/endpoint.rs:101`), so a later message with a different
+  (`babelfix-tokio/src/endpoint.rs`), so a later message with a different
   `BeginString` is silently parsed under the original version.
 
 ### 9. The Logout initiator does not wait for the acknowledgement
@@ -151,7 +156,7 @@ initiator closes the connection immediately after transmitting, so a peer that
 wanted to gap fill outstanding messages before agreeing to the logout has no
 opportunity to do so.
 
-The heartbeat timeout Logout (`crates/babelfix/src/session.rs:394`) closes
+The heartbeat timeout Logout (`babelfix-core/src/session/state.rs`) closes
 immediately for the same reason.
 
 A related edge: `SessionCommand::Disconnect` routes its Logout through
@@ -163,24 +168,22 @@ out of the loop, so nothing is transmitted.
 
 *S§4.3.4, S§4.3.5.* Each peer uses its own configured interval. The value in
 the inbound Logon is never read, and the acceptor echoes its own value rather
-than the initiator's (`crates/babelfix/src/endpoint.rs:249`). The specification
+than the initiator's (`babelfix-tokio/src/endpoint.rs`). The specification
 requires both peers to use the same value within a connection.
 
 `HeartBtInt=0`, meaning heartbeats are disabled, is not handled.
 
 Related, from *S§4.5.5*: the TestRequestThreshold is fixed at two heartbeat
 intervals and dead peer detection at three
-(`crates/babelfix/src/session.rs:370`), with no configuration. The
+(`babelfix-core/src/session/state.rs`), with no configuration. The
 specification recommends a threshold between 1.2 and 2.0 intervals, agreed
 out of band.
 
 ### 11. Smaller items
 
 * `DefaultApplVerID(1137)` is hardcoded to `"10"` on outbound Logons
-  (`crates/babelfix/src/endpoint.rs:253`), and `EncryptMethod(98)` on an
+  (`babelfix-tokio/src/endpoint.rs`), and `EncryptMethod(98)` on an
   inbound Logon is not validated.
-* The logon timeout is hardcoded at 30 seconds in two places
-  (`crates/babelfix/src/endpoint.rs:316`, `:434`) and is not configurable.
 * Gap fills do not carry `PossDupFlag=Y`. *S§4.8.4* requires it on any message
   sent in response to a `ResendRequest`. Receivers do not generally depend on
   it, but most engines set it.
