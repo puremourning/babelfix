@@ -8,20 +8,6 @@
 use futures::prelude::*;
 use tracing::error;
 
-pub async fn wrap_and_bail<F, T>(future: F) -> T
-where
-  F: Future<Output = Result<T, crate::Error>> + Send + 'static,
-{
-  match future.await {
-    Ok(result) => result,
-    Err(e) => {
-      error!("An error occurred: {e}");
-      // TODO: Something more graceful than panic
-      panic!("An error occurred: {e}");
-    }
-  }
-}
-
 pub async fn wrap_and_report<F, T>(future: F) -> Option<T>
 where
   F: Future<Output = Result<T, crate::Error>> + Send + 'static,

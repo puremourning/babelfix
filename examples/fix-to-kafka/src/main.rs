@@ -16,10 +16,13 @@ async fn run_session(
   loop {
     tokio::select! {
       _ = cancellation_token.cancelled() => {
-        println!("Session cancelled");
+        tracing::debug!("Session cancelled");
         break;
       }
       event = session_handle.events.recv() => {
+        if event.is_err() {
+          break;
+        }
         match event? {
             fix::session::SessionEvent::ConnectionEstablished => {},
             fix::session::SessionEvent::RecoveryCompleted => {},
@@ -185,8 +188,29 @@ struct Address {
 struct Config {
   sessions: Vec<ConfiguredSession>,
 
-  server: Option<Address>,
-  broker: Option<Address>,
+  #[serde(default = "default_server_address")]
+  server: Address,
+  #[serde(default = "default_broker_address")]
+  broker: Address,
+
+  #[serde(default = "default_db_path")]
+  db_path: String,
+}
+
+fn default_db_path() -> String {
+  "fix_app.db".to_string()
+}
+fn default_server_address() -> Address {
+  Address {
+    host: "0.0.0.0".to_string(),
+    port: 9797,
+  }
+}
+fn default_broker_address() -> Address {
+  Address {
+    host: "localhost".to_string(),
+    port: 9092,
+  }
 }
 
 impl Config {
@@ -211,7 +235,7 @@ impl App {
     repo: Arc<fix::repository::FixRepository>,
     producer: Producer,
   ) -> anyhow::Result<Self> {
-    let db = kv::Store::new(kv::Config::new("fix_app.db"))?;
+    let db = kv::Store::new(kv::Config::new(config.db_path))?;
 
     for session in &config.sessions {
       storage::init_session(
@@ -268,24 +292,19 @@ impl App {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
   tracing_subscriber::fmt()
-    .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+    .with_level(true)
+    .with_env_filter(
+      tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or(tracing_subscriber::EnvFilter::new("info")),
+    )
     .init();
 
   let config = Config::load("config.json")?;
 
-  let broker = config
-    .broker
-    .as_ref()
-    .map(|b| BrokerAddress {
-      host: b.host.clone(),
-      port: b.port,
-    })
-    .unwrap_or(BrokerAddress {
-      host: "localhost".to_string(),
-      port: 9092,
-    });
-
-  let bootstrap_addrs = vec![broker];
+  let bootstrap_addrs = vec![BrokerAddress {
+    host: config.broker.host.clone(),
+    port: config.broker.port,
+  }];
 
   let topics = config
     .sessions
@@ -306,22 +325,10 @@ async fn main() -> anyhow::Result<()> {
     .build()
     .await;
 
-  let server_addr = config
-    .server
-    .as_ref()
-    .map(|s| Address {
-      host: s.host.clone(),
-      port: s.port,
-    })
-    .unwrap_or(Address {
-      host: "0.0.0.0".into(),
-      port: 9797,
-    });
-
   let repo = Arc::new(fix::repository::orchestrate()?);
   let mut endpoint = fix::endpoint::serve(
-    server_addr.port,
-    Some(server_addr.host),
+    config.server.port,
+    Some(config.server.host.clone()),
     Arc::clone(&repo),
     None,
   )
@@ -345,35 +352,40 @@ async fn main() -> anyhow::Result<()> {
   loop {
     tokio::select! {
       _ = tokio::signal::ctrl_c() => {
-        println!("Shutting down...");
-        token.cancel();
-        endpoint.commands.send(fix::endpoint::EndpointCommand::Shutdown).await.ok();
+        tracing::info!("Shutting down...");
         break;
       }
       event = endpoint.events.recv() => {
         match event? {
-            fix::endpoint::EndpointEvent::NewSession { session_id, response } => {
-                if let Some(session) = storage::look_up_session(&session_id, &app) {
-                    response.send(Ok(session)).ok();
-                } else {
-                    response.send(Err(fix::Error::unspecified("Unable to find session"))).ok();
-                }
-            },
-            fix::endpoint::EndpointEvent::SessionInvalid(_) => {},
-            fix::endpoint::EndpointEvent::SessionConnected(session_handle) => {
-              let mut session_tasks = app.session_tasks.lock().unwrap();
-              let token = token.clone();
-              let app  = Arc::clone(&app);
-              session_tasks.push(tokio::spawn(async move {
-                if let Err(e) = run_session(session_handle, token, app).await {
-                  eprintln!("Error in session: {:?}", e);
-                }
-              }));
-            }
+          fix::endpoint::EndpointEvent::NewSession { session_id, response } => {
+              if let Some(session) = storage::look_up_session(&session_id, &app) {
+                  response.send(Ok(session)).ok();
+              } else {
+                  response.send(Err(fix::Error::unspecified("Unable to find session"))).ok();
+              }
+          },
+          fix::endpoint::EndpointEvent::SessionInvalid(_) => {},
+          fix::endpoint::EndpointEvent::SessionConnected(session_handle) => {
+            let mut session_tasks = app.session_tasks.lock().unwrap();
+            let token = token.clone();
+            let app  = Arc::clone(&app);
+            session_tasks.push(tokio::spawn(async move {
+              if let Err(e) = run_session(session_handle, token, app).await {
+                tracing::warn!("Error in session: {:?}", e);
+              }
+            }));
+          }
         }
       }
     }
   }
+
+  token.cancel();
+  endpoint
+    .commands
+    .send(fix::endpoint::EndpointCommand::Shutdown)
+    .await
+    .ok();
 
   let mut session_tasks = {
     let mut session_tasks = app.session_tasks.lock().unwrap();
@@ -383,6 +395,8 @@ async fn main() -> anyhow::Result<()> {
   for task in session_tasks.drain(..) {
     task.await?;
   }
+
+  endpoint.join_handle.await??;
 
   Ok(())
 }

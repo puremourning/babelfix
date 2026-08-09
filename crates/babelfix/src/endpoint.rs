@@ -74,6 +74,7 @@ pub struct Endpoint {
   pub events: mpsc::Receiver<EndpointEvent>,
   pub commands: mpsc::Sender<EndpointCommand>,
   pub local_addr: std::net::SocketAddr,
+  pub join_handle: tokio::task::JoinHandle<Result<()>>,
 }
 
 #[derive(Default)]
@@ -576,7 +577,7 @@ pub async fn serve(
 
   let local_addr = listener.local_addr()?;
 
-  tokio::spawn(crate::util::wrap_and_bail(async move {
+  let join_handle = tokio::spawn(async move {
     loop {
       tokio::select! {
         maybe_command = command_receiver.next() => {
@@ -615,11 +616,12 @@ pub async fn serve(
       }
     }
     Ok(())
-  }));
+  });
 
   Ok(Endpoint {
     commands: command_sender,
     events: event_receiver,
     local_addr,
+    join_handle,
   })
 }
