@@ -56,11 +56,12 @@ use std::time::Instant;
 use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use babelfix_core::codec::FixDecoder;
-use babelfix_core::driver::SessionDriver;
+use babelfix_core::driver::{
+  DriverConfig, DriverStep, HandshakeDriver, SessionDriver,
+};
 use babelfix_core::message::builder;
 use babelfix_core::session::{
-  Command, EventSink, Progress, Session, SessionIdentifier, SessionState,
+  Command, EventSink, Progress, Session, SessionIdentifier,
 };
 
 use crate::repository::FixRepository;
@@ -75,10 +76,8 @@ const READ_CHUNK: usize = 8192;
 /// A logged-on FIX session over `S`, driven by the caller.
 pub struct SessionConnection<S> {
   io: S,
-  driver: SessionDriver,
+  driver: Box<SessionDriver>,
   read_buf: BytesMut,
-  repo: Arc<FixRepository>,
-  delimiter: Option<u8>,
 }
 
 /// An accepted connection whose peer has sent its Logon, but for which the
@@ -88,12 +87,8 @@ pub struct SessionConnection<S> {
 /// frame arrives — which is why accepting is two steps rather than one.
 pub struct PendingSession<S> {
   io: S,
-  repo: Arc<FixRepository>,
-  delimiter: Option<u8>,
+  handshake: HandshakeDriver,
   session_id: SessionIdentifier,
-  logon: builder::Message,
-  /// Bytes that arrived after the Logon in the same read.
-  leftover: BytesMut,
 }
 
 impl<S> PendingSession<S> {
@@ -104,7 +99,10 @@ impl<S> PendingSession<S> {
 
   /// The Logon itself, for applications that authenticate on it.
   pub fn logon(&self) -> &builder::Message {
-    &self.logon
+    self
+      .handshake
+      .peer_logon()
+      .expect("a PendingSession always holds the peer's Logon")
   }
 }
 
@@ -116,34 +114,26 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PendingSession<S> {
     sink: &mut impl EventSink,
   ) -> Result<SessionConnection<S>> {
     let PendingSession {
-      io,
-      repo,
-      delimiter,
-      session_id,
-      logon,
-      leftover,
+      mut io,
+      mut handshake,
+      ..
     } = self;
 
-    let logon_reply = make_logon_message(&session)?;
-    let state = SessionState::new(session_id, session, Instant::now());
-    let driver = SessionDriver::new(state, repo.clone(), delimiter, wall_clock);
-
-    let mut conn = SessionConnection {
-      io,
-      driver,
-      read_buf: leftover,
-      repo,
-      delimiter,
-    };
-
-    conn.driver.send_logon(logon_reply, sink)?;
-    let progress = conn.driver.start(logon, Instant::now(), sink)?;
-    conn.flush().await?;
-    if progress.is_close() {
-      return Err(Error::connection_failed("session closed during logon"));
+    match handshake.accept_session(session, Instant::now(), sink)? {
+      DriverStep::Established { mut driver, .. } => {
+        // Establishing hands the codec and its buffers to the session, so the
+        // Logon reply is now the *driver's* to flush, not the handshake's.
+        flush(&mut io, driver.pending_writes()).await?;
+        Ok(SessionConnection {
+          io,
+          driver,
+          read_buf: BytesMut::with_capacity(READ_CHUNK),
+        })
+      }
+      _ => Err(Error::connection_failed(
+        "accepting the session did not establish it",
+      )),
     }
-
-    Ok(conn)
   }
 }
 
@@ -152,87 +142,104 @@ fn wall_clock() -> chrono::DateTime<chrono::Utc> {
   chrono::Utc::now()
 }
 
-fn make_logon_message(session: &Session) -> Result<builder::Message> {
-  crate::endpoint::logon_message(&session.fix_version, session)
+fn driver_config(
+  repo: Arc<FixRepository>,
+  delimiter: Option<u8>,
+) -> DriverConfig {
+  DriverConfig {
+    repo,
+    delimiter,
+    clock: wall_clock,
+    logon_timeout: LOGON_TIMEOUT,
+  }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
   /// Initiate a session: send a Logon and wait for the peer's.
   pub async fn initiate(
-    io: S,
+    mut io: S,
     repo: Arc<FixRepository>,
     delimiter: Option<u8>,
     session_id: SessionIdentifier,
     session: Session,
     sink: &mut impl EventSink,
   ) -> Result<Self> {
-    let logon = make_logon_message(&session)?;
-    let state = SessionState::new(session_id, session, Instant::now());
-    let driver = SessionDriver::new(state, repo.clone(), delimiter, wall_clock);
+    let mut handshake = HandshakeDriver::initiator(
+      session_id,
+      session,
+      driver_config(repo, delimiter),
+      Instant::now(),
+      sink,
+    )?;
+    flush(&mut io, handshake.pending_writes()).await?;
 
-    let mut conn = Self {
+    let driver = pump_handshake(&mut io, &mut handshake, sink, |_| {
+      Err(Error::protocol_violation(
+        "an initiator already has its session",
+      ))
+    })
+    .await?;
+
+    Ok(Self {
       io,
       driver,
       read_buf: BytesMut::with_capacity(READ_CHUNK),
-      repo,
-      delimiter,
-    };
-
-    conn.driver.send_logon(logon, sink)?;
-    conn.flush().await?;
-
-    let logon = conn.read_logon().await?;
-
-    let progress = conn.driver.start(logon, Instant::now(), sink)?;
-    conn.flush().await?;
-    if progress.is_close() {
-      return Err(Error::connection_failed("session closed during logon"));
-    }
-
-    // Anything that arrived alongside the Logon is ordinary traffic — and it
-    // can end the session, so the disposition matters even here.
-    let progress = conn.drain_read_buf(sink)?;
-    conn.flush().await?;
-    if progress.is_close() {
-      return Err(Error::connection_failed(
-        "session closed immediately after logon",
-      ));
-    }
-
-    Ok(conn)
+    })
   }
 
   /// Accept a session: wait for the peer's Logon and report who it claims to
   /// be, so the application can supply the persisted sequence numbers.
+  ///
+  /// The identity comes out of the Logon, so it cannot be known before the
+  /// first frame arrives — which is why accepting is two steps.
   pub async fn accept(
-    io: S,
+    mut io: S,
     repo: Arc<FixRepository>,
     delimiter: Option<u8>,
   ) -> Result<PendingSession<S>> {
+    let mut handshake =
+      HandshakeDriver::acceptor(driver_config(repo, delimiter), Instant::now());
+
     let mut buf = BytesMut::with_capacity(READ_CHUNK);
-    let mut decoder = FixDecoder::new(repo.clone(), delimiter);
-    let mut io = io;
+    let deadline = tokio::time::Instant::now() + LOGON_TIMEOUT;
+    loop {
+      let read = tokio::select! {
+        _ = tokio::time::sleep_until(deadline) => {
+          return Err(Error::connection_failed(
+            "logon exchange did not complete in time",
+          ));
+        }
+        read = io.read_buf(&mut buf) => read,
+      };
+      match read {
+        Ok(0) => {
+          return Err(Error::connection_failed(
+            "Connection closed before first message",
+          ));
+        }
+        Ok(_) => {}
+        Err(e) => return Err(Error::Io(e)),
+      }
 
-    let logon_msg = read_one_message(&mut io, &mut buf, &mut decoder).await?;
-    let logon = builder::Message::from_message(&logon_msg)?;
-
-    if logon.fix_message.msg_type.as_str() != "A" {
-      return Err(Error::protocol_violation(format!(
-        "First message was not a logon, got: {:?}",
-        logon.fix_message.msg_type
-      )));
+      let bytes = std::mem::take(&mut buf);
+      // The handshake validates that this is a Logon before deriving anything
+      // from it, so a peer opening with garbage never reaches the application.
+      match handshake.on_bytes(Instant::now(), &bytes, &mut ())? {
+        DriverStep::NeedsSession(session_id) => {
+          return Ok(PendingSession {
+            io,
+            handshake,
+            session_id,
+          });
+        }
+        DriverStep::Established { .. } => {
+          return Err(Error::protocol_violation(
+            "an acceptor cannot establish a session it was never given",
+          ));
+        }
+        DriverStep::Continue => buf = BytesMut::with_capacity(READ_CHUNK),
+      }
     }
-
-    let session_id = session_id_from_logon(&logon)?;
-
-    Ok(PendingSession {
-      io,
-      repo,
-      delimiter,
-      session_id,
-      logon,
-      leftover: buf,
-    })
   }
 
   pub fn session(&self) -> &Session {
@@ -329,80 +336,46 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
     self.io.flush().await?;
     Ok(())
   }
-
-  /// Read until the peer's Logon arrives. Anything read alongside it is left
-  /// in `read_buf` for the main loop.
-  async fn read_logon(&mut self) -> Result<builder::Message> {
-    // An initiator already knows the version it asked for.
-    let mut decoder = FixDecoder::with_version(
-      self.repo.clone(),
-      self.delimiter,
-      self.driver.session().fix_version.clone(),
-    );
-    let msg =
-      read_one_message(&mut self.io, &mut self.read_buf, &mut decoder).await?;
-    let logon = builder::Message::from_message(&msg)?;
-    if logon.fix_message.msg_type.as_str() != "A" {
-      return Err(Error::protocol_violation(format!(
-        "First message was not a logon, got: {:?}",
-        logon.fix_message.msg_type
-      )));
-    }
-    Ok(logon)
-  }
 }
 
-/// Derive the session identity from a peer's Logon.
+/// Write out whatever a driver has queued, handing the buffer back afterwards.
 ///
-/// The peer's `SenderCompID` is our `TargetCompID` and vice versa.
-pub fn session_id_from_logon(
-  logon: &builder::Message,
-) -> Result<SessionIdentifier> {
-  use crate::schema::FIX_Latest::Fields;
-  Ok(SessionIdentifier {
-    begin_string: logon
-      .header
-      .tag(Fields::BeginString)
-      .ok_or_else(|| {
-        Error::protocol_violation("Logon message missing BeginString")
-      })?
-      .as_string(),
-    sender_comp_id: logon
-      .header
-      .tag(Fields::TargetCompID)
-      .ok_or_else(|| {
-        Error::protocol_violation("Logon message missing TargetCompID")
-      })?
-      .as_string(),
-    target_comp_id: logon
-      .header
-      .tag(Fields::SenderCompID)
-      .ok_or_else(|| {
-        Error::protocol_violation("Logon message missing SenderCompID")
-      })?
-      .as_string(),
-  })
+/// Taken rather than borrowed because the borrow cannot be held across the
+/// await while the socket is also borrowed.
+async fn flush<S: AsyncWrite + Unpin>(
+  io: &mut S,
+  pending: &mut BytesMut,
+) -> Result<()> {
+  if pending.is_empty() {
+    return Ok(());
+  }
+  let bytes = std::mem::take(pending);
+  let result = io.write_all(&bytes).await;
+  *pending = bytes;
+  pending.clear();
+  result?;
+  io.flush().await?;
+  Ok(())
 }
 
-/// Read from `io` until `decoder` yields a message, or the logon deadline
-/// passes.
-async fn read_one_message<S: AsyncRead + Unpin>(
+/// Read frames into `handshake` until it establishes a session.
+async fn pump_handshake<S: AsyncRead + AsyncWrite + Unpin>(
   io: &mut S,
-  buf: &mut BytesMut,
-  decoder: &mut FixDecoder,
-) -> Result<babelfix_core::FixMessage> {
+  handshake: &mut HandshakeDriver,
+  sink: &mut impl EventSink,
+  on_needs_session: impl Fn(SessionIdentifier) -> Result<Session>,
+) -> Result<Box<SessionDriver>> {
+  let mut buf = BytesMut::with_capacity(READ_CHUNK);
   let deadline = tokio::time::Instant::now() + LOGON_TIMEOUT;
+
   loop {
-    if let Some(msg) = decoder.decode(buf)? {
-      return Ok(msg);
-    }
     let read = tokio::select! {
       _ = tokio::time::sleep_until(deadline) => {
         return Err(Error::connection_failed(
-          "Connection timed out after 30 seconds",
+          "logon exchange did not complete in time",
         ));
       }
-      read = io.read_buf(buf) => read,
+      read = io.read_buf(&mut buf) => read,
     };
     match read {
       Ok(0) => {
@@ -413,5 +386,22 @@ async fn read_one_message<S: AsyncRead + Unpin>(
       Ok(_) => {}
       Err(e) => return Err(Error::Io(e)),
     }
+
+    let bytes = std::mem::take(&mut buf);
+    buf = BytesMut::with_capacity(READ_CHUNK);
+    let mut step = handshake.on_bytes(Instant::now(), &bytes, sink)?;
+
+    if let DriverStep::NeedsSession(id) = step {
+      let session = on_needs_session(id)?;
+      step = handshake.accept_session(session, Instant::now(), sink)?;
+    }
+
+    // Once established the buffers belong to the session, so flush whichever
+    // of the two now owns the bytes.
+    if let DriverStep::Established { mut driver, .. } = step {
+      flush(io, driver.pending_writes()).await?;
+      return Ok(driver);
+    }
+    flush(io, handshake.pending_writes()).await?;
   }
 }

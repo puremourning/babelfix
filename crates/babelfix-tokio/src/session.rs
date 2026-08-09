@@ -249,12 +249,30 @@ pub(crate) struct PendingOutput {
 }
 
 impl PendingOutput {
-  fn new(delimiter: Option<u8>, precision: crate::time::TimePrecision) -> Self {
+  pub(crate) fn new(
+    delimiter: Option<u8>,
+    precision: crate::time::TimePrecision,
+  ) -> Self {
     Self {
       encoder: FixEncoder::new(delimiter).with_precision(precision),
       bytes: BytesMut::with_capacity(4096),
       events: VecDeque::new(),
     }
+  }
+}
+
+impl PendingOutput {
+  /// Adopt the precision of a session that has only just been supplied.
+  ///
+  /// An acceptor builds its output before it knows which session it is
+  /// serving, so the encoder starts on the default and is corrected here —
+  /// before the Logon reply, which is the first thing it stamps.
+  pub(crate) fn set_precision(
+    &mut self,
+    precision: crate::time::TimePrecision,
+  ) {
+    self.encoder = FixEncoder::new(self.encoder.delimiter().into())
+      .with_precision(precision);
   }
 }
 
@@ -280,33 +298,33 @@ impl SessionOutput for PendingOutput {
 }
 
 /// Drives a [`SessionState`] over a tokio socket.
+///
+/// The state is passed to [`run`](Self::run) rather than owned, because until
+/// the logon exchange completes it belongs to the
+/// [`Handshake`](babelfix_core::session::Handshake) — which is also the thing
+/// that creates it.
 pub(crate) struct SessionRunner<W> {
-  state: SessionState,
   out: PendingOutput,
   writer: W,
   event_sender: mpsc::Sender<SessionEvent>,
 }
 
-impl<W> SessionRunner<W> {
-  pub(crate) fn state(&mut self) -> &mut SessionState {
-    &mut self.state
-  }
-}
-
 impl<W: tokio::io::AsyncWrite + Unpin> SessionRunner<W> {
   pub(crate) fn new(
-    state: SessionState,
     writer: W,
     event_sender: mpsc::Sender<SessionEvent>,
-    delimiter: Option<u8>,
+    out: PendingOutput,
   ) -> Self {
-    let precision = state.session().time_precision;
     Self {
-      state,
-      out: PendingOutput::new(delimiter, precision),
+      out,
       writer,
       event_sender,
     }
+  }
+
+  /// Where the handshake and the session write while a pass is in flight.
+  pub(crate) fn output(&mut self) -> &mut PendingOutput {
+    &mut self.out
   }
 
   /// Deliver everything the last pass produced.
@@ -332,58 +350,26 @@ impl<W: tokio::io::AsyncWrite + Unpin> SessionRunner<W> {
     Ok(())
   }
 
-  /// Emit a lifecycle event that comes from the driver rather than the protocol.
-  pub(crate) async fn emit(
-    &mut self,
-    event: SessionEvent,
-  ) -> crate::Result<()> {
-    self
-      .event_sender
-      .send(event)
-      .await
-      .map_err(crate::chan_closed)
-  }
-
-  /// Send a message belonging to the logon exchange, which the driver still
-  /// owns. Everything else goes through the state machine.
-  pub(crate) async fn send_logon(
-    &mut self,
-    msg: crate::message::builder::Message,
-  ) -> crate::Result<()> {
-    self.state.send_logon(msg, &mut self.out)?;
-    self.flush().await
-  }
-
-  /// Run the session until it ends.
+  /// Run an established session until it ends.
   pub(crate) async fn run<R>(
     &mut self,
+    state: &mut SessionState,
     rx: &mut R,
     commands: &mut mpsc::Receiver<SessionCommand>,
-    logon: crate::message::builder::Message,
   ) -> crate::Result<()>
   where
     R: Stream<Item = crate::Result<crate::message::FixMessage>> + Unpin,
   {
-    let progress =
-      self
-        .state
-        .start(logon, std::time::Instant::now(), &mut self.out)?;
-    self.flush().await?;
-    if progress.is_close() {
-      return Ok(());
-    }
-
     loop {
       // `next_deadline` is never `None` for a live session, but a far-future
       // fallback keeps the select! arm well-formed either way.
-      let deadline = self
-        .state
+      let deadline = state
         .next_deadline()
         .unwrap_or_else(|| std::time::Instant::now() + FAR_FUTURE);
 
       let progress = tokio::select! {
         _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-          self.state.on_timeout(std::time::Instant::now(), &mut self.out)?
+          state.on_timeout(std::time::Instant::now(), &mut self.out)?
         }
         cmd = commands.next() => {
           match cmd {
@@ -392,7 +378,7 @@ impl<W: tokio::io::AsyncWrite + Unpin> SessionRunner<W> {
               // nothing, so it must not defer the outbound heartbeat. An
               // application polling its own session used to be able to silence
               // its heartbeats entirely and be declared dead by the peer.
-              let _ = resp.send(self.state.session().clone());
+              let _ = resp.send(state.session().clone());
               Progress::Continue
             }
             Some(cmd) => {
@@ -403,7 +389,7 @@ impl<W: tokio::io::AsyncWrite + Unpin> SessionRunner<W> {
                 SessionCommand::Disconnect => Command::Disconnect,
                 SessionCommand::GetSessionState(_) => unreachable!("handled above"),
               };
-              self.state.on_command(cmd, std::time::Instant::now(), &mut self.out)?
+              state.on_command(cmd, std::time::Instant::now(), &mut self.out)?
             }
             None => {
               debug!("Session message channel closed, stopping session manager");
@@ -414,13 +400,13 @@ impl<W: tokio::io::AsyncWrite + Unpin> SessionRunner<W> {
         frame = rx.next() => {
           match frame {
             Some(Ok(fix_message)) => {
-              self.state.on_message(fix_message, std::time::Instant::now(), &mut self.out)?
+              state.on_message(fix_message, std::time::Instant::now(), &mut self.out)?
             }
             Some(Err(e)) => {
               tracing::error!("Error reading from socket: {e}");
               break;
             }
-            None => self.state.on_peer_closed(&mut self.out)?,
+            None => state.on_peer_closed(&mut self.out)?,
           }
         }
       };

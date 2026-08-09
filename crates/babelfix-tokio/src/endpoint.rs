@@ -66,8 +66,6 @@ use futures::prelude::*;
 use tracing::{Instrument, error, info, trace};
 
 use super::*;
-use crate::repository::FieldBlock;
-use babelfix_core::session::SessionState;
 
 use std::time::Duration;
 
@@ -320,34 +318,6 @@ pub fn connect(
   })
 }
 
-/// Build a Logon carrying the session's negotiated settings.
-pub(crate) fn logon_message(
-  fix_version: &Arc<crate::repository::FixVersion>,
-  session: &session::Session,
-) -> Result<crate::message::builder::Message> {
-  let mut logon_msg =
-    crate::message::builder::Message::new(fix_version.clone(), "A")?;
-
-  logon_msg.body.set_tag(
-    crate::schema::FIX_Latest::Fields::HeartBtInt,
-    session.heartbeat_interval.as_secs().to_string(),
-  );
-  if logon_msg.fix_message.is_member(
-    fix_version.as_ref(),
-    crate::schema::FIX_Latest::Fields::DefaultApplVerID,
-  ) {
-    logon_msg.body.set_tag(
-      crate::schema::FIX_Latest::Fields::DefaultApplVerID,
-      "10", // TODO: Default application version: FIXLatest
-    );
-  }
-  logon_msg.body.set_tag(
-    crate::schema::FIX_Latest::Fields::EncryptMethod,
-    "0", // No encryption
-  );
-  Ok(logon_msg)
-}
-
 async fn initiate_connection(
   mut stream: tokio::net::TcpStream,
   repo: Arc<crate::repository::FixRepository>,
@@ -375,54 +345,66 @@ async fn initiate_connection(
   );
 
   async {
-    let logon_message = logon_message(&session.fix_version, &session)?;
-    let state = SessionState::new(
-      session_id.clone(),
+    let mut out =
+      session::PendingOutput::new(delimiter, session.time_precision);
+    let mut handshake = babelfix_core::session::Handshake::initiator(
+      session_id,
       session,
+      config.logon_timeout,
       std::time::Instant::now(),
-    );
-    let mut runner = session::SessionRunner::new(
-      state,
-      tx,
-      session_event_sender.clone(),
-      delimiter,
-    );
+      &mut out,
+    )?;
 
-    runner
-      .emit(session::SessionEvent::ConnectionEstablished)
-      .await?;
-    runner.send_logon(logon_message).await?;
+    let mut runner =
+      session::SessionRunner::new(tx, session_event_sender.clone(), out);
+    runner.flush().await?;
 
-    // First message has to be a logon
-    let logon_fix_msg = tokio::select! {
-      _ = tokio::time::sleep(config.logon_timeout) => {
-        return Err(Error::connection_failed(format!(
-          "Logon exchange timed out after {:?}", config.logon_timeout,
-        )));
-      },
-      msg_event = rx.next() => {
-        match msg_event {
+    // Everything about the exchange itself — what to send, in what order, and
+    // what to make of the answer — is the state machine's business. This only
+    // supplies frames and a deadline.
+    let (mut state, progress) = loop {
+      let frame = tokio::select! {
+        _ = tokio::time::sleep_until(
+          tokio::time::Instant::from_std(
+            handshake.next_deadline().unwrap_or_else(std::time::Instant::now),
+          ),
+        ) => {
+          let _ = handshake.on_timeout(std::time::Instant::now())?;
+          continue;
+        }
+        msg = rx.next() => match msg {
           Some(Ok(msg)) => msg,
           Some(Err(e)) => {
-            return Err(Error::connection_failed(format!("Failed to read first message: {e}")));
+            return Err(Error::connection_failed(format!(
+              "Failed to read first message: {e}"
+            )));
           }
           None => {
-            return Err(Error::connection_failed("Connection closed before first message"));
+            return Err(Error::connection_failed(
+              "Connection closed before first message",
+            ));
           }
+        },
+      };
+
+      let step = handshake.on_message(
+        frame,
+        std::time::Instant::now(),
+        runner.output(),
+      )?;
+      runner.flush().await?;
+      match step {
+        babelfix_core::session::Step::Established { state, progress } => {
+          break (state, progress);
         }
-      },
+        babelfix_core::session::Step::Continue => continue,
+        babelfix_core::session::Step::NeedsSession(_) => {
+          return Err(Error::protocol_violation(
+            "an initiator already has its session",
+          ));
+        }
+      }
     };
-
-    let logon_msg =
-      crate::message::builder::Message::from_message(&logon_fix_msg)?;
-
-    let session_snapshot = runner.state().session().clone();
-    runner
-      .emit(session::SessionEvent::RawMessageReceived(
-        logon_fix_msg,
-        session_snapshot,
-      ))
-      .await?;
 
     // Create a disconnecter to ensure we send a disconnect event when the
     // session is dropped
@@ -430,14 +412,14 @@ async fn initiate_connection(
       session_event_sender: session_event_sender.clone(),
     };
 
-    if logon_msg.fix_message.msg_type.as_str() != "A" {
-      return Err(Error::protocol_violation(format!(
-        "First message was not a logon, got: {:?}",
-        logon_msg
-      )));
-    }
-
-    let result = runner.run(&mut rx, &mut session_recv, logon_msg).await;
+    // A session refused during the exchange — a Logon whose sequence number is
+    // too low, say — is still a session the application must hear about: the
+    // Logout explaining why has already been emitted.
+    let result = if progress.is_close() {
+      Ok(())
+    } else {
+      runner.run(&mut state, &mut rx, &mut session_recv).await
+    };
     drop(disconnector);
     result
   }
@@ -481,66 +463,72 @@ async fn accept_connection(
 
   let (session_send, mut session_recv) =
     mpsc::channel::<session::SessionCommand>(config.channel_depth);
-  let (mut session_event_sender, session_event_recv) =
+  let (session_event_sender, session_event_recv) =
     mpsc::channel::<session::SessionEvent>(config.channel_depth);
 
-  // First message has to be a logon
-  let logon_fix_msg = tokio::select! {
+  let mut out = session::PendingOutput::new(delimiter, Default::default());
+  let mut handshake = babelfix_core::session::Handshake::acceptor(
+    config.logon_timeout,
+    std::time::Instant::now(),
+  );
+
+  // Nothing session-scoped can happen until the peer's Logon names a session,
+  // because every session on this port shares the listener. Read exactly one
+  // frame and let the handshake decide what it means.
+  let logon_frame = tokio::select! {
     _ = tokio::time::sleep(config.logon_timeout) => {
       return Err(Error::connection_failed(format!(
-          "Logon exchange timed out after {:?}", config.logon_timeout,
-        )));
+        "Logon exchange timed out after {:?}", config.logon_timeout,
+      )));
     },
     msg_event = rx.next() => {
       match msg_event {
         Some(Ok(msg)) => msg,
         Some(Err(e)) => {
-          return Err(Error::connection_failed(format!("Failed to read first message: {e}")));
+          return Err(Error::connection_failed(format!(
+            "Failed to read first message: {e}"
+          )));
         }
         None => {
-          event_sender.send(EndpointEvent::SessionInvalid(partner)).await.map_err(crate::chan_closed)?;
-          return Err(Error::connection_failed("Connection closed before first message"));
+          event_sender
+            .send(EndpointEvent::SessionInvalid(partner))
+            .await
+            .map_err(crate::chan_closed)?;
+          return Err(Error::connection_failed(
+            "Connection closed before first message",
+          ));
         }
       }
     },
   };
 
-  session_event_sender
-    .send(session::SessionEvent::ConnectionEstablished)
-    .await
-    .map_err(crate::chan_closed)?;
+  // A first frame that is not a Logon is rejected here, before the application
+  // is told anything about it. It used to be validated *after* `NewSession` and
+  // `SessionConnected` had already gone out, so an application would do its
+  // persisted-state lookup, and be handed a session handle, for a connection
+  // about to be dropped.
+  let opened =
+    handshake.on_message(logon_frame, std::time::Instant::now(), &mut out);
 
-  // Create a disconnecter to ensure we send a disconnect event when the
-  // session is dropped
-  let disconnector = Disconnector {
-    session_event_sender: session_event_sender.clone(),
-  };
-
-  let logon_msg =
-    crate::message::builder::Message::from_message(&logon_fix_msg)?;
-
-  let session_id = session::SessionIdentifier {
-    begin_string: logon_msg
-      .header
-      .tag(crate::schema::FIX_Latest::Fields::BeginString)
-      .ok_or_else(|| {
-        Error::protocol_violation("Logon message missing BeginString")
-      })?
-      .as_string(),
-    sender_comp_id: logon_msg
-      .header
-      .tag(crate::schema::FIX_Latest::Fields::TargetCompID)
-      .ok_or_else(|| {
-        Error::protocol_violation("Logon message missing TargetCompID")
-      })?
-      .as_string(),
-    target_comp_id: logon_msg
-      .header
-      .tag(crate::schema::FIX_Latest::Fields::SenderCompID)
-      .ok_or_else(|| {
-        Error::protocol_violation("Logon message missing SenderCompID")
-      })?
-      .as_string(),
+  let session_id = match opened {
+    Ok(babelfix_core::session::Step::NeedsSession(id)) => id,
+    Ok(_) => {
+      return Err(Error::protocol_violation(
+        "acceptor handshake did not ask for a session",
+      ));
+    }
+    Err(e) => {
+      // A peer that opens with something other than a Logon is reported the
+      // same way as one that says nothing at all: as an invalid connection,
+      // named by its address. There is no session to report it against — that
+      // is the whole point — so this is the only place the application can
+      // hear about it.
+      event_sender
+        .send(EndpointEvent::SessionInvalid(partner))
+        .await
+        .map_err(crate::chan_closed)?;
+      return Err(e);
+    }
   };
 
   let (set_session, get_session) =
@@ -553,14 +541,7 @@ async fn accept_connection(
     .await
     .map_err(crate::chan_closed)?;
   let session = get_session.await.map_err(crate::chan_closed)??;
-
-  session_event_sender
-    .send(session::SessionEvent::RawMessageReceived(
-      logon_fix_msg,
-      session.clone(),
-    ))
-    .await
-    .map_err(crate::chan_closed)?;
+  out.set_precision(session.time_precision);
 
   let span = tracing::info_span!(
     "ServerSession",
@@ -569,33 +550,49 @@ async fn accept_connection(
   );
 
   async {
+    // Create a disconnecter to ensure we send a disconnect event when the
+    // session is dropped
+    let disconnector = Disconnector {
+      session_event_sender: session_event_sender.clone(),
+    };
+
+    let mut runner =
+      session::SessionRunner::new(tx, session_event_sender.clone(), out);
+
+    let (mut state, progress) = match handshake.accept_session(
+      session,
+      std::time::Instant::now(),
+      runner.output(),
+    )? {
+      babelfix_core::session::Step::Established { state, progress } => {
+        (state, progress)
+      }
+      _ => {
+        return Err(Error::protocol_violation(
+          "accepting the session did not establish it",
+        ));
+      }
+    };
+    runner.flush().await?;
+
     let session_handle = session::SessionHandle {
-      session_id: session_id.clone(),
+      session_id,
       tx: session_send,
       events: session_event_recv,
     };
-
     event_sender
       .send(EndpointEvent::SessionConnected(session_handle))
       .await
       .map_err(crate::chan_closed)?;
 
-    if logon_msg.fix_message.msg_type.as_str() != "A" {
-      return Err(Error::protocol_violation(format!(
-        "First message was not a logon, got: {:?}",
-        logon_msg
-      )));
-    }
-
-    let logon_message = logon_message(&session.fix_version, &session)?;
-    let state =
-      SessionState::new(session_id.clone(), session, std::time::Instant::now());
-    let mut runner =
-      session::SessionRunner::new(state, tx, session_event_sender, delimiter);
-
-    runner.send_logon(logon_message).await?;
-
-    let result = runner.run(&mut rx, &mut session_recv, logon_msg).await;
+    // A session refused during the exchange — a Logon whose sequence number is
+    // too low, say — is still a session the application must hear about: the
+    // Logout explaining why has already been emitted.
+    let result = if progress.is_close() {
+      Ok(())
+    } else {
+      runner.run(&mut state, &mut rx, &mut session_recv).await
+    };
     drop(disconnector);
     result
   }

@@ -192,15 +192,28 @@ async fn first_message_that_is_not_a_logon_is_refused() -> anyhow::Result<()> {
     .send(RawMessage::new("0").body(Fields::TestReqID, "not-a-logon"))
     .await?;
 
-  expect_events! {
-    { server(server_session_id) <<
-      fix::session::SessionEvent::ConnectionEstablished };
-    { server(server_session_id) <<
-      fix::session::SessionEvent::RawMessageReceived(
-        message::tag(Fields::MsgType, eq("0")), anything()) };
-    { server(server_session_id) <<
-      fix::session::SessionEvent::Disconnected };
-  };
+  // Reported as an invalid peer, by address: a connection that never named a
+  // session cannot be reported against one.
+  let deadline = std::time::Instant::now() + Duration::from_secs(5);
+  loop {
+    if !server.lock().await.invalid_sessions().is_empty() {
+      break;
+    }
+    anyhow::ensure!(
+      std::time::Instant::now() < deadline,
+      "Peer that opened with a non-Logon was never reported as invalid"
+    );
+    tokio::time::sleep(Duration::from_millis(10)).await;
+  }
+
+  // And no session is published. The CompIDs are right there in the message,
+  // but reading them would mean deriving an identity from a frame that has no
+  // business naming one — and would hand the application a session, and a
+  // persisted-state lookup, for a connection about to be dropped.
+  assert!(
+    server.lock().await.session(&server_session_id).is_none(),
+    "a session was published for a peer that never sent a Logon"
+  );
 
   peer.expect_closed().await?;
 
