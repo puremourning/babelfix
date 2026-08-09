@@ -39,6 +39,7 @@ pub struct SessionOptions {
   pub next_out_seq_num: u32,
   pub next_in_seq_num: u32,
   pub heartbeat_interval: std::time::Duration,
+  pub time_precision: fix::time::TimePrecision,
 }
 
 impl Default for SessionOptions {
@@ -47,6 +48,7 @@ impl Default for SessionOptions {
       next_out_seq_num: 1,
       next_in_seq_num: 1,
       heartbeat_interval: std::time::Duration::from_secs(30),
+      time_precision: fix::time::TimePrecision::default(),
     }
   }
 }
@@ -75,6 +77,7 @@ impl SessionOptions {
       next_in_seq_num: self.next_in_seq_num,
       next_out_seq_num: self.next_out_seq_num,
       heartbeat_interval: self.heartbeat_interval,
+      time_precision: self.time_precision,
     }
   }
 }

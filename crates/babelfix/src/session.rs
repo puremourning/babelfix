@@ -63,6 +63,12 @@ pub struct Session {
   pub next_in_seq_num: u32,
   pub heartbeat_interval: std::time::Duration,
   pub fix_version: Arc<crate::repository::FixVersion>,
+  /// Fractional-second precision for the `SendingTime` this session stamps on
+  /// outbound messages. Defaults to nanoseconds.
+  ///
+  /// Some counterparties reject a `SendingTime` carrying more precision than
+  /// they expect, so this is per-session rather than global.
+  pub time_precision: crate::time::TimePrecision,
 }
 
 impl std::fmt::Debug for Session {
@@ -72,6 +78,7 @@ impl std::fmt::Debug for Session {
       .field("next_in_seq_num", &self.next_in_seq_num)
       .field("heartbeat_interval", &self.heartbeat_interval)
       .field("fix_version", &self.fix_version.name)
+      .field("time_precision", &self.time_precision)
       .finish()
   }
 }
@@ -83,6 +90,7 @@ impl Session {
       next_in_seq_num: 1,
       heartbeat_interval: std::time::Duration::from_secs(30),
       fix_version,
+      time_precision: crate::time::TimePrecision::default(),
     }
   }
 
@@ -113,9 +121,18 @@ impl Session {
       crate::schema::FIX_Latest::Fields::TargetCompID,
       session_id.target_comp_id.clone(),
     );
+    // The clock is read here, once per message, rather than once per batch of
+    // work: a single pass over the state machine can emit several messages (a
+    // gap fill and the retransmit that follows it, or a replay queue being
+    // drained), and stamping them all with one timestamp would be wrong.
+    //
+    // It will move later still — into the encoder, so the value is taken as
+    // close to the wire as the sans-io boundary allows. That has to wait until
+    // the session stops writing through a `Sink<FixMessage>`, because the
+    // encoder runs inside the sink and its output is not visible from here.
     msg.header.set_tag(
       crate::schema::FIX_Latest::Fields::SendingTime,
-      crate::util::time_now_fix(),
+      crate::time::fix_time(chrono::Utc::now(), self.time_precision).as_str(),
     );
 
     let msg = msg.as_message()?;

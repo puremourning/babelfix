@@ -195,6 +195,7 @@ fn bench_session(fix: &Arc<repository::FixVersion>) -> Session {
     next_in_seq_num: 1,
     heartbeat_interval: NO_HEARTBEATS,
     fix_version: fix.clone(),
+    time_precision: Default::default(),
   }
 }
 

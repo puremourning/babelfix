@@ -139,6 +139,7 @@ mod storage {
           next_in_seq_num: value.next_in_seq_num,
           next_out_seq_num: value.next_out_seq_num,
           fix_version: app.repo.get_version(&session_id.begin_string).unwrap(),
+          time_precision: Default::default(),
         })
       })
   }
