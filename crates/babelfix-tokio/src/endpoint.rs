@@ -175,7 +175,7 @@ pub struct Acceptor {
   /// difference matters and hiding it helped nobody: **dropping a `JoinHandle`
   /// detaches the task, it does not stop it.** To stop accepting, send
   /// [`EndpointCommand::Shutdown`] or drop `commands`; to stop abruptly, call
-  /// `abort()`. [`resolve_join_handle`] awaits it and flattens tokio's
+  /// `abort()`. [`join`] awaits it and flattens tokio's
   /// `JoinError` into this crate's [`Error`].
   pub join_handle: tokio::task::JoinHandle<Result<()>>,
 }
@@ -683,11 +683,11 @@ pub async fn serve(
 /// ```no_run
 /// # async fn run(acceptor: babelfix_tokio::endpoint::Acceptor)
 /// #   -> babelfix_tokio::Result<()> {
-/// babelfix_tokio::endpoint::resolve_join_handle(acceptor.join_handle, "server")
+/// babelfix_tokio::endpoint::join(acceptor.join_handle, "server")
 ///   .await
 /// # }
 /// ```
-pub async fn resolve_join_handle(
+pub async fn join(
   handle: tokio::task::JoinHandle<Result<()>>,
   what: &'static str,
 ) -> Result<()> {

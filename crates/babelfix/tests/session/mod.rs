@@ -363,7 +363,7 @@ impl Server {
             }
           }
         }
-        fix::endpoint::resolve_join_handle(join_handle, "server").await?;
+        fix::endpoint::join(join_handle, "server").await?;
         Ok(())
       }))
     };
