@@ -218,6 +218,42 @@ pub trait SessionOutput {
   fn event(&mut self, event: Event<'_>) -> crate::Result<()>;
 }
 
+/// The application-facing half of a [`SessionOutput`].
+///
+/// [`SessionDriver`](crate::driver::SessionDriver) already owns the transport
+/// half — the codec and the buffers — so a caller using it only has to say what
+/// to do with events. A closure will do:
+///
+/// ```no_run
+/// # use babelfix_core::session::{Event, EventSink};
+/// let mut sink = |event: Event<'_>| {
+///   if let Event::MessageReceived(msg) = event {
+///     println!("{msg:?}");
+///   }
+///   Ok(())
+/// };
+/// # let _: &mut dyn EventSink = &mut sink;
+/// ```
+pub trait EventSink {
+  fn event(&mut self, event: Event<'_>) -> crate::Result<()>;
+}
+
+impl<F> EventSink for F
+where
+  F: FnMut(Event<'_>) -> crate::Result<()>,
+{
+  fn event(&mut self, event: Event<'_>) -> crate::Result<()> {
+    self(event)
+  }
+}
+
+/// Discards every event. Useful for a peer that only cares about the wire.
+impl EventSink for () {
+  fn event(&mut self, _event: Event<'_>) -> crate::Result<()> {
+    Ok(())
+  }
+}
+
 /// Whether the session is still alive after a call.
 ///
 /// `#[must_use]`: a driver that drops this keeps running a session the protocol

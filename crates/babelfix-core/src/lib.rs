@@ -15,6 +15,7 @@
 //! | Message | [`message`] | Parsing, building and serialising individual messages |
 //! | Codec | [`codec`] | Framing a byte stream into messages and back |
 //! | Session | [`session`] | Sequence numbers, heartbeats, resend/replay |
+//! | Driver | [`driver`] | The above assembled: feed bytes, drain bytes |
 //! | Time | [`time`] | FIX UTC timestamp formatting (no clock) |
 //!
 //! Most applications should depend on `babelfix` instead, which re-exports this
@@ -25,6 +26,7 @@ pub use babelfix_repo as repository;
 pub use babelfix_repogen as schema;
 
 pub mod codec;
+pub mod driver;
 pub mod message;
 pub mod session;
 pub mod time;
