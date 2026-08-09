@@ -4,7 +4,7 @@
 //! splits the byte stream into [`FixMessage`]s and verifies
 //! `BodyLength`/`CheckSum` — and spawns a [`session`] task per connection.
 //!
-//! * [`serve`] binds a listener and returns an [`Endpoint`]. Iterate its `events`
+//! * [`serve`] binds a listener and returns an [`Acceptor`]. Iterate its `events`
 //!   receiver: reply to [`EndpointEvent::NewSession`] with a
 //!   [`Session`](crate::session::Session) for the negotiated version, then take
 //!   the [`SessionHandle`](crate::session::SessionHandle) from
@@ -164,11 +164,20 @@ pub enum EndpointCommand {
 /// rather than up front. An initiator has exactly one session and already knows
 /// who it is talking to, so [`connect`] returns an [`Initiator`] instead, whose
 /// handle is available immediately.
-pub struct Endpoint<T: Future<Output = Result<()>> + Send + 'static> {
+pub struct Acceptor {
   pub events: mpsc::Receiver<EndpointEvent>,
   pub commands: mpsc::Sender<EndpointCommand>,
   pub local_addr: std::net::SocketAddr,
-  pub join_handle: T,
+
+  /// The accept loop.
+  ///
+  /// This is tokio's own handle rather than an opaque future, because the
+  /// difference matters and hiding it helped nobody: **dropping a `JoinHandle`
+  /// detaches the task, it does not stop it.** To stop accepting, send
+  /// [`EndpointCommand::Shutdown`] or drop `commands`; to stop abruptly, call
+  /// `abort()`. [`resolve_join_handle`] awaits it and flattens tokio's
+  /// `JoinError` into this crate's [`Error`].
+  pub join_handle: tokio::task::JoinHandle<Result<()>>,
 }
 
 /// Adapts [`babelfix_core::codec::FixDecoder`] to [`tokio_util::codec`].
@@ -198,7 +207,7 @@ impl tokio_util::codec::Decoder for FixDecoder {
 /// [`SessionHandle`](session::SessionHandle) back. That matters for a
 /// synchronous front end — a GUI thread, say — which can take the handle from
 /// [`connect`] and wire up the async half afterwards.
-pub struct Initiator<T: Future<Output = Result<()>> + Send + 'static> {
+pub struct Initiator {
   /// The session.
   ///
   /// Commands sent through `session.tx` before the peer has logged on are
@@ -212,9 +221,13 @@ pub struct Initiator<T: Future<Output = Result<()>> + Send + 'static> {
   /// dropping this, gives up on connecting.
   pub commands: mpsc::Sender<EndpointCommand>,
 
-  /// Resolves when the session ends, or with the error that stopped it being
-  /// established.
-  pub join_handle: T,
+  /// The connect-and-run task: it finishes when the session ends, or with the
+  /// error that stopped one being established.
+  ///
+  /// As with [`Acceptor::join_handle`], dropping this detaches the task rather
+  /// than stopping it — which for an initiator means it keeps trying to
+  /// connect. Send [`EndpointCommand::Shutdown`] or drop `commands` to stop it.
+  pub join_handle: tokio::task::JoinHandle<Result<()>>,
 }
 
 /// Initiate a session against the first of `endpoints` that answers, retrying
@@ -228,7 +241,7 @@ pub fn connect(
   session_id: session::SessionIdentifier,
   session: session::Session,
   config: EndpointConfig,
-) -> Result<Initiator<impl Future<Output = Result<()>> + Send + 'static>> {
+) -> Result<Initiator> {
   if endpoints.is_empty() {
     return Err(Error::connection_failed("no endpoints to connect to"));
   }
@@ -303,20 +316,8 @@ pub fn connect(
   Ok(Initiator {
     session: handle,
     commands: command_sender,
-    join_handle: resolve_join_handle(join_handle, "Initiator"),
+    join_handle,
   })
-}
-
-/// Flatten a `JoinHandle` into the endpoint's own error type.
-async fn resolve_join_handle(
-  handle: tokio::task::JoinHandle<Result<()>>,
-  what: &'static str,
-) -> Result<()> {
-  match handle.await {
-    Ok(Ok(())) => Ok(()),
-    Ok(Err(e)) => Err(e),
-    Err(e) => Err(Error::unspecified(format!("{what} task panicked: {e:?}"))),
-  }
 }
 
 /// Build a Logon carrying the session's negotiated settings.
@@ -612,7 +613,7 @@ pub async fn serve(
   addr: impl tokio::net::ToSocketAddrs,
   repo: Arc<crate::repository::FixRepository>,
   config: EndpointConfig,
-) -> Result<Endpoint<impl Future<Output = Result<()>> + Send + 'static>> {
+) -> Result<Acceptor> {
   let (event_sender, event_receiver) =
     mpsc::channel::<EndpointEvent>(config.channel_depth);
   let (command_sender, mut command_receiver) =
@@ -664,10 +665,35 @@ pub async fn serve(
     Ok(())
   });
 
-  Ok(Endpoint {
+  Ok(Acceptor {
     commands: command_sender,
     events: event_receiver,
     local_addr,
-    join_handle: resolve_join_handle(join_handle, "Server"),
+    join_handle,
   })
+}
+
+/// Await an endpoint's task, flattening tokio's `JoinError` into [`Error`].
+///
+/// [`Acceptor`] and [`Initiator`] hand out tokio's `JoinHandle` directly so
+/// that `abort()` and detach-on-drop behave the way a tokio user expects. This
+/// is the convenience for the common case of only wanting to know how it ended.
+/// `what` names the endpoint in the panic message.
+///
+/// ```no_run
+/// # async fn run(acceptor: babelfix_tokio::endpoint::Acceptor)
+/// #   -> babelfix_tokio::Result<()> {
+/// babelfix_tokio::endpoint::resolve_join_handle(acceptor.join_handle, "server")
+///   .await
+/// # }
+/// ```
+pub async fn resolve_join_handle(
+  handle: tokio::task::JoinHandle<Result<()>>,
+  what: &'static str,
+) -> Result<()> {
+  match handle.await {
+    Ok(Ok(())) => Ok(()),
+    Ok(Err(e)) => Err(e),
+    Err(e) => Err(Error::unspecified(format!("{what} task panicked: {e:?}"))),
+  }
 }

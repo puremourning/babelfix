@@ -563,7 +563,7 @@ impl Loopback {
   ) -> Self {
     let repo = load_repo();
 
-    let endpoint::Endpoint {
+    let endpoint::Acceptor {
       commands,
       mut events,
       local_addr,

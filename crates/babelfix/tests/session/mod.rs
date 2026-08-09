@@ -285,7 +285,7 @@ impl Server {
   }
 
   pub async fn new(port: u16) -> anyhow::Result<Arc<Mutex<Self>>> {
-    let fix::endpoint::Endpoint {
+    let fix::endpoint::Acceptor {
       commands,
       mut events,
       local_addr,
@@ -363,7 +363,7 @@ impl Server {
             }
           }
         }
-        join_handle.await?;
+        fix::endpoint::resolve_join_handle(join_handle, "server").await?;
         Ok(())
       }))
     };
