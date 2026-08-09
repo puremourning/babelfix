@@ -83,7 +83,7 @@ async fn sending_time_defaults_to_nanosecond_precision() -> anyhow::Result<()> {
     TimePrecision::Nanos.digits(),
     "expected nanosecond SendingTime, got {stamp:?}"
   );
-  assert_eq!(stamp.len(), TimePrecision::Nanos.len());
+  assert_eq!(stamp.len(), TimePrecision::Nanos.width());
 
   Ok(())
 }

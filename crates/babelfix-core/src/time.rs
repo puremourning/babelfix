@@ -56,8 +56,8 @@ impl TimePrecision {
     }
   }
 
-  /// Total width of a timestamp at this precision.
-  pub const fn len(self) -> usize {
+  /// Total width, in characters, of a timestamp at this precision.
+  pub const fn width(self) -> usize {
     PREFIX_LEN + self.digits()
   }
 }
@@ -169,7 +169,7 @@ pub fn fix_time(when: DateTime<Utc>, precision: TimePrecision) -> FixTime {
     }
   };
 
-  debug_assert_eq!(at, precision.len());
+  debug_assert_eq!(at, precision.width());
   FixTime { buf, len: at }
 }
 
@@ -238,7 +238,7 @@ mod tests {
     ] {
       for nanos in [0, 1, 999_999_999] {
         let t = at(2026, 12, 31, 23, 59, 59, nanos);
-        assert_eq!(fix_time(t, p).len(), p.len(), "{p:?} nanos={nanos}");
+        assert_eq!(fix_time(t, p).len(), p.width(), "{p:?} nanos={nanos}");
       }
     }
   }
@@ -267,7 +267,7 @@ mod tests {
       .unwrap()
       .and_utc();
     let formatted = fix_time(t, TimePrecision::Nanos);
-    assert_eq!(formatted.len(), TimePrecision::Nanos.len());
+    assert_eq!(formatted.len(), TimePrecision::Nanos.width());
     assert_eq!(formatted.as_str(), "20161231-23:59:59.999999999");
   }
 }

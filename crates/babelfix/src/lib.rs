@@ -14,6 +14,7 @@
 //! | Message | [`message`] (`babelfix-core`) | Parsing, building and serialising individual FIX messages |
 //! | Codec | [`codec`] (`babelfix-core`) | Framing a byte stream into messages and back |
 //! | Session | [`session`] (`babelfix-core`) | Sequence numbers, heartbeats, test requests, resend/replay |
+//! | Driver | [`driver`] (`babelfix-core`) | The above assembled: feed bytes, drain bytes, no I/O |
 //! | Endpoint | [`endpoint`] (`babelfix-tokio`) | TCP acceptor/initiator that spawns sessions |
 //! | Connection | [`connection`] (`babelfix-tokio`) | The same session driven inline, without channels |
 //!
@@ -89,7 +90,8 @@
 //! data, and are therefore released under `MIT AND Apache-2.0`.
 
 pub use babelfix_core::{
-  Error, FixMessage, Result, Value, codec, message, repository, schema, time,
+  Error, FixMessage, Result, Value, codec, driver, message, repository, schema,
+  time,
 };
 
 /// The session layer.

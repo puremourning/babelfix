@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/babelfix",
-  "crates/babelfix-core",
-  "crates/babelfix-tokio",
   "crates/babelfix-repo",
   "crates/babelfix-repogen",
+  "crates/babelfix-core",
+  "crates/babelfix-tokio",
+  "crates/babelfix",
   "examples/fix-to-kafka",
 ]
 
@@ -17,11 +17,17 @@ license = "MIT"
 authors = ["Ben Jackson <puremourning@gmail.com>"]
 repository = "https://github.com/puremourning/babelfix"
 
-# `cargo release` configuration. All three crates share one version and are
-# published together in dependency order (babelfix-repo -> babelfix-repogen ->
-# babelfix); the internal `version = "..."` pins in [workspace.dependencies] are
-# rewritten automatically on each bump. Only the umbrella crate is tagged, so a
-# release produces a single `v{version}` tag (see the per-crate `tag = false`).
+# `cargo release` configuration. All five crates share one version and are
+# published together in dependency order:
+#
+#   babelfix-repo -> babelfix-repogen -> babelfix-core -> babelfix-tokio
+#                                                      -> babelfix
+#
+# The internal `version = "..."` pins in [workspace.dependencies] are rewritten
+# automatically on each bump. Only the umbrella crate is tagged, so a release
+# produces a single `v{version}` tag (see the per-crate `tag = false`).
+#
+# `members` above is in publish order, which is the order `cargo release` uses.
 [workspace.metadata.release]
 shared-version = true
 tag-name = "v{{version}}"

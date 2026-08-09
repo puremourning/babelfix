@@ -34,12 +34,29 @@
 //!   acceptor's application answers with an ExecutionReport, and the initiator's
 //!   application receives it. Framing, checksums, parsing, `write`/`read` and
 //!   four channel hops. This is the floor the library imposes on an echo
-//!   application. Two baselines sit alongside it and account for most of it:
+//!   application. Three baselines sit alongside it and account for all of it:
 //!   `codec_only` is the serialising and parsing a round trip forces with no
-//!   socket and no executor, and `tcp_only` is a bare loopback round trip of
-//!   the same size with no FIX in it at all. The socket dominates, and by how
+//!   socket and no executor; `tcp_only` is a bare loopback round trip of the
+//!   same size with no FIX in it at all; and `sans_io` is two real sessions
+//!   exchanging bytes directly through `babelfix-core`, with no socket, no
+//!   executor, no task wakeup and no channel. The socket dominates, and by how
 //!   much is a property of the platform, so re-run these on the one you care
 //!   about before drawing conclusions from the ratio.
+//!
+//!   Read them as a decomposition. On the machine this was written on:
+//!
+//!   | | µs | what it adds |
+//!   |---|---|---|
+//!   | `codec_only` | 4.8 | serialise and parse, twice each way |
+//!   | `sans_io` | 8.3 | + the session layer: sequencing, headers, framing |
+//!   | `tcp_only` | 19.6 | (the socket, on its own) |
+//!   | `current_thread` | 37.4 | + the socket, the tasks and four channel hops |
+//!
+//!   So the protocol costs about 3.5µs on top of the codec, and everything
+//!   else — roughly 29µs, or four fifths of the round trip — is transport and
+//!   delivery. That is the part `babelfix-core` exists to let you replace, and
+//!   it is also why removing the channels alone would have been a rounding
+//!   error: the two hops are ~1.4µs of the 29.
 //! * `session_concurrent` — the whole path again, over 8, 32 and 128
 //!   simultaneous loopback sessions. Both ends of every session run on the
 //!   runtime under test, so this is the closest thing here to what an engine
@@ -60,10 +77,12 @@ use std::hint::black_box;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use babelfix::driver::SessionDriver;
 use babelfix::message::builder;
 use babelfix::schema::FIX_4_4 as FIX44;
 use babelfix::session::{
-  Session, SessionCommand, SessionEvent, SessionHandle, SessionIdentifier,
+  Command, Event, Session, SessionCommand, SessionEvent, SessionHandle,
+  SessionIdentifier, SessionState,
 };
 use babelfix::{endpoint, repository};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
@@ -802,6 +821,20 @@ fn bench_session_roundtrip(c: &mut Criterion) {
     });
   }
 
+  // The same round trip through the sans-io core: two real sessions, real
+  // framing, real sequence checking, but no socket, no executor, no task
+  // wakeup and no channel. Everything `session_roundtrip` measures except the
+  // transport and the scheduling.
+  //
+  // The gap between this and `codec_only` is what the session layer itself
+  // costs. The gap between this and the executor rows below is what the
+  // transport and the delivery machinery cost — and it is the part a latency
+  // user is buying the right to replace.
+  {
+    let mut pair = SansIo::establish(&fix);
+    group.bench_function("sans_io", |b| b.iter(|| pair.roundtrip()));
+  }
+
   for executor in EXECUTORS {
     let rt = executor.build();
     let mut loopback = Some(rt.block_on(Loopback::establish(&fix, 1)));
@@ -812,6 +845,158 @@ fn bench_session_roundtrip(c: &mut Criterion) {
   }
 
   group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// The same round trip with no I/O at all
+// ---------------------------------------------------------------------------
+
+/// Two [`SessionDriver`]s exchanging bytes directly, with an echo application
+/// wired straight into the event sink.
+///
+/// This is the shape from `babelfix-core`: the caller owns the file descriptor,
+/// so here there simply isn't one. A round trip is the initiator sending a
+/// NewOrderSingle, the acceptor's application answering with an ExecutionReport,
+/// and the initiator receiving it — the same work `session_roundtrip` measures,
+/// minus everything the transport imposes.
+struct SansIo {
+  initiator: SessionDriver,
+  acceptor: SessionDriver,
+  order: builder::Message,
+  reply: builder::Message,
+  wire: Vec<u8>,
+}
+
+impl SansIo {
+  fn establish(fix: &Arc<repository::FixVersion>) -> Self {
+    let mut initiator = Self::driver(fix, "CLIENT", "SERVER");
+    let mut acceptor = Self::driver(fix, "SERVER", "CLIENT");
+    let now = Instant::now();
+    let mut ignore = ();
+
+    // Logon exchange. The acceptor reads the first frame to learn who is
+    // calling, which is the part of the handshake that still lives outside the
+    // state machine.
+    initiator.send_logon(Self::logon(fix), &mut ignore).unwrap();
+    let wire = Self::take(&mut initiator);
+    let (logon_from_client, rest) = Self::split_one(fix, &wire);
+    assert!(rest.is_empty());
+
+    acceptor.send_logon(Self::logon(fix), &mut ignore).unwrap();
+    let _ = acceptor.start(logon_from_client, now, &mut ignore).unwrap();
+
+    let wire = Self::take(&mut acceptor);
+    let (logon_from_server, rest) = Self::split_one(fix, &wire);
+    let _ = initiator
+      .start(logon_from_server, now, &mut ignore)
+      .unwrap();
+    let _ = initiator.on_bytes(now, &rest, &mut ignore).unwrap();
+
+    // Settle the synchronisation TestRequests both sides send after logon, so
+    // the measured loop is pure application traffic.
+    for _ in 0..2 {
+      let wire = Self::take(&mut initiator);
+      let _ = acceptor.on_bytes(now, &wire, &mut ignore).unwrap();
+      let wire = Self::take(&mut acceptor);
+      let _ = initiator.on_bytes(now, &wire, &mut ignore).unwrap();
+    }
+
+    Self {
+      initiator,
+      acceptor,
+      order: new_order(fix),
+      reply: exec_report(fix),
+      wire: Vec::with_capacity(1024),
+    }
+  }
+
+  fn driver(
+    fix: &Arc<repository::FixVersion>,
+    us: &str,
+    them: &str,
+  ) -> SessionDriver {
+    let session_id = SessionIdentifier {
+      begin_string: fix.begin_string.clone(),
+      sender_comp_id: us.to_string(),
+      target_comp_id: them.to_string(),
+    };
+    let state =
+      SessionState::new(session_id, bench_session(fix), Instant::now());
+    SessionDriver::new(state, load_repo(), None, chrono::Utc::now)
+  }
+
+  fn logon(fix: &Arc<repository::FixVersion>) -> builder::Message {
+    let mut msg = builder::Message::new(fix.clone(), "A").unwrap();
+    msg.body.set_tag(FIX44::Fields::HeartBtInt, "3600");
+    msg.body.set_tag(FIX44::Fields::EncryptMethod, "0");
+    msg
+  }
+
+  fn take(d: &mut SessionDriver) -> Vec<u8> {
+    let buf = d.pending_writes();
+    let bytes = buf.to_vec();
+    buf.clear();
+    bytes
+  }
+
+  fn split_one(
+    fix: &Arc<repository::FixVersion>,
+    bytes: &[u8],
+  ) -> (builder::Message, Vec<u8>) {
+    let mut decoder =
+      babelfix::codec::FixDecoder::with_version(load_repo(), None, fix.clone());
+    let mut buf = bytes::BytesMut::from(bytes);
+    let msg = decoder.decode(&mut buf).unwrap().unwrap();
+    (builder::Message::from_message(&msg).unwrap(), buf.to_vec())
+  }
+
+  /// One request and one reply, application to application.
+  fn roundtrip(&mut self) {
+    let now = Instant::now();
+
+    // Initiator sends; the bytes go straight into its buffer.
+    let _ = self
+      .initiator
+      .on_command(now, Command::Send(self.order.clone()), &mut ())
+      .unwrap();
+    self.wire.clear();
+    self.wire.extend_from_slice(self.initiator.pending_writes());
+    self.initiator.pending_writes().clear();
+
+    // The acceptor's "application" answers inline from the event sink, which is
+    // the whole point: no queue, no wakeup, no clone.
+    let reply = self.reply.clone();
+    let mut answered = None;
+    {
+      let mut sink = |event: Event<'_>| {
+        if matches!(event, Event::MessageReceived(_)) {
+          answered = Some(reply.clone());
+        }
+        Ok(())
+      };
+      let _ = self.acceptor.on_bytes(now, &self.wire, &mut sink).unwrap();
+    }
+    let _ = self
+      .acceptor
+      .on_command(now, Command::Send(answered.unwrap()), &mut ())
+      .unwrap();
+
+    self.wire.clear();
+    self.wire.extend_from_slice(self.acceptor.pending_writes());
+    self.acceptor.pending_writes().clear();
+
+    let mut received = false;
+    {
+      let mut sink = |event: Event<'_>| {
+        if matches!(event, Event::MessageReceived(_)) {
+          received = true;
+        }
+        Ok(())
+      };
+      let _ = self.initiator.on_bytes(now, &self.wire, &mut sink).unwrap();
+    }
+    assert!(black_box(received));
+  }
 }
 
 fn bench_session_concurrent(c: &mut Criterion) {

@@ -10,6 +10,9 @@ description = "Tokio driver for the babelfix FIX engine: TCP transport, timers a
 categories = ["network-programming", "asynchronous"]
 keywords = ["fix-protocol", "financial", "fix", "trading", "tokio"]
 
+[package.metadata.release]
+tag = false
+
 [features]
 default = []
 serde = ["babelfix-core/serde"]

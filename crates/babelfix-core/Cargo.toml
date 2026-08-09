@@ -10,6 +10,9 @@ description = "Sans-io core of the babelfix FIX engine: messages, codec and sess
 categories = ["network-programming"]
 keywords = ["fix-protocol", "financial", "fix", "trading"]
 
+[package.metadata.release]
+tag = false
+
 [features]
 default = []
 serde = ["dep:serde"]

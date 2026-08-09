@@ -36,6 +36,37 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  sans-io:
+    name: babelfix-core is sans-io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Built on its own, not as part of --workspace: cargo unifies features
+      # across a single invocation, so a workspace build would hand the core
+      # back `chrono/now` (and anything else babelfix-tokio enables) and the
+      # guarantee below would silently stop meaning anything.
+      - name: Build the core alone
+        run: cargo build -p babelfix-core
+      # The core must never grow an async runtime. Without this check, someone
+      # adds `futures` for one Stream impl in six months and nobody notices.
+      - name: No async runtime in the dependency tree
+        run: |
+          if cargo tree -p babelfix-core -e normal --prefix none \
+              | grep -iE '^(tokio|futures|async-std|smol|async-)' ; then
+            echo "::error::babelfix-core has picked up an async runtime dependency"
+            exit 1
+          fi
+      # `Utc::now()` must not exist in the core: the driver supplies the clock.
+      # chrono gates it behind the `now` feature, which the core does not enable.
+      - name: No wall clock in the core
+        run: |
+          if cargo tree -p babelfix-core -e features | grep -q 'chrono feature "now"' ; then
+            echo "::error::babelfix-core has enabled chrono's clock"
+            exit 1
+          fi
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
