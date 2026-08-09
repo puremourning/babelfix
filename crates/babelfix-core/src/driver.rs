@@ -52,10 +52,10 @@ use chrono::{DateTime, Utc};
 use crate::codec::{FixDecoder, FixEncoder};
 use crate::message::{FixMessage, builder};
 use crate::session::{
-  Command, Event, EventSink, Handshake, Progress, Session, SessionIdentifier,
-  SessionOutput, SessionState, Step,
+  AcceptorHandshake, Command, Event, EventSink, InitiatorHandshake, Progress,
+  Session, SessionIdentifier, SessionOutput, SessionState,
 };
-use crate::{Result, repository};
+use crate::{Error, Result, repository};
 
 /// Reads the wall clock for `SendingTime`.
 ///
@@ -100,56 +100,8 @@ pub struct DriverConfig {
   pub logon_timeout: std::time::Duration,
 }
 
-/// What a [`HandshakeDriver`] wants next.
-#[must_use]
-pub enum DriverStep {
-  /// Keep feeding bytes.
-  Continue,
-
-  /// Acceptor only: the peer's Logon named this session. Look up the sequence
-  /// numbers persisted for it and answer with
-  /// [`HandshakeDriver::accept_session`].
-  NeedsSession(SessionIdentifier),
-
-  /// The logon exchange is complete. The codec, its buffers and any bytes that
-  /// arrived alongside the Logon carry over into the session.
-  Established {
-    driver: Box<SessionDriver>,
-    /// `Close` when the session ended during the exchange. See
-    /// [`Step::Established`](crate::session::Step::Established).
-    progress: Progress,
-  },
-}
-
-/// The logon exchange with a codec and buffers attached.
-///
-/// [`SessionDriver`] is the session proper and always has a [`Session`]; this
-/// is the phase before that, when an acceptor does not yet know which session
-/// it is talking to. It yields a `SessionDriver` once the exchange completes.
-///
-/// ```no_run
-/// # use std::time::Instant;
-/// # use babelfix_core::driver::{DriverStep, HandshakeDriver, SessionDriver};
-/// # use babelfix_core::session::Session;
-/// # fn drive(
-/// #   mut hs: HandshakeDriver,
-/// #   bytes: &[u8],
-/// #   lookup: impl Fn(&babelfix_core::session::SessionIdentifier) -> Session,
-/// # ) -> babelfix_core::Result<Option<Box<SessionDriver>>> {
-/// let now = Instant::now();
-/// let mut sink = ();
-/// let mut step = hs.on_bytes(now, bytes, &mut sink)?;
-/// if let DriverStep::NeedsSession(id) = &step {
-///   step = hs.accept_session(lookup(id), now, &mut sink)?;
-/// }
-/// Ok(match step {
-///   DriverStep::Established { driver, .. } => Some(driver),
-///   _ => None,
-/// })
-/// # }
-/// ```
-pub struct HandshakeDriver {
-  handshake: Handshake,
+/// The codec, buffers and clock a driver needs, independent of any session.
+struct Plumbing {
   decoder: FixDecoder,
   encoder: FixEncoder,
   in_buf: BytesMut,
@@ -157,56 +109,10 @@ pub struct HandshakeDriver {
   config: DriverConfig,
 }
 
-impl HandshakeDriver {
-  /// Open a session, putting our Logon in the outbound buffer.
-  pub fn initiator(
-    session_id: SessionIdentifier,
-    session: Session,
-    config: DriverConfig,
-    now: Instant,
-    sink: &mut impl EventSink,
-  ) -> Result<Self> {
-    let mut encoder =
-      FixEncoder::new(config.delimiter).with_precision(session.time_precision);
-    let mut out_buf = BytesMut::with_capacity(8192);
-    // The version is already known: it is the one we are asking for.
-    let decoder = FixDecoder::with_version(
-      config.repo.clone(),
-      config.delimiter,
-      session.fix_version.clone(),
-    );
-
-    let handshake = {
-      let mut out = DriverOutput {
-        encoder: &mut encoder,
-        bytes: &mut out_buf,
-        clock: config.clock,
-        sink,
-      };
-      Handshake::initiator(
-        session_id,
-        session,
-        config.logon_timeout,
-        now,
-        &mut out,
-      )?
-    };
-
-    Ok(Self {
-      handshake,
-      decoder,
-      encoder,
-      in_buf: BytesMut::with_capacity(8192),
-      out_buf,
-      config,
-    })
-  }
-
-  /// Answer a connection. Nothing is sent until the peer identifies itself.
-  pub fn acceptor(config: DriverConfig, now: Instant) -> Self {
+impl Plumbing {
+  fn new(config: DriverConfig, decoder: FixDecoder) -> Self {
     Self {
-      handshake: Handshake::acceptor(config.logon_timeout, now),
-      decoder: FixDecoder::new(config.repo.clone(), config.delimiter),
+      decoder,
       encoder: FixEncoder::new(config.delimiter),
       in_buf: BytesMut::with_capacity(8192),
       out_buf: BytesMut::with_capacity(8192),
@@ -214,106 +120,237 @@ impl HandshakeDriver {
     }
   }
 
-  /// When the exchange must have completed by.
-  pub fn next_deadline(&self) -> Option<Instant> {
-    self.handshake.next_deadline()
+  fn output<'a, E: EventSink>(
+    &'a mut self,
+    sink: &'a mut E,
+  ) -> DriverOutput<'a, E> {
+    DriverOutput {
+      encoder: &mut self.encoder,
+      bytes: &mut self.out_buf,
+      clock: self.config.clock,
+      sink,
+    }
   }
 
-  /// The peer's Logon, for applications that authenticate on it. See
-  /// [`Handshake::peer_logon`].
-  pub fn peer_logon(&self) -> Option<&crate::message::builder::Message> {
-    self.handshake.peer_logon()
+  /// Carry everything into the session, including any bytes that arrived
+  /// alongside the Logon.
+  fn into_session(self, state: SessionState) -> Box<SessionDriver> {
+    Box::new(SessionDriver {
+      state,
+      decoder: self.decoder,
+      encoder: self.encoder,
+      in_buf: self.in_buf,
+      out_buf: self.out_buf,
+      clock: self.config.clock,
+    })
+  }
+}
+
+/// The logon exchange with a codec and buffers attached, for the side that
+/// opened the connection.
+///
+/// [`SessionDriver`] is the session proper and always has a [`Session`]; this
+/// is the phase before that. It yields a `SessionDriver` once the peer answers.
+pub struct InitiatorDriver {
+  handshake: Option<InitiatorHandshake>,
+  plumbing: Plumbing,
+}
+
+impl InitiatorDriver {
+  /// Open a session, putting our Logon in the outbound buffer.
+  pub fn start(
+    session_id: SessionIdentifier,
+    session: Session,
+    config: DriverConfig,
+    now: Instant,
+    sink: &mut impl EventSink,
+  ) -> Result<Self> {
+    // The version is already known: it is the one we are asking for.
+    let decoder = FixDecoder::with_version(
+      config.repo.clone(),
+      config.delimiter,
+      session.fix_version.clone(),
+    );
+    let mut plumbing = Plumbing::new(config, decoder);
+    plumbing.encoder = FixEncoder::new(plumbing.config.delimiter)
+      .with_precision(session.time_precision);
+
+    let logon_timeout = plumbing.config.logon_timeout;
+    let handshake = {
+      let mut out = plumbing.output(sink);
+      InitiatorHandshake::start(
+        session_id,
+        session,
+        logon_timeout,
+        now,
+        &mut out,
+      )?
+    };
+
+    Ok(Self {
+      handshake: Some(handshake),
+      plumbing,
+    })
   }
 
-  /// Give up if the peer has taken too long.
-  pub fn on_tick(&mut self, now: Instant) -> Result<DriverStep> {
-    let _ = self.handshake.on_timeout(now)?;
-    Ok(DriverStep::Continue)
+  pub fn deadline(&self) -> Option<Instant> {
+    self.handshake.as_ref().map(InitiatorHandshake::deadline)
+  }
+
+  pub fn on_tick(&self, now: Instant) -> Result<()> {
+    match &self.handshake {
+      Some(h) => h.on_timeout(now),
+      None => Ok(()),
+    }
   }
 
   pub fn pending_writes(&mut self) -> &mut BytesMut {
-    &mut self.out_buf
+    &mut self.plumbing.out_buf
   }
 
   pub fn has_pending_writes(&self) -> bool {
-    !self.out_buf.is_empty()
+    !self.plumbing.out_buf.is_empty()
   }
 
-  /// Feed bytes straight off the socket.
+  /// Feed bytes straight off the socket. Returns the session once the peer's
+  /// Logon completes the exchange.
   pub fn on_bytes(
     &mut self,
     now: Instant,
     src: &[u8],
     sink: &mut impl EventSink,
-  ) -> Result<DriverStep> {
-    self.in_buf.extend_from_slice(src);
-    while let Some(msg) = self.decoder.decode(&mut self.in_buf)? {
-      let mut out = DriverOutput {
-        encoder: &mut self.encoder,
-        bytes: &mut self.out_buf,
-        clock: self.config.clock,
-        sink,
+  ) -> Result<Option<(Box<SessionDriver>, Progress)>> {
+    self.plumbing.in_buf.extend_from_slice(src);
+
+    // Exactly one frame completes the exchange, and anything after it belongs
+    // to the session — so it stays in `in_buf` and travels there with it.
+    if let Some(msg) =
+      self.plumbing.decoder.decode(&mut self.plumbing.in_buf)?
+    {
+      let handshake = self.handshake.take().ok_or_else(|| {
+        Error::protocol_violation("logon exchange is already complete")
+      })?;
+      let established = {
+        let mut out = self.plumbing.output(sink);
+        handshake.on_peer_logon(msg, now, &mut out)?
       };
-      match self.handshake.on_message(msg, now, &mut out)? {
-        Step::Continue => continue,
-        Step::NeedsSession(id) => return Ok(DriverStep::NeedsSession(id)),
-        Step::Established { state, progress } => {
-          return Ok(self.establish(*state, progress));
-        }
-      }
+      // Swap in a throwaway so the real plumbing — codec, buffers and any
+      // bytes that arrived alongside the Logon — can move into the session.
+      let config = self.plumbing.config.clone();
+      let spare = Plumbing::new(
+        config.clone(),
+        FixDecoder::new(config.repo.clone(), config.delimiter),
+      );
+      let plumbing = std::mem::replace(&mut self.plumbing, spare);
+      return Ok(Some((
+        plumbing.into_session(*established.state),
+        established.progress,
+      )));
     }
-    Ok(DriverStep::Continue)
+
+    Ok(None)
+  }
+}
+
+/// The logon exchange with a codec and buffers attached, for the side that
+/// answered the connection.
+///
+/// Note that [`on_bytes`](Self::on_bytes) takes no event sink: until it names a
+/// session there is nothing an event could be about. See
+/// [`AcceptorHandshake`](crate::session::AcceptorHandshake).
+///
+/// ```no_run
+/// # use std::time::Instant;
+/// # use babelfix_core::driver::{AcceptorDriver, DriverConfig, SessionDriver};
+/// # use babelfix_core::session::Session;
+/// # fn accept(
+/// #   mut hs: AcceptorDriver,
+/// #   bytes: &[u8],
+/// #   lookup: impl Fn(&babelfix_core::session::SessionIdentifier) -> Session,
+/// # ) -> babelfix_core::Result<Option<Box<SessionDriver>>> {
+/// let mut sink = ();
+/// Ok(match hs.on_bytes(bytes)? {
+///   Some(session_id) => {
+///     let session = lookup(session_id);
+///     let (driver, _progress) = hs.accept(session, Instant::now(), &mut sink)?;
+///     Some(driver)
+///   }
+///   None => None,   // partial frame; read more
+/// })
+/// # }
+/// ```
+pub struct AcceptorDriver {
+  handshake: AcceptorHandshake,
+  plumbing: Plumbing,
+}
+
+impl AcceptorDriver {
+  /// Answer a connection. Nothing is sent until the peer identifies itself.
+  pub fn new(config: DriverConfig, now: Instant) -> Self {
+    let decoder = FixDecoder::new(config.repo.clone(), config.delimiter);
+    let handshake = AcceptorHandshake::new(config.logon_timeout, now);
+    Self {
+      handshake,
+      plumbing: Plumbing::new(config, decoder),
+    }
   }
 
-  /// Acceptor only: supply the session named by [`DriverStep::NeedsSession`].
-  pub fn accept_session(
-    &mut self,
+  pub fn deadline(&self) -> Instant {
+    self.handshake.deadline()
+  }
+
+  pub fn on_tick(&self, now: Instant) -> Result<()> {
+    self.handshake.on_timeout(now)
+  }
+
+  pub fn pending_writes(&mut self) -> &mut BytesMut {
+    &mut self.plumbing.out_buf
+  }
+
+  pub fn has_pending_writes(&self) -> bool {
+    !self.plumbing.out_buf.is_empty()
+  }
+
+  /// The peer's Logon, for applications that authenticate on it.
+  pub fn peer_logon(&self) -> Option<&crate::message::builder::Message> {
+    self.handshake.peer_logon()
+  }
+
+  /// Feed bytes straight off the socket until the peer names a session.
+  ///
+  /// No event sink, because nothing can be emitted yet.
+  pub fn on_bytes(&mut self, src: &[u8]) -> Result<Option<&SessionIdentifier>> {
+    self.plumbing.in_buf.extend_from_slice(src);
+    match self.plumbing.decoder.decode(&mut self.plumbing.in_buf)? {
+      Some(msg) => Ok(Some(self.handshake.identify(msg)?)),
+      None => Ok(None),
+    }
+  }
+
+  /// Supply the session named by the peer's Logon.
+  pub fn accept(
+    self,
     session: Session,
     now: Instant,
     sink: &mut impl EventSink,
-  ) -> Result<DriverStep> {
+  ) -> Result<(Box<SessionDriver>, Progress)> {
+    let AcceptorDriver {
+      handshake,
+      mut plumbing,
+    } = self;
+
     // The application's session decides the precision of every timestamp from
-    // here on, including the Logon reply the handshake is about to send.
-    self.encoder = FixEncoder::new(self.config.delimiter)
+    // here on, including the Logon reply about to go out.
+    plumbing.encoder = FixEncoder::new(plumbing.config.delimiter)
       .with_precision(session.time_precision);
 
-    let step = {
-      let mut out = DriverOutput {
-        encoder: &mut self.encoder,
-        bytes: &mut self.out_buf,
-        clock: self.config.clock,
-        sink,
-      };
-      self.handshake.accept_session(session, now, &mut out)?
+    let established = {
+      let mut out = plumbing.output(sink);
+      handshake.accept(session, now, &mut out)?
     };
 
-    Ok(match step {
-      Step::Established { state, progress } => self.establish(*state, progress),
-      Step::NeedsSession(id) => DriverStep::NeedsSession(id),
-      Step::Continue => DriverStep::Continue,
-    })
-  }
-
-  /// Carry the codec, its buffers and any unread bytes into the session.
-  fn establish(
-    &mut self,
-    state: SessionState,
-    progress: Progress,
-  ) -> DriverStep {
-    DriverStep::Established {
-      progress,
-      driver: Box::new(SessionDriver {
-        state,
-        decoder: std::mem::replace(
-          &mut self.decoder,
-          FixDecoder::new(self.config.repo.clone(), self.config.delimiter),
-        ),
-        encoder: std::mem::take(&mut self.encoder),
-        in_buf: std::mem::take(&mut self.in_buf),
-        out_buf: std::mem::take(&mut self.out_buf),
-        clock: self.config.clock,
-      }),
-    }
+    let progress = established.progress;
+    Ok((plumbing.into_session(*established.state), progress))
   }
 }
 

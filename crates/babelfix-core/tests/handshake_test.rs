@@ -12,8 +12,8 @@ use babelfix_core as fix;
 use fix::message::builder;
 use fix::schema::FIX_Latest::Fields;
 use fix::session::{
-  Event, Handshake, Progress, Role, Session, SessionIdentifier, SessionOutput,
-  Step,
+  AcceptorHandshake, Event, InitiatorHandshake, Progress, Session,
+  SessionIdentifier, SessionOutput,
 };
 
 static FIX_REPO: LazyLock<Arc<fix::repository::FixRepository>> =
@@ -98,7 +98,7 @@ fn id(us: &str, them: &str) -> SessionIdentifier {
 #[test]
 fn an_initiator_opens_with_its_own_logon() {
   let mut out = Trace::default();
-  let hs = Handshake::initiator(
+  let _hs = InitiatorHandshake::start(
     id("CLIENT", "SERVER"),
     session(),
     LOGON_TIMEOUT,
@@ -107,7 +107,6 @@ fn an_initiator_opens_with_its_own_logon() {
   )
   .unwrap();
 
-  assert_eq!(hs.role(), Role::Initiator);
   assert_eq!(
     out.events,
     vec!["ConnectionEstablished", "RawMessageSent(A)"],
@@ -120,18 +119,16 @@ fn an_initiator_opens_with_its_own_logon() {
 /// attach an event to.
 #[test]
 fn an_acceptor_says_nothing_until_the_peer_identifies_itself() {
-  let mut out = Trace::default();
-  let mut hs = Handshake::acceptor(LOGON_TIMEOUT, Instant::now());
-  assert_eq!(hs.role(), Role::Acceptor);
+  let out = Trace::default();
+  let mut hs = AcceptorHandshake::new(LOGON_TIMEOUT, Instant::now());
   assert!(out.events.is_empty());
 
-  let step = hs
-    .on_message(frame("A", 1, "CLIENT", "SERVER"), Instant::now(), &mut out)
-    .unwrap();
-
-  let Step::NeedsSession(session_id) = step else {
-    panic!("expected the acceptor to ask for a session");
-  };
+  // Note there is no output to pass: the signature says an acceptor cannot
+  // emit anything at this point, because there is no session yet.
+  let session_id = hs
+    .identify(frame("A", 1, "CLIENT", "SERVER"))
+    .unwrap()
+    .clone();
   // Identity is expressed from our point of view: the peer's SenderCompID is
   // our TargetCompID.
   assert_eq!(session_id.sender_comp_id, "SERVER");
@@ -151,15 +148,11 @@ fn an_acceptor_says_nothing_until_the_peer_identifies_itself() {
 #[test]
 fn an_acceptor_reports_the_logon_before_answering_it() {
   let mut out = Trace::default();
-  let mut hs = Handshake::acceptor(LOGON_TIMEOUT, Instant::now());
-  let _ = hs
-    .on_message(frame("A", 1, "CLIENT", "SERVER"), Instant::now(), &mut out)
-    .unwrap();
+  let mut hs = AcceptorHandshake::new(LOGON_TIMEOUT, Instant::now());
+  hs.identify(frame("A", 1, "CLIENT", "SERVER")).unwrap();
 
-  let step = hs
-    .accept_session(session(), Instant::now(), &mut out)
-    .unwrap();
-  assert!(matches!(step, Step::Established { .. }));
+  let established = hs.accept(session(), Instant::now(), &mut out).unwrap();
+  assert_eq!(established.progress, Progress::Continue);
 
   assert_eq!(
     &out.events[..3],
@@ -177,13 +170,10 @@ fn an_acceptor_reports_the_logon_before_answering_it() {
 /// and accepting it — which is where authentication belongs.
 #[test]
 fn the_peer_logon_is_available_before_accepting() {
-  let mut out = Trace::default();
-  let mut hs = Handshake::acceptor(LOGON_TIMEOUT, Instant::now());
+  let mut hs = AcceptorHandshake::new(LOGON_TIMEOUT, Instant::now());
   assert!(hs.peer_logon().is_none());
 
-  let _ = hs
-    .on_message(frame("A", 1, "CLIENT", "SERVER"), Instant::now(), &mut out)
-    .unwrap();
+  hs.identify(frame("A", 1, "CLIENT", "SERVER")).unwrap();
 
   let logon = hs.peer_logon().expect("the Logon that named the session");
   assert_eq!(logon.fix_message.msg_type, "A");
@@ -198,34 +188,37 @@ fn the_peer_logon_is_available_before_accepting() {
 /// that does not exist.
 #[test]
 fn a_first_frame_that_is_not_a_logon_is_refused_silently() {
-  for role in ["acceptor", "initiator"] {
-    let mut out = Trace::default();
-    let mut hs = match role {
-      "acceptor" => Handshake::acceptor(LOGON_TIMEOUT, Instant::now()),
-      _ => Handshake::initiator(
-        id("CLIENT", "SERVER"),
-        session(),
-        LOGON_TIMEOUT,
-        Instant::now(),
-        &mut out,
-      )
-      .unwrap(),
-    };
-    let before = out.events.len();
+  // Acceptor: nothing has been emitted, and nothing can be — there is no
+  // output to emit into.
+  let mut acceptor = AcceptorHandshake::new(LOGON_TIMEOUT, Instant::now());
+  let err = acceptor
+    .identify(frame("0", 1, "CLIENT", "SERVER"))
+    .expect_err("a Heartbeat must not open a session");
+  assert!(format!("{err}").contains("not a logon"), "{err}");
+  assert!(acceptor.session_id().is_none());
+  assert!(acceptor.peer_logon().is_none());
 
-    let err = hs
-      .on_message(frame("0", 1, "CLIENT", "SERVER"), Instant::now(), &mut out)
-      .expect_err("a Heartbeat must not open a session");
-    assert!(
-      format!("{err}").contains("not a logon"),
-      "{role}: unexpected error {err}"
-    );
-    assert_eq!(
-      out.events.len(),
-      before,
-      "{role} emitted something for a frame that was never a Logon"
-    );
-  }
+  // Initiator: the Logon it already sent is the only thing emitted.
+  let mut out = Trace::default();
+  let initiator = InitiatorHandshake::start(
+    id("CLIENT", "SERVER"),
+    session(),
+    LOGON_TIMEOUT,
+    Instant::now(),
+    &mut out,
+  )
+  .unwrap();
+  let before = out.events.len();
+
+  let err = initiator
+    .on_peer_logon(frame("0", 1, "CLIENT", "SERVER"), Instant::now(), &mut out)
+    .expect_err("a Heartbeat must not complete the exchange");
+  assert!(format!("{err}").contains("not a logon"), "{err}");
+  assert_eq!(
+    out.events.len(),
+    before,
+    "something was emitted for a frame that was never a Logon"
+  );
 }
 
 /// A Logon whose sequence number is too low ends the session — but the state
@@ -234,20 +227,15 @@ fn a_first_frame_that_is_not_a_logon_is_refused_silently() {
 #[test]
 fn a_session_refused_during_logon_still_comes_back() {
   let mut out = Trace::default();
-  let mut hs = Handshake::acceptor(LOGON_TIMEOUT, Instant::now());
-  let _ = hs
-    .on_message(frame("A", 1, "CLIENT", "SERVER"), Instant::now(), &mut out)
-    .unwrap();
+  let mut hs = AcceptorHandshake::new(LOGON_TIMEOUT, Instant::now());
+  hs.identify(frame("A", 1, "CLIENT", "SERVER")).unwrap();
 
   // Expecting inbound 5; the peer opened at 1, so one side has lost state.
   let mut stale = session();
   stale.next_in_seq_num = 5;
 
-  let step = hs.accept_session(stale, Instant::now(), &mut out).unwrap();
-  let Step::Established { progress, .. } = step else {
-    panic!("expected the session to be established and then closed");
-  };
-  assert_eq!(progress, Progress::Close);
+  let established = hs.accept(stale, Instant::now(), &mut out).unwrap();
+  assert_eq!(established.progress, Progress::Close);
   assert!(
     out.events.iter().any(|e| e == "RawMessageSent(5)"),
     "no Logout explaining the refusal: {:?}",
@@ -260,9 +248,9 @@ fn a_session_refused_during_logon_still_comes_back() {
 #[test]
 fn the_logon_deadline_is_enforced() {
   let start = Instant::now();
-  let mut hs = Handshake::acceptor(LOGON_TIMEOUT, start);
+  let hs = AcceptorHandshake::new(LOGON_TIMEOUT, start);
 
-  assert_eq!(hs.next_deadline(), Some(start + LOGON_TIMEOUT));
+  assert_eq!(hs.deadline(), start + LOGON_TIMEOUT);
   assert!(
     hs.on_timeout(start + LOGON_TIMEOUT - Duration::from_millis(1))
       .is_ok()

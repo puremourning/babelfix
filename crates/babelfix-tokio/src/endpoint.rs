@@ -347,7 +347,7 @@ async fn initiate_connection(
   async {
     let mut out =
       session::PendingOutput::new(delimiter, session.time_precision);
-    let mut handshake = babelfix_core::session::Handshake::initiator(
+    let handshake = babelfix_core::session::InitiatorHandshake::start(
       session_id,
       session,
       config.logon_timeout,
@@ -359,52 +359,39 @@ async fn initiate_connection(
       session::SessionRunner::new(tx, session_event_sender.clone(), out);
     runner.flush().await?;
 
-    // Everything about the exchange itself — what to send, in what order, and
-    // what to make of the answer — is the state machine's business. This only
-    // supplies frames and a deadline.
-    let (mut state, progress) = loop {
-      let frame = tokio::select! {
-        _ = tokio::time::sleep_until(
-          tokio::time::Instant::from_std(
-            handshake.next_deadline().unwrap_or_else(std::time::Instant::now),
-          ),
-        ) => {
-          let _ = handshake.on_timeout(std::time::Instant::now())?;
-          continue;
+    // What to send, in what order, and what to make of the answer is the
+    // handshake's business. This only supplies one frame and a deadline.
+    let frame = tokio::select! {
+      _ = tokio::time::sleep_until(
+        tokio::time::Instant::from_std(handshake.deadline()),
+      ) => {
+        return Err(Error::connection_failed(format!(
+          "Logon exchange timed out after {:?}", config.logon_timeout,
+        )));
+      }
+      msg = rx.next() => match msg {
+        Some(Ok(msg)) => msg,
+        Some(Err(e)) => {
+          return Err(Error::connection_failed(format!(
+            "Failed to read first message: {e}"
+          )));
         }
-        msg = rx.next() => match msg {
-          Some(Ok(msg)) => msg,
-          Some(Err(e)) => {
-            return Err(Error::connection_failed(format!(
-              "Failed to read first message: {e}"
-            )));
-          }
-          None => {
-            return Err(Error::connection_failed(
-              "Connection closed before first message",
-            ));
-          }
-        },
-      };
-
-      let step = handshake.on_message(
-        frame,
-        std::time::Instant::now(),
-        runner.output(),
-      )?;
-      runner.flush().await?;
-      match step {
-        babelfix_core::session::Step::Established { state, progress } => {
-          break (state, progress);
-        }
-        babelfix_core::session::Step::Continue => continue,
-        babelfix_core::session::Step::NeedsSession(_) => {
-          return Err(Error::protocol_violation(
-            "an initiator already has its session",
+        None => {
+          return Err(Error::connection_failed(
+            "Connection closed before first message",
           ));
         }
-      }
+      },
     };
+
+    let established = handshake.on_peer_logon(
+      frame,
+      std::time::Instant::now(),
+      runner.output(),
+    )?;
+    runner.flush().await?;
+    let mut state = established.state;
+    let progress = established.progress;
 
     // Create a disconnecter to ensure we send a disconnect event when the
     // session is dropped
@@ -466,15 +453,15 @@ async fn accept_connection(
   let (session_event_sender, session_event_recv) =
     mpsc::channel::<session::SessionEvent>(config.channel_depth);
 
-  let mut out = session::PendingOutput::new(delimiter, Default::default());
-  let mut handshake = babelfix_core::session::Handshake::acceptor(
+  let mut handshake = babelfix_core::session::AcceptorHandshake::new(
     config.logon_timeout,
     std::time::Instant::now(),
   );
 
   // Nothing session-scoped can happen until the peer's Logon names a session,
   // because every session on this port shares the listener. Read exactly one
-  // frame and let the handshake decide what it means.
+  // frame; note there is no event sink here, because there is as yet no session
+  // for an event to be about.
   let logon_frame = tokio::select! {
     _ = tokio::time::sleep(config.logon_timeout) => {
       return Err(Error::connection_failed(format!(
@@ -502,27 +489,16 @@ async fn accept_connection(
     },
   };
 
-  // A first frame that is not a Logon is rejected here, before the application
+  // A first frame that is not a Logon is refused here, before the application
   // is told anything about it. It used to be validated *after* `NewSession` and
   // `SessionConnected` had already gone out, so an application would do its
   // persisted-state lookup, and be handed a session handle, for a connection
   // about to be dropped.
-  let opened =
-    handshake.on_message(logon_frame, std::time::Instant::now(), &mut out);
-
-  let session_id = match opened {
-    Ok(babelfix_core::session::Step::NeedsSession(id)) => id,
-    Ok(_) => {
-      return Err(Error::protocol_violation(
-        "acceptor handshake did not ask for a session",
-      ));
-    }
+  let session_id = match handshake.identify(logon_frame) {
+    Ok(id) => id.clone(),
     Err(e) => {
-      // A peer that opens with something other than a Logon is reported the
-      // same way as one that says nothing at all: as an invalid connection,
-      // named by its address. There is no session to report it against — that
-      // is the whole point — so this is the only place the application can
-      // hear about it.
+      // There is no session to report this against — that is the whole point —
+      // so an invalid peer is named by its address instead.
       event_sender
         .send(EndpointEvent::SessionInvalid(partner))
         .await
@@ -541,7 +517,6 @@ async fn accept_connection(
     .await
     .map_err(crate::chan_closed)?;
   let session = get_session.await.map_err(crate::chan_closed)??;
-  out.set_precision(session.time_precision);
 
   let span = tracing::info_span!(
     "ServerSession",
@@ -556,24 +531,18 @@ async fn accept_connection(
       session_event_sender: session_event_sender.clone(),
     };
 
+    // The session decides the precision of every timestamp from here on,
+    // including the Logon reply the handshake is about to send.
+    let mut out =
+      session::PendingOutput::new(delimiter, session.time_precision);
+    let established =
+      handshake.accept(session, std::time::Instant::now(), &mut out)?;
+
     let mut runner =
       session::SessionRunner::new(tx, session_event_sender.clone(), out);
-
-    let (mut state, progress) = match handshake.accept_session(
-      session,
-      std::time::Instant::now(),
-      runner.output(),
-    )? {
-      babelfix_core::session::Step::Established { state, progress } => {
-        (state, progress)
-      }
-      _ => {
-        return Err(Error::protocol_violation(
-          "accepting the session did not establish it",
-        ));
-      }
-    };
     runner.flush().await?;
+    let mut state = established.state;
+    let progress = established.progress;
 
     let session_handle = session::SessionHandle {
       session_id,

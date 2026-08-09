@@ -1,4 +1,4 @@
-//! The logon exchange, as a state machine.
+//! The logon exchange, as a state machine — one type per role.
 //!
 //! The two roles do not behave the same, and the difference is protocol rather
 //! than transport:
@@ -12,30 +12,33 @@
 //!   numbers it persisted for that identity, and only then can a reply go out.
 //!
 //! That ordering is the same whether the bytes arrive from tokio, from `epoll`,
-//! or from a test — so it lives here, and a driver's only job is to feed frames
-//! in and answer [`Step::NeedsSession`] when asked.
+//! or from a test, so it lives here rather than in a driver.
+//!
+//! # Why two types
+//!
+//! [`AcceptorHandshake::identify`] takes no [`SessionOutput`], because at that
+//! point there is no session for an event to be *about*. Making that a property
+//! of the signature rather than a rule to remember is why the roles are separate
+//! types: every caller already knows which end it is, so nothing has to branch
+//! on a role, and nothing is handed an output it must not use.
 //!
 //! ```no_run
 //! # use std::time::{Duration, Instant};
-//! # use babelfix_core::session::{Handshake, Step, SessionOutput, Session};
-//! # fn drive(
-//! #   mut hs: Handshake,
+//! # use babelfix_core::session::{AcceptorHandshake, SessionOutput, Session};
+//! # fn accept(
 //! #   out: &mut impl SessionOutput,
 //! #   frame: babelfix_core::FixMessage,
 //! #   lookup: impl Fn(&babelfix_core::session::SessionIdentifier) -> Session,
 //! # ) -> babelfix_core::Result<()> {
-//! let now = Instant::now();
-//! let mut step = hs.on_message(frame, now, out)?;
+//! let mut hs = AcceptorHandshake::new(Duration::from_secs(30), Instant::now());
 //!
-//! if let Step::NeedsSession(id) = &step {
-//!   let session = lookup(id);              // however you persist them
-//!   step = hs.accept_session(session, now, out)?;
-//! }
+//! // No output here: nothing can be said about a session that has no name yet.
+//! let session_id = hs.identify(frame)?;
+//! let session = lookup(session_id);          // however you persist them
 //!
-//! if let Step::Established { state, progress } = step {
-//!   // hand `state` the rest of the stream, unless it is already over
-//!   let _ = (state, progress);
-//! }
+//! // From here there is a session, so there is somewhere to put events.
+//! let established = hs.accept(session, Instant::now(), out)?;
+//! let _ = established;
 //! # Ok(())
 //! # }
 //! ```
@@ -52,60 +55,22 @@ use crate::repository::{FieldBlock, FixVersion};
 use crate::schema::FIX_Latest::Fields;
 use crate::{Error, Result};
 
-/// Which end of the connection this is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-  /// Opened the connection, and knows the session's identity already.
-  Initiator,
-  /// Answered the connection, and learns the identity from the peer's Logon.
-  Acceptor,
-}
-
-/// What a driver should do next.
+/// A completed logon exchange: the session, and whether it survived it.
+///
+/// `progress` is [`Progress::Close`] when the session ended during the exchange
+/// — a Logon whose sequence number is too low, say, which is answered with a
+/// Logout and terminated. The state comes back even then, because the
+/// application still has to be given its handle: the events explaining *why* it
+/// ended have already been emitted, and dropping the handle would strand them.
 #[must_use]
 #[derive(Debug)]
-pub enum Step {
-  /// Keep feeding frames.
-  Continue,
-
-  /// Acceptor only: the peer's Logon named this session. Look up whatever
-  /// sequence numbers you persisted for it and answer with
-  /// [`Handshake::accept_session`]. Refusing is a matter of dropping the
-  /// connection.
-  NeedsSession(SessionIdentifier),
-
-  /// The logon exchange is complete. Feed everything after this to the
-  /// [`SessionState`].
-  Established {
-    state: Box<SessionState>,
-    /// `Close` when the session ended during the exchange itself — a Logon
-    /// whose sequence number is too low, say, which is answered with a Logout
-    /// and terminated.
-    ///
-    /// The state comes back even then, because the application still has to be
-    /// given its handle: the events explaining *why* the session ended have
-    /// already been emitted, and dropping the handle would strand them.
-    progress: Progress,
-  },
+pub struct Established {
+  pub state: Box<SessionState>,
+  pub progress: Progress,
 }
 
-#[derive(Debug)]
-enum Phase {
-  /// Our Logon is on the wire; waiting for the peer's. The state exists
-  /// already because sending that Logon consumed a sequence number.
-  InitiatorAwaitingLogon { state: Box<SessionState> },
-  /// Waiting for the peer to introduce itself.
-  AcceptorAwaitingLogon,
-  /// Identity known; waiting for the application to supply the session. Both
-  /// forms of the peer's Logon are kept: the parsed one to feed the session,
-  /// and the frame as it arrived to report as `RawMessageReceived`.
-  AcceptorAwaitingSession(Box<PendingLogon>),
-  /// [`Step::Established`] has been returned and the state moved out.
-  Done,
-}
-
-/// The peer's Logon, in both the forms the handshake still needs: parsed, to
-/// feed the session, and as it arrived, to report as `RawMessageReceived`.
+/// The peer's Logon, in both the forms still needed: parsed, to feed the
+/// session, and as it arrived, to report as `RawMessageReceived`.
 #[derive(Debug)]
 struct PendingLogon {
   session_id: SessionIdentifier,
@@ -113,27 +78,30 @@ struct PendingLogon {
   raw: FixMessage,
 }
 
-/// The logon exchange. See the [module docs](self).
+// ---------------------------------------------------------------------------
+// Initiator
+// ---------------------------------------------------------------------------
+
+/// The logon exchange from the side that opened the connection.
 #[derive(Debug)]
-pub struct Handshake {
-  role: Role,
-  /// When to give up waiting for the peer to complete the exchange.
+pub struct InitiatorHandshake {
+  /// Exists from the start: the identity was never in doubt, and sending our
+  /// Logon consumed an outbound sequence number.
+  state: Box<SessionState>,
   deadline: Instant,
-  phase: Phase,
 }
 
-impl Handshake {
-  /// Open a session: emit `ConnectionEstablished` and put our Logon on the
-  /// wire.
-  pub fn initiator(
+impl InitiatorHandshake {
+  /// Announce the session and put our Logon on the wire.
+  pub fn start(
     session_id: SessionIdentifier,
     session: Session,
     logon_timeout: Duration,
     now: Instant,
     out: &mut impl SessionOutput,
   ) -> Result<Self> {
-    // The socket already exists, and the identity was never in doubt, so the
-    // session can be announced before anything is exchanged.
+    // The socket already exists and the identity is known, so the session can
+    // be announced before anything is exchanged.
     out.event(Event::ConnectionEstablished)?;
 
     let logon = logon_message(&session)?;
@@ -141,128 +109,138 @@ impl Handshake {
     state.send_logon(logon, out)?;
 
     Ok(Self {
-      role: Role::Initiator,
+      state: Box::new(state),
       deadline: now + logon_timeout,
-      phase: Phase::InitiatorAwaitingLogon {
-        state: Box::new(state),
-      },
     })
   }
 
-  /// Answer a connection: say nothing until the peer identifies itself.
-  pub fn acceptor(logon_timeout: Duration, now: Instant) -> Self {
-    Self {
-      role: Role::Acceptor,
-      deadline: now + logon_timeout,
-      phase: Phase::AcceptorAwaitingLogon,
-    }
-  }
-
-  pub fn role(&self) -> Role {
-    self.role
-  }
-
-  /// The peer's Logon, once it has arrived and before the session is accepted.
-  ///
-  /// Applications that authenticate — on `Username`/`Password`, or on anything
-  /// else the peer put in its Logon — inspect it here, between
-  /// [`Step::NeedsSession`] and [`accept_session`](Self::accept_session).
-  pub fn peer_logon(&self) -> Option<&builder::Message> {
-    match &self.phase {
-      Phase::AcceptorAwaitingSession(pending) => Some(&pending.logon),
-      _ => None,
-    }
-  }
-
-  /// When the exchange must have completed by. `None` once it has.
-  pub fn next_deadline(&self) -> Option<Instant> {
-    match self.phase {
-      Phase::Done => None,
-      _ => Some(self.deadline),
-    }
+  /// When the peer's Logon must have arrived by.
+  pub fn deadline(&self) -> Instant {
+    self.deadline
   }
 
   /// Give up if the peer has taken too long.
-  pub fn on_timeout(&mut self, now: Instant) -> Result<Step> {
-    if now >= self.deadline {
-      return Err(Error::connection_failed(
-        "logon exchange did not complete in time",
-      ));
-    }
-    Ok(Step::Continue)
+  pub fn on_timeout(&self, now: Instant) -> Result<()> {
+    expired(self.deadline, now)
   }
 
-  /// Feed a decoded frame.
-  pub fn on_message(
-    &mut self,
+  /// The peer's Logon completes the exchange.
+  pub fn on_peer_logon(
+    mut self,
     msg: FixMessage,
     now: Instant,
     out: &mut impl SessionOutput,
-  ) -> Result<Step> {
+  ) -> Result<Established> {
     let logon = builder::Message::from_message(&msg)?;
-
-    // Nothing but a Logon may open a session. This is checked before the
-    // message is looked at in any other way, so a peer that opens with garbage
-    // cannot cause an identity to be derived from it, or the application to be
-    // asked about a session that will never exist.
     expect_logon(&logon)?;
 
-    match std::mem::replace(&mut self.phase, Phase::Done) {
-      Phase::InitiatorAwaitingLogon { mut state } => {
-        out.event(Event::RawMessageReceived(&msg, state.session()))?;
-        let progress = state.start(logon, now, out)?;
-        Ok(Step::Established { state, progress })
-      }
+    out.event(Event::RawMessageReceived(&msg, self.state.session()))?;
+    let progress = self.state.start(logon, now, out)?;
+    Ok(Established {
+      state: self.state,
+      progress,
+    })
+  }
+}
 
-      Phase::AcceptorAwaitingLogon => {
-        let session_id = session_id_from_logon(&logon)?;
-        debug!("Logon received from {session_id:?}");
-        self.phase = Phase::AcceptorAwaitingSession(Box::new(PendingLogon {
-          session_id: session_id.clone(),
-          logon,
-          raw: msg,
-        }));
-        Ok(Step::NeedsSession(session_id))
-      }
+// ---------------------------------------------------------------------------
+// Acceptor
+// ---------------------------------------------------------------------------
 
-      other @ Phase::AcceptorAwaitingSession(_) => {
-        // Put it back; the caller owes us a session first.
-        self.phase = other;
-        Err(Error::protocol_violation(
-          "peer sent a second message before the session was accepted",
-        ))
-      }
+/// The logon exchange from the side that answered the connection.
+#[derive(Debug)]
+pub struct AcceptorHandshake {
+  deadline: Instant,
+  /// Set once the peer has named a session.
+  pending: Option<Box<PendingLogon>>,
+}
 
-      Phase::Done => Err(Error::protocol_violation(
-        "handshake already complete; feed the SessionState instead",
-      )),
+impl AcceptorHandshake {
+  /// Wait for the peer to introduce itself. Nothing is sent.
+  pub fn new(logon_timeout: Duration, now: Instant) -> Self {
+    Self {
+      deadline: now + logon_timeout,
+      pending: None,
     }
   }
 
-  /// Acceptor only: supply the sequence numbers persisted for the identity
-  /// reported by [`Step::NeedsSession`].
-  pub fn accept_session(
-    &mut self,
+  /// When the peer's Logon must have arrived by.
+  pub fn deadline(&self) -> Instant {
+    self.deadline
+  }
+
+  /// Give up if the peer has taken too long.
+  pub fn on_timeout(&self, now: Instant) -> Result<()> {
+    expired(self.deadline, now)
+  }
+
+  /// Read the peer's Logon and work out which session it names.
+  ///
+  /// There is deliberately no [`SessionOutput`] here. Until this returns there
+  /// is no session, so there is nothing an event could be *about* — and a first
+  /// frame that turns out not to be a Logon must be refused without the
+  /// application having been told anything about it at all.
+  pub fn identify(&mut self, msg: FixMessage) -> Result<&SessionIdentifier> {
+    if self.pending.is_some() {
+      return Err(Error::protocol_violation(
+        "peer sent a second message before the session was accepted",
+      ));
+    }
+
+    let logon = builder::Message::from_message(&msg)?;
+    // Checked before anything is derived from the message, so a peer opening
+    // with garbage cannot cause an identity to be read out of it.
+    expect_logon(&logon)?;
+
+    let session_id = session_id_from_logon(&logon)?;
+    debug!("Logon received from {session_id:?}");
+
+    Ok(
+      &self
+        .pending
+        .insert(Box::new(PendingLogon {
+          session_id,
+          logon,
+          raw: msg,
+        }))
+        .session_id,
+    )
+  }
+
+  /// The session this connection named, once [`identify`](Self::identify) has
+  /// run.
+  pub fn session_id(&self) -> Option<&SessionIdentifier> {
+    self.pending.as_ref().map(|p| &p.session_id)
+  }
+
+  /// The peer's Logon, for applications that authenticate on it —
+  /// `Username`/`Password`, or whatever else the peer put in there. Available
+  /// between [`identify`](Self::identify) and [`accept`](Self::accept).
+  pub fn peer_logon(&self) -> Option<&builder::Message> {
+    self.pending.as_ref().map(|p| &p.logon)
+  }
+
+  /// Supply the sequence numbers persisted for the identified session.
+  pub fn accept(
+    self,
     session: Session,
     now: Instant,
     out: &mut impl SessionOutput,
-  ) -> Result<Step> {
-    let Phase::AcceptorAwaitingSession(pending) =
-      std::mem::replace(&mut self.phase, Phase::Done)
-    else {
+  ) -> Result<Established> {
+    let Some(pending) = self.pending else {
       return Err(Error::protocol_violation(
-        "accept_session called when no session was being awaited",
+        "accept called before the peer identified itself",
       ));
     };
-
-    // Only now is there a session to attach anything to.
-    out.event(Event::ConnectionEstablished)?;
-
     let PendingLogon {
       session_id,
       logon,
       raw,
     } = *pending;
+
+    // Only now is there a session to attach anything to.
+    out.event(Event::ConnectionEstablished)?;
+
     let mut state = SessionState::new(session_id, session, now);
 
     // The peer's Logon is reported before our reply goes out. An application
@@ -275,12 +253,25 @@ impl Handshake {
     state.send_logon(reply, out)?;
 
     let progress = state.start(logon, now, out)?;
-    Ok(Step::Established {
+    Ok(Established {
       state: Box::new(state),
       progress,
     })
   }
 }
+
+fn expired(deadline: Instant, now: Instant) -> Result<()> {
+  if now >= deadline {
+    return Err(Error::connection_failed(
+      "logon exchange did not complete in time",
+    ));
+  }
+  Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shared protocol helpers
+// ---------------------------------------------------------------------------
 
 /// Build a Logon carrying the session's negotiated settings.
 pub fn logon_message(session: &Session) -> Result<builder::Message> {

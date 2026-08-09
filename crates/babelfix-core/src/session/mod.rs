@@ -44,7 +44,8 @@ mod state;
 use std::sync::Arc;
 
 pub use handshake::{
-  Handshake, Role, Step, expect_logon, logon_message, session_id_from_logon,
+  AcceptorHandshake, Established, InitiatorHandshake, expect_logon,
+  logon_message, session_id_from_logon,
 };
 pub use replay::Replay;
 pub use state::SessionState;

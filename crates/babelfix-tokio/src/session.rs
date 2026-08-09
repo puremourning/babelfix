@@ -261,21 +261,6 @@ impl PendingOutput {
   }
 }
 
-impl PendingOutput {
-  /// Adopt the precision of a session that has only just been supplied.
-  ///
-  /// An acceptor builds its output before it knows which session it is
-  /// serving, so the encoder starts on the default and is corrected here —
-  /// before the Logon reply, which is the first thing it stamps.
-  pub(crate) fn set_precision(
-    &mut self,
-    precision: crate::time::TimePrecision,
-  ) {
-    self.encoder = FixEncoder::new(self.encoder.delimiter().into())
-      .with_precision(precision);
-  }
-}
-
 impl SessionOutput for PendingOutput {
   fn transmit(
     &mut self,

@@ -57,7 +57,7 @@ use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use babelfix_core::driver::{
-  DriverConfig, DriverStep, HandshakeDriver, SessionDriver,
+  AcceptorDriver, DriverConfig, InitiatorDriver, SessionDriver,
 };
 use babelfix_core::message::builder;
 use babelfix_core::session::{
@@ -87,7 +87,7 @@ pub struct SessionConnection<S> {
 /// frame arrives — which is why accepting is two steps rather than one.
 pub struct PendingSession<S> {
   io: S,
-  handshake: HandshakeDriver,
+  handshake: AcceptorDriver,
   session_id: SessionIdentifier,
 }
 
@@ -114,26 +114,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PendingSession<S> {
     sink: &mut impl EventSink,
   ) -> Result<SessionConnection<S>> {
     let PendingSession {
-      mut io,
-      mut handshake,
-      ..
+      mut io, handshake, ..
     } = self;
 
-    match handshake.accept_session(session, Instant::now(), sink)? {
-      DriverStep::Established { mut driver, .. } => {
-        // Establishing hands the codec and its buffers to the session, so the
-        // Logon reply is now the *driver's* to flush, not the handshake's.
-        flush(&mut io, driver.pending_writes()).await?;
-        Ok(SessionConnection {
-          io,
-          driver,
-          read_buf: BytesMut::with_capacity(READ_CHUNK),
-        })
-      }
-      _ => Err(Error::connection_failed(
-        "accepting the session did not establish it",
-      )),
+    let (mut driver, progress) =
+      handshake.accept(session, Instant::now(), sink)?;
+
+    // Establishing hands the codec and its buffers to the session, so the
+    // Logon reply is now the driver's to flush, not the handshake's.
+    flush(&mut io, driver.pending_writes()).await?;
+
+    if progress.is_close() {
+      // Unlike the endpoint, the caller has already seen why: its own sink
+      // received the events synchronously.
+      return Err(Error::connection_failed(
+        "session closed during the logon exchange",
+      ));
     }
+
+    Ok(SessionConnection {
+      io,
+      driver,
+      read_buf: BytesMut::with_capacity(READ_CHUNK),
+    })
   }
 }
 
@@ -164,7 +167,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
     session: Session,
     sink: &mut impl EventSink,
   ) -> Result<Self> {
-    let mut handshake = HandshakeDriver::initiator(
+    let mut handshake = InitiatorDriver::start(
       session_id,
       session,
       driver_config(repo, delimiter),
@@ -173,71 +176,63 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
     )?;
     flush(&mut io, handshake.pending_writes()).await?;
 
-    let driver = pump_handshake(&mut io, &mut handshake, sink, |_| {
-      Err(Error::protocol_violation(
-        "an initiator already has its session",
-      ))
-    })
-    .await?;
+    let mut buf = BytesMut::with_capacity(READ_CHUNK);
+    let deadline = tokio::time::Instant::now() + LOGON_TIMEOUT;
+    loop {
+      read_more(&mut io, &mut buf, deadline).await?;
+      let bytes = std::mem::take(&mut buf);
+      buf = BytesMut::with_capacity(READ_CHUNK);
 
-    Ok(Self {
-      io,
-      driver,
-      read_buf: BytesMut::with_capacity(READ_CHUNK),
-    })
+      if let Some((mut driver, progress)) =
+        handshake.on_bytes(Instant::now(), &bytes, sink)?
+      {
+        flush(&mut io, driver.pending_writes()).await?;
+        if progress.is_close() {
+          return Err(Error::connection_failed(
+            "session closed during the logon exchange",
+          ));
+        }
+        return Ok(Self {
+          io,
+          driver,
+          read_buf: BytesMut::with_capacity(READ_CHUNK),
+        });
+      }
+      flush(&mut io, handshake.pending_writes()).await?;
+    }
   }
 
   /// Accept a session: wait for the peer's Logon and report who it claims to
   /// be, so the application can supply the persisted sequence numbers.
   ///
   /// The identity comes out of the Logon, so it cannot be known before the
-  /// first frame arrives — which is why accepting is two steps.
+  /// first frame arrives — which is why accepting is two steps. Note there is
+  /// no event sink here: until the session is named, there is nothing an event
+  /// could be about.
   pub async fn accept(
     mut io: S,
     repo: Arc<FixRepository>,
     delimiter: Option<u8>,
   ) -> Result<PendingSession<S>> {
     let mut handshake =
-      HandshakeDriver::acceptor(driver_config(repo, delimiter), Instant::now());
+      AcceptorDriver::new(driver_config(repo, delimiter), Instant::now());
 
     let mut buf = BytesMut::with_capacity(READ_CHUNK);
     let deadline = tokio::time::Instant::now() + LOGON_TIMEOUT;
     loop {
-      let read = tokio::select! {
-        _ = tokio::time::sleep_until(deadline) => {
-          return Err(Error::connection_failed(
-            "logon exchange did not complete in time",
-          ));
-        }
-        read = io.read_buf(&mut buf) => read,
-      };
-      match read {
-        Ok(0) => {
-          return Err(Error::connection_failed(
-            "Connection closed before first message",
-          ));
-        }
-        Ok(_) => {}
-        Err(e) => return Err(Error::Io(e)),
-      }
-
+      read_more(&mut io, &mut buf, deadline).await?;
       let bytes = std::mem::take(&mut buf);
+      buf = BytesMut::with_capacity(READ_CHUNK);
+
       // The handshake validates that this is a Logon before deriving anything
       // from it, so a peer opening with garbage never reaches the application.
-      match handshake.on_bytes(Instant::now(), &bytes, &mut ())? {
-        DriverStep::NeedsSession(session_id) => {
-          return Ok(PendingSession {
-            io,
-            handshake,
-            session_id,
-          });
-        }
-        DriverStep::Established { .. } => {
-          return Err(Error::protocol_violation(
-            "an acceptor cannot establish a session it was never given",
-          ));
-        }
-        DriverStep::Continue => buf = BytesMut::with_capacity(READ_CHUNK),
+      if let Some(session_id) = handshake.on_bytes(&bytes)? {
+        let session_id = session_id.clone();
+        return Ok(PendingSession {
+          io,
+          handshake,
+          session_id,
+        });
       }
     }
   }
@@ -358,50 +353,25 @@ async fn flush<S: AsyncWrite + Unpin>(
   Ok(())
 }
 
-/// Read frames into `handshake` until it establishes a session.
-async fn pump_handshake<S: AsyncRead + AsyncWrite + Unpin>(
+/// Read at least one more byte into `buf`, or give up on the deadline.
+async fn read_more<S: AsyncRead + Unpin>(
   io: &mut S,
-  handshake: &mut HandshakeDriver,
-  sink: &mut impl EventSink,
-  on_needs_session: impl Fn(SessionIdentifier) -> Result<Session>,
-) -> Result<Box<SessionDriver>> {
-  let mut buf = BytesMut::with_capacity(READ_CHUNK);
-  let deadline = tokio::time::Instant::now() + LOGON_TIMEOUT;
-
-  loop {
-    let read = tokio::select! {
-      _ = tokio::time::sleep_until(deadline) => {
-        return Err(Error::connection_failed(
-          "logon exchange did not complete in time",
-        ));
-      }
-      read = io.read_buf(&mut buf) => read,
-    };
-    match read {
-      Ok(0) => {
-        return Err(Error::connection_failed(
-          "Connection closed before first message",
-        ));
-      }
-      Ok(_) => {}
-      Err(e) => return Err(Error::Io(e)),
+  buf: &mut BytesMut,
+  deadline: tokio::time::Instant,
+) -> Result<()> {
+  let read = tokio::select! {
+    _ = tokio::time::sleep_until(deadline) => {
+      return Err(Error::connection_failed(
+        "logon exchange did not complete in time",
+      ));
     }
-
-    let bytes = std::mem::take(&mut buf);
-    buf = BytesMut::with_capacity(READ_CHUNK);
-    let mut step = handshake.on_bytes(Instant::now(), &bytes, sink)?;
-
-    if let DriverStep::NeedsSession(id) = step {
-      let session = on_needs_session(id)?;
-      step = handshake.accept_session(session, Instant::now(), sink)?;
-    }
-
-    // Once established the buffers belong to the session, so flush whichever
-    // of the two now owns the bytes.
-    if let DriverStep::Established { mut driver, .. } = step {
-      flush(io, driver.pending_writes()).await?;
-      return Ok(driver);
-    }
-    flush(io, handshake.pending_writes()).await?;
+    read = io.read_buf(buf) => read,
+  };
+  match read {
+    Ok(0) => Err(Error::connection_failed(
+      "Connection closed before first message",
+    )),
+    Ok(_) => Ok(()),
+    Err(e) => Err(Error::Io(e)),
   }
 }
