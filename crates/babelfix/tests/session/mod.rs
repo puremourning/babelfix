@@ -286,6 +286,7 @@ impl Server {
       commands,
       mut events,
       local_addr,
+      join_handle,
     } = fix::endpoint::serve(
       port,
       Some(String::from("127.0.0.1")),
@@ -360,6 +361,7 @@ impl Server {
             }
           }
         }
+        join_handle.await?;
         Ok(())
       }))
     };

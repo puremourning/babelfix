@@ -70,11 +70,11 @@ pub enum EndpointCommand {
   Shutdown,
 }
 
-pub struct Endpoint {
+pub struct Endpoint<T: Future<Output = Result<()>> + Send + 'static> {
   pub events: mpsc::Receiver<EndpointEvent>,
   pub commands: mpsc::Sender<EndpointCommand>,
   pub local_addr: std::net::SocketAddr,
-  pub join_handle: tokio::task::JoinHandle<Result<()>>,
+  pub join_handle: T,
 }
 
 #[derive(Default)]
@@ -566,7 +566,7 @@ pub async fn serve(
   host: Option<String>,
   repo: Arc<crate::repository::FixRepository>,
   delimieter: Option<u8>,
-) -> Result<Endpoint> {
+) -> Result<Endpoint<impl Future<Output = Result<()>> + Send + 'static>> {
   let (event_sender, event_receiver) = mpsc::channel::<EndpointEvent>(100);
   let (command_sender, mut command_receiver) =
     mpsc::channel::<EndpointCommand>(100);
@@ -618,10 +618,18 @@ pub async fn serve(
     Ok(())
   });
 
+  let resolve_join_handle = async move {
+    match join_handle.await {
+      Ok(Ok(())) => Ok(()),
+      Ok(Err(e)) => Err(e),
+      Err(e) => Err(Error::unspecified(format!("Server task panicked: {e:?}"))),
+    }
+  };
+
   Ok(Endpoint {
     commands: command_sender,
     events: event_receiver,
     local_addr,
-    join_handle,
+    join_handle: resolve_join_handle,
   })
 }

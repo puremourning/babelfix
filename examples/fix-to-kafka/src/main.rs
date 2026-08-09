@@ -396,7 +396,7 @@ async fn main() -> anyhow::Result<()> {
     task.await?;
   }
 
-  endpoint.join_handle.await??;
+  endpoint.join_handle.await?;
 
   Ok(())
 }
