@@ -37,3 +37,7 @@ test-log.workspace = true
 [[bench]]
 name = "message_benchmarks"
 harness = false
+
+[[bench]]
+name = "channel_benchmarks"
+harness = false
