@@ -345,8 +345,11 @@ async fn initiate_connection(
   );
 
   async {
-    let mut out =
-      session::PendingOutput::new(delimiter, session.time_precision);
+    let mut out = session::PendingOutput::new(
+      delimiter,
+      session.time_precision,
+      session_event_sender.clone(),
+    );
     let handshake = babelfix_core::session::InitiatorHandshake::start(
       session_id,
       session,
@@ -355,8 +358,7 @@ async fn initiate_connection(
       &mut out,
     )?;
 
-    let mut runner =
-      session::SessionRunner::new(tx, session_event_sender.clone(), out);
+    let mut runner = session::SessionRunner::new(tx, out);
     runner.flush().await?;
 
     // What to send, in what order, and what to make of the answer is the
@@ -533,17 +535,26 @@ async fn accept_connection(
 
     // The session decides the precision of every timestamp from here on,
     // including the Logon reply the handshake is about to send.
-    let mut out =
-      session::PendingOutput::new(delimiter, session.time_precision);
+    let mut out = session::PendingOutput::new(
+      delimiter,
+      session.time_precision,
+      session_event_sender.clone(),
+    );
     let established =
       handshake.accept(session, std::time::Instant::now(), &mut out)?;
 
-    let mut runner =
-      session::SessionRunner::new(tx, session_event_sender.clone(), out);
-    runner.flush().await?;
+    let mut runner = session::SessionRunner::new(tx, out);
     let mut state = established.state;
     let progress = established.progress;
 
+    // The handle is published *before* the first flush. Until the application
+    // holds the receiver, nothing is draining the event channel, so a session
+    // that emits more events during its logon exchange than the channel is deep
+    // would block forever waiting for a reader that does not exist yet.
+    //
+    // Safe to do this early now that the handshake validated the peer's Logon:
+    // by this point there genuinely is a session, even if it is one that is
+    // about to be logged out.
     let session_handle = session::SessionHandle {
       session_id,
       tx: session_send,
@@ -553,6 +564,8 @@ async fn accept_connection(
       .send(EndpointEvent::SessionConnected(session_handle))
       .await
       .map_err(crate::chan_closed)?;
+
+    runner.flush().await?;
 
     // A session refused during the exchange — a Logon whose sequence number is
     // too low, say — is still a session the application must hear about: the

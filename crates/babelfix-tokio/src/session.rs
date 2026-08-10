@@ -233,30 +233,34 @@ pub struct SessionHandle {
   pub events: mpsc::Receiver<SessionEvent>,
 }
 
-/// Collects what the state machine produces during one synchronous pass, so the
-/// driver can flush it afterwards.
+/// Collects what the state machine produces during one synchronous pass.
 ///
-/// The two queues exist because [`SessionOutput`] is synchronous and the socket
-/// and the event channel are not. They are drained after every input, which is
-/// what keeps the peer's backpressure connected to the application's: a slow
-/// consumer blocks the flush, which stops the loop reading the socket.
+/// Bytes are always buffered: [`SessionOutput`] is synchronous and the socket
+/// is not, and batching them means one write per pass rather than one per
+/// message. Events go straight to the application where they can — see
+/// [`event`](Self::event) — and are buffered only when the channel is full,
+/// which is what keeps the peer's backpressure connected to the application's:
+/// a slow consumer blocks the flush, which stops the loop reading the socket.
 pub(crate) struct PendingOutput {
   encoder: FixEncoder,
   /// Encoded bytes waiting to go to the socket.
   bytes: BytesMut,
-  /// Events waiting to go to the application.
+  /// Events the application could not take yet.
   events: VecDeque<SessionEvent>,
+  event_sender: mpsc::Sender<SessionEvent>,
 }
 
 impl PendingOutput {
   pub(crate) fn new(
     delimiter: Option<u8>,
     precision: crate::time::TimePrecision,
+    event_sender: mpsc::Sender<SessionEvent>,
   ) -> Self {
     Self {
       encoder: FixEncoder::new(delimiter).with_precision(precision),
       bytes: BytesMut::with_capacity(4096),
       events: VecDeque::new(),
+      event_sender,
     }
   }
 }
@@ -275,10 +279,31 @@ impl SessionOutput for PendingOutput {
   }
 
   fn event(&mut self, event: Event<'_>) -> crate::Result<()> {
-    if let Some(event) = SessionEvent::from_core(event) {
+    let Some(event) = SessionEvent::from_core(event) else {
+      return Ok(());
+    };
+
+    // Ordering invariant: once anything is queued, everything queues until the
+    // queue drains. Otherwise a `try_send` that succeeded could overtake an
+    // event already waiting, and the application would see them out of order.
+    if !self.events.is_empty() {
       self.events.push_back(event);
+      return Ok(());
     }
-    Ok(())
+
+    // Handed over here rather than at the flush, so the receiver is woken as
+    // each event is produced — on a multi-threaded runtime another worker can
+    // start on it while this pass is still running. `try_send` neither blocks
+    // nor yields, and it is cheaper than the queue it replaces: one operation
+    // instead of a push, a pop and a send.
+    match self.event_sender.try_send(event) {
+      Ok(()) => Ok(()),
+      Err(e) if e.is_full() => {
+        self.events.push_back(e.into_inner());
+        Ok(())
+      }
+      Err(_) => Err(crate::Error::connection_failed("session channel closed")),
+    }
   }
 }
 
@@ -291,20 +316,11 @@ impl SessionOutput for PendingOutput {
 pub(crate) struct SessionRunner<W> {
   out: PendingOutput,
   writer: W,
-  event_sender: mpsc::Sender<SessionEvent>,
 }
 
 impl<W: tokio::io::AsyncWrite + Unpin> SessionRunner<W> {
-  pub(crate) fn new(
-    writer: W,
-    event_sender: mpsc::Sender<SessionEvent>,
-    out: PendingOutput,
-  ) -> Self {
-    Self {
-      out,
-      writer,
-      event_sender,
-    }
+  pub(crate) fn new(writer: W, out: PendingOutput) -> Self {
+    Self { out, writer }
   }
 
   /// Where the handshake and the session write while a pass is in flight.
@@ -317,9 +333,14 @@ impl<W: tokio::io::AsyncWrite + Unpin> SessionRunner<W> {
   /// Events go first, then bytes: the application must see
   /// [`SessionEvent::RawMessageSent`] before the peer could possibly have seen
   /// the message, which is the order the pre-sans-io session guaranteed.
+  ///
+  /// The event queue is normally empty, because [`PendingOutput::event`] hands
+  /// them over as it goes. Draining here is the backpressure path: awaiting a
+  /// full channel is what stops the loop reading the socket.
   pub(crate) async fn flush(&mut self) -> crate::Result<()> {
     while let Some(event) = self.out.events.pop_front() {
       self
+        .out
         .event_sender
         .send(event)
         .await
