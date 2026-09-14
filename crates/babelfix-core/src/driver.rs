@@ -257,7 +257,7 @@ impl InitiatorDriver {
 ///
 /// Note that [`on_bytes`](Self::on_bytes) takes no event sink: until it names a
 /// session there is nothing an event could be about. See
-/// [`AcceptorHandshake`](crate::session::AcceptorHandshake).
+/// [`AcceptorHandshake`].
 ///
 /// ```no_run
 /// # use std::time::Instant;
