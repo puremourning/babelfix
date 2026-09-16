@@ -132,8 +132,8 @@ impl Plumbing {
     }
   }
 
-  /// Carry everything into the session, including any bytes that arrived
-  /// alongside the Logon.
+  /// Carry everything into the session, including bytes that arrived alongside
+  /// the Logon. The transition drains those bytes before returning the driver.
   fn into_session(self, state: SessionState) -> Box<SessionDriver> {
     Box::new(SessionDriver {
       state,
@@ -222,8 +222,9 @@ impl InitiatorDriver {
   ) -> Result<Option<(Box<SessionDriver>, Progress)>> {
     self.plumbing.in_buf.extend_from_slice(src);
 
-    // Exactly one frame completes the exchange, and anything after it belongs
-    // to the session — so it stays in `in_buf` and travels there with it.
+    // Exactly one frame completes the exchange. Anything after it belongs to
+    // the session, so it travels there in `in_buf` and is drained before the
+    // new driver reaches its caller.
     if let Some(msg) =
       self.plumbing.decoder.decode(&mut self.plumbing.in_buf)?
     {
@@ -242,10 +243,10 @@ impl InitiatorDriver {
         FixDecoder::new(config.repo.clone(), config.delimiter),
       );
       let plumbing = std::mem::replace(&mut self.plumbing, spare);
-      return Ok(Some((
-        plumbing.into_session(*established.state),
-        established.progress,
-      )));
+      let progress = established.progress;
+      let mut driver = plumbing.into_session(*established.state);
+      let progress = drain_carried(&mut driver, progress, now, sink)?;
+      return Ok(Some((driver, progress)));
     }
 
     Ok(None)
@@ -350,7 +351,9 @@ impl AcceptorDriver {
     };
 
     let progress = established.progress;
-    Ok((plumbing.into_session(*established.state), progress))
+    let mut driver = plumbing.into_session(*established.state);
+    let progress = drain_carried(&mut driver, progress, now, sink)?;
+    Ok((driver, progress))
   }
 }
 
@@ -530,4 +533,25 @@ impl std::fmt::Debug for SessionDriver {
       .field("out_buf", &self.out_buf.len())
       .finish()
   }
+}
+
+/// Deliver whatever arrived alongside the Logon.
+///
+/// The handshake decodes exactly one frame, so a following frame is already
+/// buffered when the session takes the plumbing over. No timer decodes input,
+/// and waiting for another socket read could leave that frame stranded for a
+/// full heartbeat interval.
+fn drain_carried(
+  driver: &mut SessionDriver,
+  established: Progress,
+  now: Instant,
+  sink: &mut impl EventSink,
+) -> Result<Progress> {
+  if established.is_close() {
+    return Ok(established);
+  }
+
+  // An empty slice appends nothing, then `on_bytes` decodes what the handshake
+  // left in the input buffer.
+  driver.on_bytes(now, &[], sink)
 }
