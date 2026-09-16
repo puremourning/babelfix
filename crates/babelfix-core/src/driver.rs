@@ -133,7 +133,7 @@ impl Plumbing {
   }
 
   /// Carry everything into the session, including bytes that arrived alongside
-  /// the Logon. The transition drains those bytes before returning the driver.
+  /// the Logon. Delivering those is [`EstablishedDriver::start`]'s job.
   fn into_session(self, state: SessionState) -> Box<SessionDriver> {
     Box::new(SessionDriver {
       state,
@@ -212,19 +212,19 @@ impl InitiatorDriver {
     !self.plumbing.out_buf.is_empty()
   }
 
-  /// Feed bytes straight off the socket. Returns the session once the peer's
-  /// Logon completes the exchange.
+  /// Feed bytes straight off the socket. Returns the established session once
+  /// the peer's Logon completes the exchange, ready to be
+  /// [`start`](EstablishedDriver::start)ed.
   pub fn on_bytes(
     &mut self,
     now: Instant,
     src: &[u8],
     sink: &mut impl EventSink,
-  ) -> Result<Option<(Box<SessionDriver>, Progress)>> {
+  ) -> Result<Option<EstablishedDriver>> {
     self.plumbing.in_buf.extend_from_slice(src);
 
     // Exactly one frame completes the exchange. Anything after it belongs to
-    // the session, so it travels there in `in_buf` and is drained before the
-    // new driver reaches its caller.
+    // the session, so it travels there in `in_buf` and waits for `start`.
     if let Some(msg) =
       self.plumbing.decoder.decode(&mut self.plumbing.in_buf)?
     {
@@ -243,10 +243,11 @@ impl InitiatorDriver {
         FixDecoder::new(config.repo.clone(), config.delimiter),
       );
       let plumbing = std::mem::replace(&mut self.plumbing, spare);
-      let progress = established.progress;
-      let mut driver = plumbing.into_session(*established.state);
-      let progress = drain_carried(&mut driver, progress, now, sink)?;
-      return Ok(Some((driver, progress)));
+      return Ok(Some(EstablishedDriver {
+        state: *established.state,
+        plumbing,
+        progress: established.progress,
+      }));
     }
 
     Ok(None)
@@ -273,7 +274,12 @@ impl InitiatorDriver {
 /// Ok(match hs.on_bytes(bytes)? {
 ///   Some(session_id) => {
 ///     let session = lookup(session_id);
-///     let (driver, _progress) = hs.accept(session, Instant::now(), &mut sink)?;
+///     let mut established = hs.accept(session, Instant::now(), &mut sink)?;
+///     // write(fd, established.pending_writes())... the Logon reply.
+///     // Then start the session, which delivers anything the peer sent
+///     // alongside its Logon — so build whatever that message might need
+///     // to be answered on before this line, not after it.
+///     let (driver, _progress) = established.start(Instant::now(), &mut sink)?;
 ///     Some(driver)
 ///   }
 ///   None => None,   // partial frame; read more
@@ -329,12 +335,17 @@ impl AcceptorDriver {
   }
 
   /// Supply the session named by the peer's Logon.
+  ///
+  /// The sink here hears about the exchange itself — the Logon reply going
+  /// out, and anything the state machine has to say about it. Application
+  /// traffic that arrived alongside the Logon is not delivered until
+  /// [`EstablishedDriver::start`].
   pub fn accept(
     self,
     session: Session,
     now: Instant,
     sink: &mut impl EventSink,
-  ) -> Result<(Box<SessionDriver>, Progress)> {
+  ) -> Result<EstablishedDriver> {
     let AcceptorDriver {
       handshake,
       mut plumbing,
@@ -350,10 +361,11 @@ impl AcceptorDriver {
       handshake.accept(session, now, &mut out)?
     };
 
-    let progress = established.progress;
-    let mut driver = plumbing.into_session(*established.state);
-    let progress = drain_carried(&mut driver, progress, now, sink)?;
-    Ok((driver, progress))
+    Ok(EstablishedDriver {
+      state: *established.state,
+      plumbing,
+      progress: established.progress,
+    })
   }
 }
 
@@ -535,23 +547,79 @@ impl std::fmt::Debug for SessionDriver {
   }
 }
 
-/// Deliver whatever arrived alongside the Logon.
+/// A session that has been negotiated but has not yet delivered anything.
 ///
-/// The handshake decodes exactly one frame, so a following frame is already
-/// buffered when the session takes the plumbing over. No timer decodes input,
-/// and waiting for another socket read could leave that frame stranded for a
-/// full heartbeat interval.
-fn drain_carried(
-  driver: &mut SessionDriver,
-  established: Progress,
-  now: Instant,
-  sink: &mut impl EventSink,
-) -> Result<Progress> {
-  if established.is_close() {
-    return Ok(established);
+/// The step exists because of what the handshake leaves behind. It decodes
+/// exactly one frame, so a peer that sent its Logon and its first real message
+/// in one segment — which TCP makes routine — leaves that message sitting in
+/// the input buffer. Nothing else will decode it: no timer reads input, so it
+/// stays invisible until the next thing arrives, which for an otherwise idle
+/// session is the peer's next heartbeat.
+///
+/// Draining it during the handshake would fix the stall and introduce a
+/// quieter problem, because a carried message is still a message the
+/// application may have to answer. Only the caller knows when its application
+/// has somewhere to reply — a session handle, a registration, whatever it
+/// builds around the driver — and that cannot exist before the driver does.
+///
+/// So the drain is [`start`](Self::start), and a [`SessionDriver`] cannot be
+/// obtained without it. Forgetting is a compile error rather than a message
+/// stranded for a heartbeat interval.
+pub struct EstablishedDriver {
+  state: SessionState,
+  plumbing: Plumbing,
+  progress: Progress,
+}
+
+impl EstablishedDriver {
+  /// Who the two sides agreed they are.
+  pub fn session_id(&self) -> &SessionIdentifier {
+    self.state.session_id()
   }
 
-  // An empty slice appends nothing, then `on_bytes` decodes what the handshake
-  // left in the input buffer.
-  driver.on_bytes(now, &[], sink)
+  /// The negotiated session, which is not the one that was supplied: the
+  /// exchange settles the heartbeat interval and the sequence numbers.
+  pub fn session(&self) -> &Session {
+    self.state.session()
+  }
+
+  /// What the exchange itself concluded, before anything carried is seen.
+  pub fn progress(&self) -> Progress {
+    self.progress
+  }
+
+  /// The Logon reply, waiting for one write. Send it before
+  /// [`start`](Self::start): the peer is owed its answer ahead of anything
+  /// its own carried message provokes.
+  pub fn pending_writes(&mut self) -> &mut BytesMut {
+    &mut self.plumbing.out_buf
+  }
+
+  pub fn has_pending_writes(&self) -> bool {
+    !self.plumbing.out_buf.is_empty()
+  }
+
+  /// Begin the session, delivering whatever arrived alongside the Logon.
+  ///
+  /// Nothing is delivered if the exchange itself concluded the session is
+  /// over; the driver is still returned, because it holds the bytes saying so.
+  pub fn start(
+    self,
+    now: Instant,
+    sink: &mut impl EventSink,
+  ) -> Result<(Box<SessionDriver>, Progress)> {
+    let Self {
+      state,
+      plumbing,
+      progress,
+    } = self;
+    let mut driver = plumbing.into_session(state);
+    if progress.is_close() {
+      return Ok((driver, progress));
+    }
+    // An empty slice appends nothing, then `on_bytes` decodes what the
+    // handshake left in the input buffer.
+    let progress = driver.on_bytes(now, &[], sink)?;
+    Ok((driver, progress))
+  }
 }

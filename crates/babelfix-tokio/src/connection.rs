@@ -117,18 +117,31 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PendingSession<S> {
       mut io, handshake, ..
     } = self;
 
-    let (mut driver, progress) =
-      handshake.accept(session, Instant::now(), sink)?;
+    let mut established = handshake.accept(session, Instant::now(), sink)?;
 
-    // Establishing hands the codec and its buffers to the session, so the
-    // Logon reply is now the driver's to flush, not the handshake's.
-    flush(&mut io, driver.pending_writes()).await?;
+    // Establishing hands the codec and its buffers on, so the Logon reply is
+    // now the established session's to flush, not the handshake's. It goes
+    // before `start`, because the peer is owed its answer ahead of anything
+    // its own carried message provokes.
+    flush(&mut io, established.pending_writes()).await?;
 
-    if progress.is_close() {
+    if established.progress().is_close() {
       // Unlike the endpoint, the caller has already seen why: its own sink
       // received the events synchronously.
       return Err(Error::connection_failed(
         "session closed during the logon exchange",
+      ));
+    }
+
+    // Nothing has been delivered to the sink from the session yet. This is
+    // where a message the peer sent alongside its Logon arrives, and where an
+    // application with more to set up than this one would do it first.
+    let (mut driver, progress) = established.start(Instant::now(), sink)?;
+    flush(&mut io, driver.pending_writes()).await?;
+
+    if progress.is_close() {
+      return Err(Error::connection_failed(
+        "session closed on the message carried with the logon",
       ));
     }
 
@@ -183,13 +196,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
       let bytes = std::mem::take(&mut buf);
       buf = BytesMut::with_capacity(READ_CHUNK);
 
-      if let Some((mut driver, progress)) =
+      if let Some(mut established) =
         handshake.on_bytes(Instant::now(), &bytes, sink)?
       {
+        flush(&mut io, established.pending_writes()).await?;
+        if established.progress().is_close() {
+          return Err(Error::connection_failed(
+            "session closed during the logon exchange",
+          ));
+        }
+        // As on the accepting side: the session delivers nothing until it is
+        // started, and this is where anything carried with the peer's Logon
+        // reply reaches the sink.
+        let (mut driver, progress) = established.start(Instant::now(), sink)?;
         flush(&mut io, driver.pending_writes()).await?;
         if progress.is_close() {
           return Err(Error::connection_failed(
-            "session closed during the logon exchange",
+            "session closed on the message carried with the logon",
           ));
         }
         return Ok(Self {

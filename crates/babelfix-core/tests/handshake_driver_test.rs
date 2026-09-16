@@ -124,11 +124,20 @@ fn initiator_delivers_a_message_carried_with_the_logon() {
   let mut seen = Seen::default();
 
   let mut sink = seen.sink();
-  let result = handshake.on_bytes(now, &wire, &mut sink).unwrap();
+  let established = handshake
+    .on_bytes(now, &wire, &mut sink)
+    .unwrap()
+    .expect("the peer's Logon establishes a session");
+  drop(sink);
+
   assert!(
-    result.is_some(),
-    "the peer's Logon did not establish a session"
+    seen.app_messages.is_empty(),
+    "the initiator delivered the carried message before it was started, \
+     so an application had nowhere to reply to it"
   );
+
+  let mut sink = seen.sink();
+  let _ = established.start(now, &mut sink).unwrap();
   drop(sink);
 
   assert_eq!(
@@ -151,7 +160,17 @@ fn acceptor_delivers_a_message_carried_with_the_logon() {
   let mut seen = Seen::default();
 
   let mut sink = seen.sink();
-  let _ = handshake.accept(session(), now, &mut sink).unwrap();
+  let established = handshake.accept(session(), now, &mut sink).unwrap();
+  drop(sink);
+
+  assert!(
+    seen.app_messages.is_empty(),
+    "the acceptor delivered the carried message before it was started, \
+     so an application had nowhere to reply to it"
+  );
+
+  let mut sink = seen.sink();
+  let _ = established.start(now, &mut sink).unwrap();
   drop(sink);
 
   assert_eq!(
