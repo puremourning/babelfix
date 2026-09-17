@@ -179,9 +179,9 @@ pub enum SessionEvent {
     /// inspect this.
     resend_request: crate::message::builder::Message,
     /// The first sequence number to be resent.
-    begin_seq_no: u32,
+    begin_seq_no: u64,
     /// The last sequence number to be resent (inclusive).
-    end_seq_no: u32,
+    end_seq_no: u64,
   },
 
   /// Emitted when the session is disconnected, either due to a logout message

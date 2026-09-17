@@ -38,7 +38,7 @@ fn clock() -> chrono::DateTime<chrono::Utc> {
 struct Seen {
   app_messages: Vec<String>,
   recovery_completed: bool,
-  resend_requested: Option<(u32, u32)>,
+  resend_requested: Option<(u64, u64)>,
 }
 
 impl Seen {

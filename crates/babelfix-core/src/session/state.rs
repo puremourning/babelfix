@@ -71,7 +71,7 @@ pub struct SessionState {
 
   /// Set while we are waiting for the peer to close a gap: holds the sequence
   /// number after which recovery is complete.
-  rerequest_in_progress: Option<u32>,
+  rerequest_in_progress: Option<u64>,
   /// `TestReqID` of the synchronisation TestRequest sent after logon; cleared
   /// when the peer echoes it back.
   recovery_tr_id: Option<String>,
@@ -378,8 +378,8 @@ impl SessionState {
   /// transmitted immediately after this gap fill.
   fn send_gap_fill(
     &mut self,
-    begin_seq_no: u32,
-    end_seq_no: u32,
+    begin_seq_no: u64,
+    end_seq_no: u64,
     out: &mut impl SessionOutput,
   ) -> Result<()> {
     let mut gap_fill =
@@ -419,7 +419,7 @@ impl SessionState {
       })?
       .as_int()
       .ok_or_else(|| Error::protocol_violation("MsgSeqNum is not an integer"))?
-      as u32;
+      as u64;
 
     let is_admin = message.is_admin_message();
     let replay = self
@@ -490,7 +490,7 @@ impl SessionState {
   /// of "N", or absent, which the specification defines as the default — asks
   /// the peer to accept a new sequence number without regard to the message's
   /// own, and is rejected.
-  fn gap_fill_new_seq_num(msg: &builder::Message) -> Result<u32> {
+  fn gap_fill_new_seq_num(msg: &builder::Message) -> Result<u64> {
     if msg
       .body
       .tag(Fields::GapFillFlag)
@@ -510,7 +510,7 @@ impl SessionState {
         .ok_or_else(|| Error::protocol_violation("Missing NewSeqNo"))?
         .as_int()
         .ok_or_else(|| Error::protocol_violation("Expected integer"))?
-        as u32,
+        as u64,
     )
   }
 
@@ -526,7 +526,7 @@ impl SessionState {
       .ok_or_else(|| Error::protocol_violation("Missing MsgSeqNum"))?
       .as_int()
       .ok_or_else(|| Error::protocol_violation("MsgSeqNum is not an integer"))?
-      as u32;
+      as u64;
 
     // A SequenceReset-GapFill stands in for the messages it skips over, so it
     // occupies a slot in the stream and is subject to the same sequence checks
@@ -678,14 +678,14 @@ impl SessionState {
           .ok_or_else(|| Error::protocol_violation("Missing BeginSeqNo"))?
           .as_int()
           .ok_or_else(|| Error::protocol_violation("Expected integer"))?
-          as u32;
+          as u64;
         let end_seq_no = msg
           .body
           .tag(Fields::EndSeqNo)
           .ok_or_else(|| Error::protocol_violation("Missing EndSeqNo"))?
           .as_int()
           .ok_or_else(|| Error::protocol_violation("Expected integer"))?
-          as u32;
+          as u64;
         if self.replay.is_some() {
           return Err(Error::protocol_violation(
             "ResendRequest while a resend is already in progress",

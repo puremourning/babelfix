@@ -33,7 +33,7 @@ fn order(cl_ord_id: &str) -> anyhow::Result<fix::message::builder::Message> {
 /// persisted its outbound stream would.
 fn replayed(
   msg_type: &str,
-  seq_num: u32,
+  seq_num: u64,
 ) -> anyhow::Result<fix::message::builder::Message> {
   let mut msg = if msg_type == "D" {
     order(&format!("order-{seq_num}"))?

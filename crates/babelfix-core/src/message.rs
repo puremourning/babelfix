@@ -759,6 +759,7 @@ pub mod builder {
   pub enum TypedValue {
     // Numeric types
     Int(i64),
+    UInt(u64),
     Float(f64),
 
     // String types
@@ -780,6 +781,7 @@ pub mod builder {
     pub fn as_string(&self) -> String {
       match self {
         TypedValue::Int(v) => v.to_string(),
+        TypedValue::UInt(v) => v.to_string(),
         TypedValue::Float(v) => v.to_string(),
         TypedValue::String(v) => v.clone(),
         TypedValue::Char(v) => v.to_string(),
@@ -793,6 +795,7 @@ pub mod builder {
       match self {
         TypedValue::String(v) => v,
         TypedValue::Int(v) => v.to_string(),
+        TypedValue::UInt(v) => v.to_string(),
         TypedValue::Float(v) => v.to_string(),
         TypedValue::Char(v) => v.to_string(),
         TypedValue::Data(v) => String::from_utf8_lossy(&v).into_owned(),
@@ -804,6 +807,16 @@ pub mod builder {
     pub fn as_int(&self) -> Option<i64> {
       match self {
         TypedValue::Int(v) => Some(*v),
+        TypedValue::UInt(v) => Some(v.cast_signed()),
+        TypedValue::String(s) => s.parse().ok(),
+        _ => None,
+      }
+    }
+
+    pub fn as_uint(&self) -> Option<u64> {
+      match self {
+        TypedValue::Int(v) => Some(v.cast_unsigned()),
+        TypedValue::UInt(v) => Some(*v),
         TypedValue::String(s) => s.parse().ok(),
         _ => None,
       }
@@ -869,15 +882,21 @@ pub mod builder {
     }
   }
 
-  impl From<u32> for TypedValue {
-    fn from(i: u32) -> Self {
-      TypedValue::Int(i as i64)
+  impl From<u64> for TypedValue {
+    fn from(i: u64) -> Self {
+      TypedValue::UInt(i)
     }
   }
 
   impl From<usize> for TypedValue {
     fn from(i: usize) -> Self {
-      TypedValue::Int(i as i64)
+      TypedValue::UInt(i as u64)
+    }
+  }
+
+  impl From<u32> for TypedValue {
+    fn from(i: u32) -> Self {
+      TypedValue::UInt(i as u64)
     }
   }
 
@@ -1114,12 +1133,14 @@ pub mod builder {
 
         if let Some(field) = fix.get_field(tag) {
           match field.field_type.as_str() {
-            "int" | "SeqNum" | "NumInGroup" | "DayOfMonth" | "Length" => {
-              value_str
-                .parse::<i64>()
-                .map(TypedValue::Int)
-                .unwrap_or_else(|_| TypedValue::String(value_str.to_string()))
-            }
+            "int" => value_str
+              .parse::<i64>()
+              .map(TypedValue::Int)
+              .unwrap_or_else(|_| TypedValue::String(value_str.to_string())),
+            "SeqNum" | "NumInGroup" | "DayOfMonth" | "Length" => value_str
+              .parse::<u64>()
+              .map(TypedValue::UInt)
+              .unwrap_or_else(|_| TypedValue::String(value_str.to_string())),
             "float" | "Price" | "Amt" | "Qty" | "PriceOffset"
             | "Percentage" => value_str
               .parse::<f64>()

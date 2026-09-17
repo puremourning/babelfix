@@ -69,8 +69,8 @@ pub struct SessionIdentifier {
 /// session: the sequence numbers, plus the negotiated settings.
 #[derive(Clone, Default)]
 pub struct Session {
-  pub next_out_seq_num: u32,
-  pub next_in_seq_num: u32,
+  pub next_out_seq_num: u64,
+  pub next_in_seq_num: u64,
   pub heartbeat_interval: std::time::Duration,
   pub fix_version: Arc<FixVersion>,
   /// Fractional-second precision for the `SendingTime` stamped on outbound
@@ -185,8 +185,8 @@ pub enum Event<'a> {
   /// order, say — without breaking the sequence.
   ResendRequest {
     resend_request: &'a builder::Message,
-    begin_seq_no: u32,
-    end_seq_no: u32,
+    begin_seq_no: u64,
+    end_seq_no: u64,
   },
 
   /// The session has ended, through logout or a network failure.

@@ -79,8 +79,8 @@ mod storage {
   #[derive(serde::Serialize, serde::Deserialize)]
   pub struct SessionConfiguration {
     heartbeat_interval: std::time::Duration,
-    next_out_seq_num: u32,
-    next_in_seq_num: u32,
+    next_out_seq_num: u64,
+    next_in_seq_num: u64,
   }
 
   impl SessionConfiguration {

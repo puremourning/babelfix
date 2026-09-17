@@ -24,20 +24,20 @@ pub(crate) enum ReplayStep {
   Absorb,
   /// Retransmit it, first closing off any preceding run of skipped numbers with
   /// a gap fill over `gap_fill` (inclusive bounds).
-  Retransmit { gap_fill: Option<(u32, u32)> },
+  Retransmit { gap_fill: Option<(u64, u64)> },
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct Replay {
-  pub begin_seq_no: u32,
-  pub end_seq_no: u32,
+  pub begin_seq_no: u64,
+  pub end_seq_no: u64,
 
   /// The next sequence number in the requested range we have not yet accounted
   /// for.
-  next_expected_seq_num: u32,
+  next_expected_seq_num: u64,
   /// How many consecutive numbers immediately before `next_expected_seq_num`
   /// are owed a gap fill.
-  gap_fill_count: u32,
+  gap_fill_count: u64,
 
   /// Messages the application asked to send *normally* while the replay was in
   /// progress. They cannot go out mid-retransmission without corrupting the
@@ -51,9 +51,9 @@ impl Replay {
   /// `next_out_seq_num` is the session's current outbound counter, used to
   /// resolve an open-ended request (`EndSeqNo` of 0) into a concrete end.
   pub(crate) fn start(
-    begin_seq_no: u32,
-    end_seq_no: u32,
-    next_out_seq_num: u32,
+    begin_seq_no: u64,
+    end_seq_no: u64,
+    next_out_seq_num: u64,
   ) -> Result<Self> {
     if end_seq_no > 0 && begin_seq_no > end_seq_no {
       return Err(Error::protocol_violation("Invalid ResendRequest"));
@@ -95,7 +95,7 @@ impl Replay {
   /// Account for a message the application offered for retransmission.
   pub(crate) fn offer(
     &mut self,
-    msg_seq_num: u32,
+    msg_seq_num: u64,
     is_admin: bool,
   ) -> ReplayStep {
     if msg_seq_num < self.next_expected_seq_num {
@@ -133,7 +133,7 @@ impl Replay {
 
   /// The gap fill needed to cover whatever is left of the requested range, if
   /// anything is.
-  pub(crate) fn trailing_gap_fill(&self) -> Option<(u32, u32)> {
+  pub(crate) fn trailing_gap_fill(&self) -> Option<(u64, u64)> {
     let begin = self.next_expected_seq_num - self.gap_fill_count;
     (begin <= self.end_seq_no).then_some((begin, self.end_seq_no))
   }
@@ -143,7 +143,7 @@ impl Replay {
 mod tests {
   use super::*;
 
-  fn replay(begin: u32, end: u32) -> Replay {
+  fn replay(begin: u64, end: u64) -> Replay {
     Replay::start(begin, end, 100).unwrap()
   }
 
@@ -259,11 +259,11 @@ mod tests {
 
   /// The invariant every subtraction above depends on: the first skipped
   /// number is never below `begin_seq_no`, so no gap fill can name a sequence
-  /// number the peer did not ask for, and none of the `u32` arithmetic can
+  /// number the peer did not ask for, and none of the `u64` arithmetic can
   /// underflow.
   #[test]
   fn gap_fill_bounds_stay_inside_the_requested_range() {
-    for begin in 1u32..=4 {
+    for begin in 1u64..=4 {
       for end in begin..=8 {
         for offered in begin..=end {
           let mut r = replay(begin, end);

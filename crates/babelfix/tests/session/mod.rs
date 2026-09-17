@@ -36,8 +36,8 @@ pub const EVENT_TIMEOUT: std::time::Duration =
 /// milliseconds.
 #[derive(Debug, Clone)]
 pub struct SessionOptions {
-  pub next_out_seq_num: u32,
-  pub next_in_seq_num: u32,
+  pub next_out_seq_num: u64,
+  pub next_in_seq_num: u64,
   pub heartbeat_interval: std::time::Duration,
   pub time_precision: fix::time::TimePrecision,
 }
@@ -55,7 +55,7 @@ impl Default for SessionOptions {
 
 impl SessionOptions {
   /// Start mid-session, as if recovering persisted state.
-  pub fn at(next_out_seq_num: u32, next_in_seq_num: u32) -> Self {
+  pub fn at(next_out_seq_num: u64, next_in_seq_num: u64) -> Self {
     Self {
       next_out_seq_num,
       next_in_seq_num,

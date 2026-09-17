@@ -34,7 +34,7 @@ enum Seen {
   RawMessageReceived,
   RawMessageSent(String),
   MessageReceived(String),
-  ResendRequest { begin_seq_no: u32, end_seq_no: u32 },
+  ResendRequest { begin_seq_no: u64, end_seq_no: u64 },
   Disconnected,
 }
 
@@ -43,7 +43,7 @@ enum Seen {
 #[derive(Default)]
 struct Recorder {
   /// `(msg_type, MsgSeqNum)` for everything transmitted, in order.
-  sent: Vec<(String, u32)>,
+  sent: Vec<(String, u64)>,
   events: Vec<Seen>,
   /// Advanced by hand so successive stamps differ.
   clock: u32,
@@ -55,7 +55,7 @@ impl Recorder {
     self.sent.iter().map(|(t, _)| t.as_str()).collect()
   }
 
-  fn take_sent(&mut self) -> Vec<(String, u32)> {
+  fn take_sent(&mut self) -> Vec<(String, u64)> {
     std::mem::take(&mut self.sent)
   }
 }
@@ -118,7 +118,7 @@ impl SessionOutput for Recorder {
 }
 
 /// Build an inbound frame as if it had arrived off the wire.
-fn inbound(msg_type: &str, seq: u32) -> fix::FixMessage {
+fn inbound(msg_type: &str, seq: u64) -> fix::FixMessage {
   let mut msg = builder::Message::new(fix44(), msg_type).unwrap();
   msg.header.set_tag(Fields::MsgSeqNum, seq);
   msg.header.set_tag(Fields::SenderCompID, "PEER");
@@ -131,7 +131,7 @@ fn inbound(msg_type: &str, seq: u32) -> fix::FixMessage {
 
 fn inbound_with(
   msg_type: &str,
-  seq: u32,
+  seq: u64,
   tags: &[(u32, &str)],
 ) -> fix::FixMessage {
   let mut msg = builder::Message::new(fix44(), msg_type).unwrap();
