@@ -500,7 +500,8 @@ dependencies = [
 [[package]]
 name = "decimix"
 version = "0.1.0"
-source = "git+https://github.com/puremourning/decimix#61cfc099b5fd551034a18ef4048bd8bf168b8987"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f62ec80bb6db48bbd74425a34302d732373483fba554cdb548804f63464ba9a"
 dependencies = [
  "ethnum",
 ]
@@ -508,7 +509,8 @@ dependencies = [
 [[package]]
 name = "decimix-finance"
 version = "0.1.0"
-source = "git+https://github.com/puremourning/decimix#61cfc099b5fd551034a18ef4048bd8bf168b8987"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f88b48b2e06b7025cc34d606645259b3885d45e1e68b2319359b499c923b511"
 dependencies = [
  "decimix",
 ]

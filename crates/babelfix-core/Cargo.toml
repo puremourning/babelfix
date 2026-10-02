@@ -27,8 +27,8 @@ babelfix-repo.workspace = true
 tracing.workspace = true
 bytes.workspace = true
 serde = { workspace = true, optional = true }
-decimix = { git = "https://github.com/puremourning/decimix", optional = true }
-decimix-finance = { git = "https://github.com/puremourning/decimix", optional = true }
+decimix = { version = "0.1.0", optional = true }
+decimix-finance = { version = "0.1.0", optional = true }
 
 # Deliberately NOT inherited from [workspace.dependencies], and deliberately
 # `default-features = false`: that drops chrono's `clock` (and hence `now`)
