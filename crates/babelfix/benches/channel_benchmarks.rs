@@ -78,13 +78,13 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use babelfix::driver::SessionDriver;
-use babelfix::message::builder;
-use babelfix::schema::FIX_4_4 as FIX44;
+use babelfix::endpoint;
+use babelfix::message::{Dictionaries, Dictionary, Message};
+use babelfix::schema::tags;
 use babelfix::session::{
   Command, Event, Session, SessionCommand, SessionEvent, SessionHandle,
   SessionIdentifier, SessionState,
 };
-use babelfix::{endpoint, repository};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
@@ -110,16 +110,16 @@ const SESSION_COUNTS: [usize; 3] = [8, 32, 128];
 /// amortise the cost of releasing and rejoining the session drivers.
 const ROUNDS_PER_SESSION: usize = 16;
 
-static REPO: OnceLock<Arc<repository::FixRepository>> = OnceLock::new();
+static REPO: OnceLock<Arc<Dictionaries>> = OnceLock::new();
 
-fn load_repo() -> Arc<repository::FixRepository> {
+fn load_repo() -> Arc<Dictionaries> {
   REPO
-    .get_or_init(|| Arc::new(repository::orchestrate().unwrap()))
+    .get_or_init(|| Dictionaries::standard().unwrap())
     .clone()
 }
 
-fn fix44() -> Arc<repository::FixVersion> {
-  load_repo().get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<Dictionary> {
+  load_repo().get("FIX.4.4").unwrap().clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -208,12 +208,12 @@ fn bench_workload<W: Workload>(
 // Fixtures
 // ---------------------------------------------------------------------------
 
-fn bench_session(fix: &Arc<repository::FixVersion>) -> Session {
+fn bench_session(fix: &Arc<Dictionary>) -> Session {
   Session {
     next_out_seq_num: 1,
     next_in_seq_num: 1,
     heartbeat_interval: NO_HEARTBEATS,
-    fix_version: fix.clone(),
+    dict: fix.clone(),
     time_precision: Default::default(),
   }
 }
@@ -223,36 +223,42 @@ fn bench_session(fix: &Arc<repository::FixVersion>) -> Session {
 ///
 /// The session populates `MsgSeqNum`, `SendingTime` and the CompIDs itself, so
 /// they are left out here.
-fn new_order(fix: &Arc<repository::FixVersion>) -> builder::Message {
-  let mut msg = builder::Message::new(fix.clone(), "D").unwrap();
-  msg.body.set_tag(FIX44::Fields::ClOrdID, "BENCH-ORDER-1");
-  msg.body.set_tag(FIX44::Fields::HandlInst, "1");
-  msg.body.set_tag(FIX44::Fields::Symbol, "ESH4");
-  msg.body.set_tag(FIX44::Fields::Side, "1");
-  msg.body.set_tag(FIX44::Fields::OrderQty, 100i64);
-  msg.body.set_tag(FIX44::Fields::OrdType, "2");
-  msg.body.set_tag(FIX44::Fields::Price, 4782.25f64);
-  msg
-    .body
-    .set_tag(FIX44::Fields::TransactTime, "20231215-14:30:22.119");
+fn new_order(fix: &Arc<Dictionary>) -> Message {
+  let mut msg = Message::new(fix, "D");
+  for (tag, value) in [
+    (tags::ClOrdID, "BENCH-ORDER-1"),
+    (tags::HandlInst, "1"),
+    (tags::Symbol, "ESH4"),
+    (tags::Side, "1"),
+    (tags::OrderQty, "100"),
+    (tags::OrdType, "2"),
+    (tags::Price, "4782.25"),
+    (tags::TransactTime, "20231215-14:30:22.119"),
+  ] {
+    msg.body_mut().set_raw(tag, value.as_bytes());
+  }
   msg
 }
 
 /// The reply the application under benchmark sends back for every order.
-fn exec_report(fix: &Arc<repository::FixVersion>) -> builder::Message {
-  let mut msg = builder::Message::new(fix.clone(), "8").unwrap();
-  msg.body.set_tag(FIX44::Fields::OrderID, "BENCH-ORD-1");
-  msg.body.set_tag(FIX44::Fields::ClOrdID, "BENCH-ORDER-1");
-  msg.body.set_tag(FIX44::Fields::ExecID, "BENCH-EXEC-1");
-  msg.body.set_tag(FIX44::Fields::ExecType, "F");
-  msg.body.set_tag(FIX44::Fields::OrdStatus, "2");
-  msg.body.set_tag(FIX44::Fields::Symbol, "ESH4");
-  msg.body.set_tag(FIX44::Fields::Side, "1");
-  msg.body.set_tag(FIX44::Fields::LastPx, 4782.25f64);
-  msg.body.set_tag(FIX44::Fields::LastQty, 100i64);
-  msg.body.set_tag(FIX44::Fields::LeavesQty, 0i64);
-  msg.body.set_tag(FIX44::Fields::CumQty, 100i64);
-  msg.body.set_tag(FIX44::Fields::AvgPx, 4782.25f64);
+fn exec_report(fix: &Arc<Dictionary>) -> Message {
+  let mut msg = Message::new(fix, "8");
+  for (tag, value) in [
+    (tags::OrderID, "BENCH-ORD-1"),
+    (tags::ClOrdID, "BENCH-ORDER-1"),
+    (tags::ExecID, "BENCH-EXEC-1"),
+    (tags::ExecType, "F"),
+    (tags::OrdStatus, "2"),
+    (tags::Symbol, "ESH4"),
+    (tags::Side, "1"),
+    (tags::LastPx, "4782.25"),
+    (tags::LastQty, "100"),
+    (tags::LeavesQty, "0"),
+    (tags::CumQty, "100"),
+    (tags::AvgPx, "4782.25"),
+  ] {
+    msg.body_mut().set_raw(tag, value.as_bytes());
+  }
   msg
 }
 
@@ -266,7 +272,7 @@ fn exec_report(fix: &Arc<repository::FixVersion>) -> builder::Message {
 fn spawn_echo_app(
   mut events: mpsc::Receiver<SessionEvent>,
   mut commands: mpsc::Sender<SessionCommand>,
-  reply: builder::Message,
+  reply: Message,
 ) {
   tokio::spawn(async move {
     while let Some(event) = events.next().await {
@@ -293,7 +299,7 @@ fn spawn_echo_app(
 struct ChannelPair {
   events: mpsc::Sender<SessionEvent>,
   commands: mpsc::Receiver<SessionCommand>,
-  inbound: builder::Message,
+  inbound: Message,
   /// The events a real session emits alongside `MessageReceived` for a single
   /// inbound message. Empty when measuring the two hops in isolation.
   filler: Vec<SessionEvent>,
@@ -302,7 +308,7 @@ struct ChannelPair {
 impl ChannelPair {
   /// Must be called from within the runtime being measured: it spawns the
   /// application task.
-  fn new(fix: &Arc<repository::FixVersion>, events_per_message: usize) -> Self {
+  fn new(fix: &Arc<Dictionary>, events_per_message: usize) -> Self {
     let (events_tx, events_rx) = mpsc::channel(CHANNEL_DEPTH);
     let (commands_tx, commands_rx) = mpsc::channel(CHANNEL_DEPTH);
     spawn_echo_app(events_rx, commands_tx, exec_report(fix));
@@ -312,7 +318,7 @@ impl ChannelPair {
       1 => Vec::new(),
       4 => {
         let session = bench_session(fix);
-        let wire = inbound.as_message().unwrap();
+        let wire = inbound.clone();
         vec![
           SessionEvent::RawMessageSent(wire.clone(), session.clone()),
           SessionEvent::SessionState(session.clone()),
@@ -410,7 +416,7 @@ impl ChannelFanOut {
   /// Must be called from within the runtime being measured: it spawns two tasks
   /// per session.
   fn new(
-    fix: &Arc<repository::FixVersion>,
+    fix: &Arc<Dictionary>,
     sessions: usize,
     events_per_message: usize,
   ) -> Self {
@@ -464,7 +470,7 @@ fn bench_channel_roundtrip(c: &mut Criterion) {
 
   // Everything a round trip does to the payload, with no channel and no
   // executor: the inbound message is cloned into the event, the reply is cloned
-  // into the command, and both are dropped. `builder::Message` carries a
+  // into the command, and both are dropped. `Message` carries a
   // `HashMap` per block, so this is not free, and it is charged to every
   // benchmark below — subtract it to get the cost of the delivery alone.
   {
@@ -546,7 +552,7 @@ fn bench_channel_pipelined(c: &mut Criterion) {
 /// task and the initiator's application — all competing for the same workers.
 struct Loopback {
   clients: Vec<SessionHandle>,
-  order: builder::Message,
+  order: Message,
   /// Dropping the endpoint's command sender closes its accept loop, and
   /// dropping an initiator's command sender closes its reconnect loop, so both
   /// are held for the lifetime of the benchmark.
@@ -557,10 +563,7 @@ struct Loopback {
 impl Loopback {
   /// Must be called from within the runtime being measured: both sides run on
   /// it, which is the whole point of the comparison.
-  async fn establish(
-    fix: &Arc<repository::FixVersion>,
-    sessions: usize,
-  ) -> Self {
+  async fn establish(fix: &Arc<Dictionary>, sessions: usize) -> Self {
     let repo = load_repo();
 
     let endpoint::Acceptor {
@@ -610,7 +613,7 @@ impl Loopback {
         vec![("127.0.0.1".to_string(), local_addr.port())],
         repo.clone(),
         SessionIdentifier {
-          begin_string: fix.begin_string.clone(),
+          begin_string: fix.begin_string().to_owned(),
           sender_comp_id: format!("BENCHCLIENT{i}"),
           target_comp_id: "BENCHSERVER".to_string(),
         },
@@ -690,50 +693,24 @@ impl Workload for Loopback {
 /// The message work one round trip forces on the two sessions, with no
 /// channels, no sockets and no executor.
 ///
-/// Each side serialises what it sends — [`babelfix::session::Session::send`]
-/// calls `as_message`, the encoder calls `write_to` — and parses what it
-/// receives, where the decoder's `from_bytes_delimited` is followed by
-/// `builder::Message::from_message` before the application sees anything.
+/// Each side encodes what it sends and parses what it receives. The parsed
+/// message is what the application is handed — there is no second
+/// representation to convert to.
 ///
-/// That second conversion is not optional and not something an application can
-/// decline. `SessionManager` performs it on every inbound message, and
-/// `SessionCommand::Send` accepts nothing but a `builder::Message`, so the flat
-/// `FixMessage` representation is never what a session hands to, or takes from,
-/// application code. Both are on this path twice per round trip.
-///
-/// This is a lower bound on the real cost: it leaves out the decoder's separate
-/// version/length and checksum passes over the same bytes, the checksum sum
-/// itself, and the `FixMessage` clones carried by the `RawMessageSent` and
-/// `RawMessageReceived` events.
-fn codec_roundtrip(
-  fix: &Arc<repository::FixVersion>,
-  order: &builder::Message,
-  reply: &builder::Message,
-) {
+/// This is a lower bound on the real cost: it leaves out the header the
+/// session stamps on each outbound message, and the `Message` clones carried by
+/// the `RawMessageSent` and `RawMessageReceived` events.
+fn codec_roundtrip(fix: &Arc<Dictionary>, order: &Message, reply: &Message) {
   for msg in [order, reply] {
-    let wire = msg.as_message().unwrap();
     let mut buf = bytes::BytesMut::new();
-    wire.write_to(&mut buf, b'\x01').unwrap();
-
-    let (decoded, _) = babelfix::FixMessage::from_bytes_delimited(
-      fix.clone(),
-      buf.freeze(),
-      b'\x01',
-    )
-    .unwrap();
-    black_box(builder::Message::from_message(&decoded).unwrap());
+    msg.encode(&mut buf);
+    black_box(Message::parse(fix, buf.freeze()).unwrap());
   }
 }
 
 /// The bytes a message occupies on the wire.
-fn wire_bytes(msg: &builder::Message) -> Vec<u8> {
-  let mut buf = bytes::BytesMut::new();
-  msg
-    .as_message()
-    .unwrap()
-    .write_to(&mut buf, b'\x01')
-    .unwrap();
-  buf.to_vec()
+fn wire_bytes(msg: &Message) -> Vec<u8> {
+  msg.to_bytes().to_vec()
 }
 
 /// A bare loopback TCP round trip, carrying the same number of bytes each way
@@ -857,13 +834,13 @@ fn bench_session_roundtrip(c: &mut Criterion) {
 struct SansIo {
   initiator: SessionDriver,
   acceptor: SessionDriver,
-  order: builder::Message,
-  reply: builder::Message,
+  order: Message,
+  reply: Message,
   wire: Vec<u8>,
 }
 
 impl SansIo {
-  fn establish(fix: &Arc<repository::FixVersion>) -> Self {
+  fn establish(fix: &Arc<Dictionary>) -> Self {
     let mut initiator = Self::driver(fix, "CLIENT", "SERVER");
     let mut acceptor = Self::driver(fix, "SERVER", "CLIENT");
     let now = Instant::now();
@@ -905,13 +882,9 @@ impl SansIo {
     }
   }
 
-  fn driver(
-    fix: &Arc<repository::FixVersion>,
-    us: &str,
-    them: &str,
-  ) -> SessionDriver {
+  fn driver(fix: &Arc<Dictionary>, us: &str, them: &str) -> SessionDriver {
     let session_id = SessionIdentifier {
-      begin_string: fix.begin_string.clone(),
+      begin_string: fix.begin_string().to_owned(),
       sender_comp_id: us.to_string(),
       target_comp_id: them.to_string(),
     };
@@ -920,10 +893,12 @@ impl SansIo {
     SessionDriver::new(state, load_repo(), None, chrono::Utc::now)
   }
 
-  fn logon(fix: &Arc<repository::FixVersion>) -> builder::Message {
-    let mut msg = builder::Message::new(fix.clone(), "A").unwrap();
-    msg.body.set_tag(FIX44::Fields::HeartBtInt, "3600");
-    msg.body.set_tag(FIX44::Fields::EncryptMethod, "0");
+  fn logon(fix: &Arc<Dictionary>) -> Message {
+    let mut msg = Message::new(fix, "A");
+    msg
+      .body_mut()
+      .set_raw(tags::HeartBtInt, b"3600")
+      .set_raw(tags::EncryptMethod, b"0");
     msg
   }
 
@@ -934,15 +909,15 @@ impl SansIo {
     bytes
   }
 
-  fn split_one(
-    fix: &Arc<repository::FixVersion>,
-    bytes: &[u8],
-  ) -> (builder::Message, Vec<u8>) {
-    let mut decoder =
-      babelfix::codec::FixDecoder::with_version(load_repo(), None, fix.clone());
+  fn split_one(fix: &Arc<Dictionary>, bytes: &[u8]) -> (Message, Vec<u8>) {
+    let mut decoder = babelfix::codec::FixDecoder::with_dictionary(
+      load_repo(),
+      None,
+      fix.clone(),
+    );
     let mut buf = bytes::BytesMut::from(bytes);
     let msg = decoder.decode(&mut buf).unwrap().unwrap();
-    (builder::Message::from_message(&msg).unwrap(), buf.to_vec())
+    (msg, buf.to_vec())
   }
 
   /// One request and one reply, application to application.

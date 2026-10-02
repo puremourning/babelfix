@@ -1,7 +1,7 @@
 //! TCP endpoint layer: accept or initiate FIX connections.
 //!
 //! The endpoint owns the wire framing — an internal `tokio_util` codec that
-//! splits the byte stream into [`FixMessage`]s and verifies
+//! splits the byte stream into [`Message`](crate::message::Message)s and verifies
 //! `BodyLength`/`CheckSum` — and spawns a [`session`] task per connection.
 //!
 //! * [`serve`] binds a listener and returns an [`Acceptor`]. Iterate its `events`
@@ -24,14 +24,14 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use babelfix_tokio::{endpoint, session, repository};
+//! use babelfix_tokio::{endpoint, session, message};
 //! use futures::StreamExt;
 //!
 //! # async fn run() -> babelfix_tokio::Result<()> {
-//! let repo = Arc::new(repository::orchestrate()?);
+//! let dicts = message::Dictionaries::standard()?;
 //! let mut endpoint = endpoint::serve(
 //!     ("0.0.0.0", 9878),
-//!     repo.clone(),
+//!     dicts.clone(),
 //!     endpoint::EndpointConfig::default(),
 //! ).await?;
 //!
@@ -39,9 +39,9 @@
 //!     match event {
 //!         endpoint::EndpointEvent::NewSession { session_id, response } => {
 //!             // Answer with the sequence numbers you persisted for this peer.
-//!             let session = repo
-//!                 .get_version(&session_id.begin_string)
-//!                 .map(session::Session::new)
+//!             let session = dicts
+//!                 .for_begin_string(session_id.begin_string.as_bytes())
+//!                 .map(|d| session::Session::new(d.clone()))
 //!                 .ok_or_else(|| babelfix_tokio::Error::unspecified(
 //!                     "unknown FIX version",
 //!                 ));
@@ -69,7 +69,7 @@ use super::*;
 
 use std::time::Duration;
 
-/// Everything an endpoint needs beyond the addresses and the repository.
+/// Everything an endpoint needs beyond the addresses and the dictionaries.
 ///
 /// The defaults are the values that used to be hardcoded, so
 /// `EndpointConfig::default()` reproduces the previous behaviour.
@@ -182,11 +182,10 @@ pub struct Acceptor {
 ///
 /// The framing itself lives in the core crate and is an ordinary synchronous
 /// function; this exists only so `FramedRead` can drive it.
-#[derive(Default)]
 struct FixDecoder(babelfix_core::codec::FixDecoder);
 
 impl tokio_util::codec::Decoder for FixDecoder {
-  type Item = crate::message::FixMessage;
+  type Item = crate::message::Message;
   type Error = Error;
 
   fn decode(
@@ -235,7 +234,7 @@ pub struct Initiator {
 /// connected — so the caller need not be async to get hold of the session.
 pub fn connect(
   endpoints: Vec<(String, u16)>,
-  repo: Arc<crate::repository::FixRepository>,
+  dicts: Arc<crate::message::Dictionaries>,
   session_id: session::SessionIdentifier,
   session: session::Session,
   config: EndpointConfig,
@@ -285,7 +284,7 @@ pub fn connect(
             // etc
             return initiate_connection(
               stream,
-              repo,
+              dicts,
               session_id,
               session,
               config,
@@ -320,7 +319,7 @@ pub fn connect(
 
 async fn initiate_connection(
   mut stream: tokio::net::TcpStream,
-  repo: Arc<crate::repository::FixRepository>,
+  dicts: Arc<crate::message::Dictionaries>,
   session_id: session::SessionIdentifier,
   session: session::Session,
   config: EndpointConfig,
@@ -331,10 +330,10 @@ async fn initiate_connection(
   let (rx, tx) = stream.split();
   let mut rx = tokio_util::codec::FramedRead::new(
     rx,
-    FixDecoder(babelfix_core::codec::FixDecoder::with_version(
-      repo.clone(),
+    FixDecoder(babelfix_core::codec::FixDecoder::with_dictionary(
+      dicts.clone(),
       delimiter,
-      session.fix_version.clone(),
+      session.dict.clone(),
     )),
   );
 
@@ -345,11 +344,8 @@ async fn initiate_connection(
   );
 
   async {
-    let mut out = session::PendingOutput::new(
-      delimiter,
-      session.time_precision,
-      session_event_sender.clone(),
-    );
+    let mut out =
+      session::PendingOutput::new(delimiter, session_event_sender.clone());
     let handshake = babelfix_core::session::InitiatorHandshake::start(
       session_id,
       session,
@@ -433,7 +429,7 @@ impl Drop for Disconnector {
 async fn accept_connection(
   mut stream: tokio::net::TcpStream,
   mut event_sender: mpsc::Sender<EndpointEvent>,
-  repo: Arc<crate::repository::FixRepository>,
+  dicts: Arc<crate::message::Dictionaries>,
   config: EndpointConfig,
 ) -> Result<()> {
   let delimiter = config.delimiter;
@@ -445,7 +441,7 @@ async fn accept_connection(
   let mut rx = tokio_util::codec::FramedRead::new(
     rx,
     FixDecoder(babelfix_core::codec::FixDecoder::new(
-      repo.clone(),
+      dicts.clone(),
       delimiter,
     )),
   );
@@ -533,13 +529,8 @@ async fn accept_connection(
       session_event_sender: session_event_sender.clone(),
     };
 
-    // The session decides the precision of every timestamp from here on,
-    // including the Logon reply the handshake is about to send.
-    let mut out = session::PendingOutput::new(
-      delimiter,
-      session.time_precision,
-      session_event_sender.clone(),
-    );
+    let mut out =
+      session::PendingOutput::new(delimiter, session_event_sender.clone());
     let established =
       handshake.accept(session, std::time::Instant::now(), &mut out)?;
 
@@ -590,7 +581,7 @@ async fn accept_connection(
 /// [`EndpointEvent::SessionConnected`].
 pub async fn serve(
   addr: impl tokio::net::ToSocketAddrs,
-  repo: Arc<crate::repository::FixRepository>,
+  dicts: Arc<crate::message::Dictionaries>,
   config: EndpointConfig,
 ) -> Result<Acceptor> {
   let (event_sender, event_receiver) =
@@ -623,13 +614,13 @@ pub async fn serve(
               stream.set_nodelay(true)?;
               let s = tracing::info_span!("ClientConnection", %sockaddr);
               let event_sender = event_sender.clone();
-              let repo = repo.clone();
+              let dicts = dicts.clone();
               let config = config.clone();
               tokio::spawn(crate::util::wrap_and_report(async move {
                 accept_connection(
                   stream,
                   event_sender,
-                  repo,
+                  dicts,
                   config).instrument(s).await
               }));
             },

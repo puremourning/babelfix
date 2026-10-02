@@ -9,18 +9,19 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use babelfix_core as fix;
-use fix::message::builder;
-use fix::schema::FIX_Latest::Fields;
+use fix::message::{Dictionaries, Dictionary, Message};
+use fix::schema::fields::{ClOrdID, MsgSeqNum, SenderCompID, TargetCompID};
+use fix::schema::tags;
 use fix::session::{
   Command, Event, Progress, Session, SessionIdentifier, SessionOutput,
-  SessionState,
+  SessionState, Unstamped,
 };
 
-static FIX_REPO: LazyLock<Arc<fix::repository::FixRepository>> =
-  LazyLock::new(|| Arc::new(fix::repository::orchestrate().unwrap()));
+static DICTS: LazyLock<Arc<Dictionaries>> =
+  LazyLock::new(|| Dictionaries::standard().unwrap());
 
-fn fix44() -> Arc<fix::repository::FixVersion> {
-  FIX_REPO.get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<Dictionary> {
+  DICTS.get("FIX.4.4").unwrap().clone()
 }
 
 const HEARTBEAT: Duration = Duration::from_secs(30);
@@ -63,7 +64,7 @@ impl Recorder {
 impl SessionOutput for Recorder {
   fn transmit(
     &mut self,
-    msg: &mut fix::FixMessage,
+    msg: Unstamped<'_>,
     _session: &Session,
   ) -> fix::Result<()> {
     // A real driver reads a wall clock here; the important part is that it
@@ -71,7 +72,7 @@ impl SessionOutput for Recorder {
     self.clock += 1;
     let when = chrono::DateTime::from_timestamp(1_700_000_000, self.clock)
       .expect("valid timestamp");
-    fix::codec::stamp_sending_time(msg, when, Default::default())?;
+    msg.stamp(when);
     Ok(())
   }
 
@@ -85,23 +86,14 @@ impl SessionOutput for Recorder {
         // Record the message as it goes on the wire, so the tests can check
         // the SendingTime the output stamped.
         self.sent.push((
-          msg.get_type().to_string(),
+          msg.msg_type().to_string(),
           session.next_out_seq_num.saturating_sub(1),
         ));
-        Seen::RawMessageSent(
-          msg
-            .get_tag(Fields::SendingTime)
-            .map(|v| v.to_string(&msg.data))
-            .unwrap_or_default(),
-        )
+        Seen::RawMessageSent(text(msg.header().raw(tags::SendingTime)))
       }
-      Event::MessageReceived(msg) => Seen::MessageReceived(
-        msg
-          .body
-          .tag(Fields::ClOrdID)
-          .map(|v| v.as_string())
-          .unwrap_or_default(),
-      ),
+      Event::MessageReceived(msg) => {
+        Seen::MessageReceived(text(msg.body().raw(tags::ClOrdID)))
+      }
       Event::ResendRequest {
         begin_seq_no,
         end_seq_no,
@@ -117,34 +109,27 @@ impl SessionOutput for Recorder {
   }
 }
 
-/// Build an inbound frame as if it had arrived off the wire.
-fn inbound(msg_type: &str, seq: u64) -> fix::FixMessage {
-  let mut msg = builder::Message::new(fix44(), msg_type).unwrap();
-  msg.header.set_tag(Fields::MsgSeqNum, seq);
-  msg.header.set_tag(Fields::SenderCompID, "PEER");
-  msg.header.set_tag(Fields::TargetCompID, "US");
-  msg
-    .header
-    .set_tag(Fields::SendingTime, "20231114-22:13:20.000000000");
-  msg.as_message().unwrap()
+fn text(v: Option<&[u8]>) -> String {
+  String::from_utf8_lossy(v.unwrap_or_default()).into_owned()
 }
 
-fn inbound_with(
-  msg_type: &str,
-  seq: u64,
-  tags: &[(u32, &str)],
-) -> fix::FixMessage {
-  let mut msg = builder::Message::new(fix44(), msg_type).unwrap();
-  msg.header.set_tag(Fields::MsgSeqNum, seq);
-  msg.header.set_tag(Fields::SenderCompID, "PEER");
-  msg.header.set_tag(Fields::TargetCompID, "US");
+/// Build an inbound frame as if it had arrived off the wire.
+fn inbound(msg_type: &str, seq: u64) -> Message {
+  inbound_with(msg_type, seq, &[])
+}
+
+fn inbound_with(msg_type: &str, seq: u64, fields: &[(u32, &str)]) -> Message {
+  let mut msg = Message::new(&fix44(), msg_type);
   msg
-    .header
-    .set_tag(Fields::SendingTime, "20231114-22:13:20.000000000");
-  for (tag, value) in tags {
-    msg.body.set_tag(*tag, *value);
+    .header_mut()
+    .set(MsgSeqNum, seq)
+    .set(SenderCompID, "PEER")
+    .set(TargetCompID, "US")
+    .set_raw(tags::SendingTime, b"20231114-22:13:20.000000000");
+  for (tag, value) in fields {
+    msg.body_mut().set_raw(*tag, value.as_bytes());
   }
-  msg.as_message().unwrap()
+  Message::parse(&fix44(), msg.to_bytes()).unwrap()
 }
 
 /// A session that has just accepted a Logon and sent its synchronisation
@@ -162,7 +147,7 @@ fn established() -> (SessionState, Recorder, Instant) {
   let mut state = SessionState::new(session_id, session, start);
   let mut out = Recorder::default();
 
-  let logon = builder::Message::from_message(&inbound("A", 1)).unwrap();
+  let logon = inbound("A", 1);
   let progress = state.start(logon, start, &mut out).unwrap();
   assert_eq!(progress, Progress::Continue);
   // Logon acknowledgement is the driver's job; the state machine emits only
@@ -187,7 +172,7 @@ fn logon_is_followed_by_a_synchronisation_test_request() {
   let mut state = SessionState::new(session_id, session, start);
   let mut out = Recorder::default();
 
-  let logon = builder::Message::from_message(&inbound("A", 1)).unwrap();
+  let logon = inbound("A", 1);
   let _ = state.start(logon, start, &mut out).unwrap();
 
   assert_eq!(out.sent_types(), vec!["1"]);
@@ -285,7 +270,7 @@ fn answering_a_test_request_does_not_defer_our_own_heartbeat() {
   let at = start + HEARTBEAT - Duration::from_millis(1);
   let _ = state
     .on_message(
-      inbound_with("1", 2, &[(Fields::TestReqID, "PING")]),
+      inbound_with("1", 2, &[(tags::TestReqID, "PING")]),
       at,
       &mut out,
     )
@@ -314,8 +299,8 @@ fn an_application_send_defers_the_next_heartbeat() {
   let (mut state, mut out, start) = established();
 
   let at = start + HEARTBEAT / 2;
-  let mut order = builder::Message::new(fix44(), "D").unwrap();
-  order.body.set_tag(Fields::ClOrdID, "order-1");
+  let mut order = Message::new(&fix44(), "D");
+  order.body_mut().set(ClOrdID, "order-1");
   let _ = state
     .on_command(Command::Send(order), at, &mut out)
     .unwrap();
@@ -367,7 +352,7 @@ fn a_test_request_is_answered_with_the_same_test_req_id() {
 
   let _ = state
     .on_message(
-      inbound_with("1", 2, &[(Fields::TestReqID, "PING-1")]),
+      inbound_with("1", 2, &[(tags::TestReqID, "PING-1")]),
       start,
       &mut out,
     )
@@ -408,11 +393,8 @@ fn a_logout_inside_a_gap_is_deferred_until_recovery() {
   );
 
   // The peer gap-fills over the missing range, which closes it.
-  let gap_fill = inbound_with(
-    "4",
-    2,
-    &[(Fields::GapFillFlag, "Y"), (Fields::NewSeqNo, "6")],
-  );
+  let gap_fill =
+    inbound_with("4", 2, &[(tags::GapFillFlag, "Y"), (tags::NewSeqNo, "6")]);
   let progress = state.on_message(gap_fill, start, &mut out).unwrap();
   assert_eq!(progress, Progress::Close);
   assert_eq!(
@@ -428,8 +410,8 @@ fn a_resend_request_reports_a_concrete_end_sequence_number() {
 
   // Send three messages so there is something to resend.
   for i in 0..3 {
-    let mut order = builder::Message::new(fix44(), "D").unwrap();
-    order.body.set_tag(Fields::ClOrdID, format!("order-{i}"));
+    let mut order = Message::new(&fix44(), "D");
+    order.body_mut().set(ClOrdID, format!("order-{i}").as_str());
     let _ = state
       .on_command(Command::Send(order), start, &mut out)
       .unwrap();
@@ -440,11 +422,7 @@ fn a_resend_request_reports_a_concrete_end_sequence_number() {
   // An open-ended request must be resolved against what we have actually sent.
   let _ = state
     .on_message(
-      inbound_with(
-        "2",
-        2,
-        &[(Fields::BeginSeqNo, "2"), (Fields::EndSeqNo, "0")],
-      ),
+      inbound_with("2", 2, &[(tags::BeginSeqNo, "2"), (tags::EndSeqNo, "0")]),
       start,
       &mut out,
     )

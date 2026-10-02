@@ -11,23 +11,25 @@ use std::sync::{Arc, LazyLock};
 
 use babelfix as fix;
 use fix::connection::SessionConnection;
-use fix::message::builder;
-use fix::schema::FIX_Latest::Fields;
+use fix::schema::tags as Fields;
 use fix::session::{Command, Event, Progress, Session, SessionIdentifier};
 
-static FIX_REPO: LazyLock<Arc<fix::repository::FixRepository>> =
-  LazyLock::new(|| Arc::new(fix::repository::orchestrate().unwrap()));
+static DICTS: LazyLock<Arc<fix::message::Dictionaries>> =
+  LazyLock::new(|| fix::message::Dictionaries::standard().unwrap());
 
-fn fix44() -> Arc<fix::repository::FixVersion> {
-  FIX_REPO.get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<fix::message::Dictionary> {
+  DICTS.get("FIX.4.4").unwrap().clone()
 }
 
-fn order(cl_ord_id: &str) -> builder::Message {
-  let mut msg = builder::Message::new(fix44(), "D").unwrap();
-  msg.body.set_tag(Fields::ClOrdID, cl_ord_id);
-  msg.body.set_tag(Fields::Symbol, "AAPL");
-  msg.body.set_tag(Fields::Side, "1");
-  msg.body.set_tag(Fields::OrderQty, 100i64);
+fn order(cl_ord_id: &str) -> fix::message::Message {
+  use fix::schema::{codesets, fields::*};
+  let mut msg = fix::message::Message::new(&fix44(), "D");
+  msg
+    .body_mut()
+    .set(ClOrdID, cl_ord_id)
+    .set(Symbol, "AAPL")
+    .set(Side, codesets::Side::Buy)
+    .set(OrderQty, 100u64);
   msg
 }
 
@@ -51,11 +53,10 @@ impl Seen {
     move |event: Event<'_>| {
       if let Event::MessageReceived(msg) = event {
         self.orders.push(
-          msg
-            .body
-            .tag(Fields::ClOrdID)
-            .map(|v| v.as_string())
-            .unwrap_or_default(),
+          String::from_utf8_lossy(
+            msg.body().raw(Fields::ClOrdID).unwrap_or_default(),
+          )
+          .into_owned(),
         );
       }
       Ok(())
@@ -73,7 +74,7 @@ async fn a_message_crosses_a_duplex_pair() -> anyhow::Result<()> {
   let acceptor = tokio::spawn(async move {
     let mut seen = Seen::default();
     let pending =
-      SessionConnection::accept(server_io, FIX_REPO.clone(), None).await?;
+      SessionConnection::accept(server_io, DICTS.clone(), None).await?;
     assert_eq!(pending.session_id().sender_comp_id, "SERVER");
     assert_eq!(pending.session_id().target_comp_id, "CLIENT");
 
@@ -100,7 +101,7 @@ async fn a_message_crosses_a_duplex_pair() -> anyhow::Result<()> {
   let mut sink = seen.sink();
   let mut client = SessionConnection::initiate(
     client_io,
-    FIX_REPO.clone(),
+    DICTS.clone(),
     None,
     session_id("CLIENT", "SERVER"),
     Session::new(fix44()),
@@ -129,10 +130,10 @@ async fn the_acceptor_sees_the_identity_before_committing() -> anyhow::Result<()
 
   let acceptor = tokio::spawn(async move {
     let pending =
-      SessionConnection::accept(server_io, FIX_REPO.clone(), None).await?;
+      SessionConnection::accept(server_io, DICTS.clone(), None).await?;
     let id = pending.session_id().clone();
     // The Logon itself is available too, for applications that authenticate.
-    assert_eq!(pending.logon().fix_message.msg_type, "A");
+    assert_eq!(pending.logon().msg_type(), "A");
     Ok::<_, anyhow::Error>(id)
   });
 
@@ -144,7 +145,7 @@ async fn the_acceptor_sees_the_identity_before_committing() -> anyhow::Result<()
     std::time::Duration::from_secs(5),
     SessionConnection::initiate(
       client_io,
-      FIX_REPO.clone(),
+      DICTS.clone(),
       None,
       session_id("CLIENT", "SERVER"),
       Session::new(fix44()),

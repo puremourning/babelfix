@@ -19,8 +19,8 @@ use googletest::prelude::*;
 
 pub mod raw;
 
-pub static FIX_REPO: std::sync::LazyLock<Arc<fix::repository::FixRepository>> =
-  std::sync::LazyLock::new(|| Arc::new(fix::repository::orchestrate().unwrap()));
+pub static DICTS: std::sync::LazyLock<Arc<fix::message::Dictionaries>> =
+  std::sync::LazyLock::new(|| fix::message::Dictionaries::standard().unwrap());
 
 /// How long any single `expect`-style helper waits before giving up. Generous
 /// enough to absorb a loaded CI machine, short enough that a genuinely stuck
@@ -70,10 +70,10 @@ impl SessionOptions {
 
   fn into_session(
     self,
-    fix_version: Arc<fix::repository::FixVersion>,
+    fix_version: Arc<fix::message::Dictionary>,
   ) -> fix::session::Session {
     fix::session::Session {
-      fix_version,
+      dict: fix_version,
       next_in_seq_num: self.next_in_seq_num,
       next_out_seq_num: self.next_out_seq_num,
       heartbeat_interval: self.heartbeat_interval,
@@ -292,7 +292,7 @@ impl Server {
       join_handle,
     } = fix::endpoint::serve(
       ("127.0.0.1", port),
-      Arc::clone(&FIX_REPO),
+      Arc::clone(&DICTS),
       fix::endpoint::EndpointConfig::default(),
     )
     .await?;
@@ -394,7 +394,7 @@ impl Client {
       ..
     } = fix::endpoint::connect(
       vec![("127.0.0.1".to_string(), port)],
-      Arc::clone(&FIX_REPO),
+      Arc::clone(&DICTS),
       session_id,
       state.clone(),
       fix::endpoint::EndpointConfig::default(),
@@ -464,14 +464,14 @@ pub async fn serve(
   server_comp_id: impl Into<String>,
   server_options: SessionOptions,
   client_comp_id: impl Into<String>,
-  fix_version: Arc<fix::repository::FixVersion>,
+  fix_version: Arc<fix::message::Dictionary>,
 ) -> anyhow::Result<(fix::session::SessionIdentifier, Arc<Mutex<Server>>, u16)>
 {
   let server = Server::new(0).await?;
   let port = server.lock().await.local_addr.port();
 
   let server_session_id = fix::session::SessionIdentifier {
-    begin_string: fix_version.begin_string.clone(),
+    begin_string: fix_version.begin_string().to_owned(),
     sender_comp_id: server_comp_id.into(),
     target_comp_id: client_comp_id.into(),
   };
@@ -496,7 +496,7 @@ pub async fn establish(
   client_options: SessionOptions,
   server_comp_id: impl Into<String>,
   server_options: SessionOptions,
-  fix_version: Arc<fix::repository::FixVersion>,
+  fix_version: Arc<fix::message::Dictionary>,
 ) -> anyhow::Result<(
   (fix::session::SessionIdentifier, Client),
   (fix::session::SessionIdentifier, Arc<Mutex<Server>>),
@@ -513,7 +513,7 @@ pub async fn establish(
   .await?;
 
   let client_session_id = fix::session::SessionIdentifier {
-    begin_string: fix_version.begin_string.clone(),
+    begin_string: fix_version.begin_string().to_owned(),
     sender_comp_id: client_comp_id,
     target_comp_id: server_comp_id,
   };

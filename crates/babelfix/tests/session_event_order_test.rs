@@ -16,17 +16,17 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use babelfix as fix;
-use fix::schema::FIX_Latest::Fields;
+use fix::schema::tags as Fields;
 use futures::StreamExt;
 
 mod matchers;
 mod session;
 
 use session::raw::{RawMessage, RawPeer};
-use session::{FIX_REPO, SessionOptions};
+use session::{DICTS, SessionOptions};
 
-fn fix44() -> Arc<fix::repository::FixVersion> {
-  FIX_REPO.get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<fix::message::Dictionary> {
+  DICTS.get("FIX.4.4").unwrap().clone()
 }
 
 /// A label for each event, so an assertion reads as a sequence.
@@ -37,11 +37,11 @@ fn label(event: &fix::session::SessionEvent) -> String {
     E::RecoveryCompleted => "RecoveryCompleted".into(),
     E::SessionState(_) => "SessionState".into(),
     E::RawMessageReceived(m, _) => {
-      format!("RawMessageReceived({})", m.get_type())
+      format!("RawMessageReceived({})", m.msg_type())
     }
-    E::RawMessageSent(m, _) => format!("RawMessageSent({})", m.get_type()),
+    E::RawMessageSent(m, _) => format!("RawMessageSent({})", m.msg_type()),
     E::MessageReceived(m) => {
-      format!("MessageReceived({})", m.fix_message.msg_type)
+      format!("MessageReceived({})", m.msg_type())
     }
     E::Disconnected => "Disconnected".into(),
     _ => "other".into(),
@@ -58,7 +58,7 @@ async fn events_stay_in_order_when_the_channel_fills() -> anyhow::Result<()> {
   let config = fix::endpoint::EndpointConfig::default().channel_depth(1);
 
   let acceptor =
-    fix::endpoint::serve(("127.0.0.1", 0), FIX_REPO.clone(), config.clone())
+    fix::endpoint::serve(("127.0.0.1", 0), DICTS.clone(), config.clone())
       .await?;
   let port = acceptor.local_addr.port();
 

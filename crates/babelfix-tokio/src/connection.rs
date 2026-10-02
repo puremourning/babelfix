@@ -59,12 +59,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use babelfix_core::driver::{
   AcceptorDriver, DriverConfig, InitiatorDriver, SessionDriver,
 };
-use babelfix_core::message::builder;
+use babelfix_core::message::Message;
 use babelfix_core::session::{
   Command, EventSink, Progress, Session, SessionIdentifier,
 };
 
-use crate::repository::FixRepository;
+use crate::message::Dictionaries;
 use crate::{Error, Result};
 
 /// How long a peer has to complete the logon exchange.
@@ -98,7 +98,7 @@ impl<S> PendingSession<S> {
   }
 
   /// The Logon itself, for applications that authenticate on it.
-  pub fn logon(&self) -> &builder::Message {
+  pub fn logon(&self) -> &Message {
     self
       .handshake
       .peer_logon()
@@ -159,11 +159,11 @@ fn wall_clock() -> chrono::DateTime<chrono::Utc> {
 }
 
 fn driver_config(
-  repo: Arc<FixRepository>,
+  dicts: Arc<Dictionaries>,
   delimiter: Option<u8>,
 ) -> DriverConfig {
   DriverConfig {
-    repo,
+    dicts,
     delimiter,
     clock: wall_clock,
     logon_timeout: LOGON_TIMEOUT,
@@ -174,7 +174,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
   /// Initiate a session: send a Logon and wait for the peer's.
   pub async fn initiate(
     mut io: S,
-    repo: Arc<FixRepository>,
+    dicts: Arc<Dictionaries>,
     delimiter: Option<u8>,
     session_id: SessionIdentifier,
     session: Session,
@@ -183,7 +183,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
     let mut handshake = InitiatorDriver::start(
       session_id,
       session,
-      driver_config(repo, delimiter),
+      driver_config(dicts, delimiter),
       Instant::now(),
       sink,
     )?;
@@ -234,11 +234,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
   /// could be about.
   pub async fn accept(
     mut io: S,
-    repo: Arc<FixRepository>,
+    dicts: Arc<Dictionaries>,
     delimiter: Option<u8>,
   ) -> Result<PendingSession<S>> {
     let mut handshake =
-      AcceptorDriver::new(driver_config(repo, delimiter), Instant::now());
+      AcceptorDriver::new(driver_config(dicts, delimiter), Instant::now());
 
     let mut buf = BytesMut::with_capacity(READ_CHUNK);
     let deadline = tokio::time::Instant::now() + LOGON_TIMEOUT;
@@ -276,7 +276,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
   /// Send an application message.
   pub async fn send(
     &mut self,
-    msg: builder::Message,
+    msg: Message,
     sink: &mut impl EventSink,
   ) -> Result<Progress> {
     let progress =

@@ -12,15 +12,19 @@ use tracing::{debug, error, info};
 use super::replay::{Replay, ReplayStep};
 use super::{
   Command, Event, Progress, Session, SessionIdentifier, SessionOutput,
+  Unstamped,
 };
-use crate::message::{FixMessage, builder};
-use crate::schema::FIX_Latest::Fields;
+use crate::message::Message;
+use crate::schema::fields::*;
+use crate::schema::{msg_type, tags};
+use crate::time::MAX_LEN;
 use crate::{Error, Result};
 
 /// `SendingTime` is stamped by the [`SessionOutput`], as late as it can be. The
-/// state machine reserves the field so it occupies its proper place in the
-/// header, and leaves the value for the output to fill in.
-const SENDING_TIME_PLACEHOLDER: &str = "";
+/// state machine reserves the field — a placeholder of exactly the stamp's
+/// width — so the stamp is an in-place write.
+const SENDING_TIME_PLACEHOLDER: &[u8; MAX_LEN] =
+  b"00000000-00:00:00.000000000000";
 
 /// How many heartbeat intervals may pass without a word from the peer before
 /// the session gives up on it.
@@ -163,7 +167,7 @@ impl SessionState {
   /// This is that seam, and it closes when logon moves in here.
   pub fn send_logon(
     &mut self,
-    msg: builder::Message,
+    msg: Message,
     out: &mut impl SessionOutput,
   ) -> Result<()> {
     self.transmit(msg, out)
@@ -173,7 +177,7 @@ impl SessionState {
   /// establishes whether either side has missed anything.
   pub fn start(
     &mut self,
-    logon: builder::Message,
+    logon: Message,
     now: Instant,
     out: &mut impl SessionOutput,
   ) -> Result<Progress> {
@@ -182,9 +186,8 @@ impl SessionState {
     }
 
     let tr_id = self.next_test_request_id("HELO-");
-    let mut test_request =
-      builder::Message::new(self.session.fix_version.clone(), "1")?;
-    test_request.body.set_tag(Fields::TestReqID, tr_id.clone());
+    let mut test_request = self.message(msg_type::TestRequest);
+    test_request.body_mut().set(TestReqID, tr_id.as_str());
     self.transmit(test_request, out)?;
     self.recovery_tr_id = Some(tr_id);
 
@@ -194,7 +197,7 @@ impl SessionState {
   /// Feed a decoded inbound frame.
   pub fn on_message(
     &mut self,
-    fix_message: FixMessage,
+    msg: Message,
     now: Instant,
     out: &mut impl SessionOutput,
   ) -> Result<Progress> {
@@ -203,8 +206,7 @@ impl SessionState {
     // proves the peer is there.
     self.timers.reset_in(now);
 
-    let msg = builder::Message::from_message(&fix_message)?;
-    out.event(Event::RawMessageReceived(&fix_message, &self.session))?;
+    out.event(Event::RawMessageReceived(&msg, &self.session))?;
     self.handle_session_message(msg, now, out)
   }
 
@@ -239,11 +241,10 @@ impl SessionState {
         info!("Session disconnect requested");
         // Always announce the intent to disconnect, so the peer can tell an
         // orderly shutdown from a network failure.
-        let mut logout =
-          builder::Message::new(self.session.fix_version.clone(), "5")?;
+        let mut logout = self.message(msg_type::Logout);
         logout
-          .body
-          .set_tag(Fields::Text, "Disconnect requested by application");
+          .body_mut()
+          .set(Text, "Disconnect requested by application");
         self.send(logout, out)?;
         Ok(Progress::Close)
       }
@@ -258,8 +259,7 @@ impl SessionState {
   ) -> Result<Progress> {
     if now >= self.timers.next_out {
       self.timers.reset_out(now);
-      let heartbeat =
-        builder::Message::new(self.session.fix_version.clone(), "0")?;
+      let heartbeat = self.message(msg_type::Heartbeat);
       self.send(heartbeat, out)?;
     }
 
@@ -273,16 +273,14 @@ impl SessionState {
         2 => {
           debug!("Missed second heartbeat, sending TestRequest");
           let tr_id = self.next_test_request_id("HB");
-          let mut test_request =
-            builder::Message::new(self.session.fix_version.clone(), "1")?;
-          test_request.body.set_tag(Fields::TestReqID, tr_id);
+          let mut test_request = self.message(msg_type::TestRequest);
+          test_request.body_mut().set(TestReqID, tr_id.as_str());
           self.send(test_request, out)?;
         }
         MISSED_HEARTBEATS_BEFORE_LOGOUT.. => {
           error!("Missed third heartbeat, logging out");
-          let mut logout =
-            builder::Message::new(self.session.fix_version.clone(), "5")?;
-          logout.body.set_tag(Fields::Text, "Heartbeat timeout");
+          let mut logout = self.message(msg_type::Logout);
+          logout.body_mut().set(Text, "Heartbeat timeout");
           self.send(logout, out)?;
           return Ok(Progress::Close);
         }
@@ -303,6 +301,11 @@ impl SessionState {
     Ok(Progress::Close)
   }
 
+  /// An empty message of the session's version.
+  fn message(&self, msg_type: crate::message::MsgType) -> Message {
+    Message::new(&self.session.dict, msg_type)
+  }
+
   /// A `TestReqID` unique within the session, without consulting a clock.
   fn next_test_request_id(&mut self, prefix: &str) -> String {
     self.test_request_seq += 1;
@@ -320,42 +323,36 @@ impl SessionState {
   /// as the sans-io boundary allows.
   fn transmit(
     &mut self,
-    mut msg: builder::Message,
+    mut msg: Message,
     out: &mut impl SessionOutput,
   ) -> Result<()> {
-    // Only set the seqnum if it's not a gap fill
-    if !msg.header.has_tag(Fields::MsgSeqNum) {
-      msg
-        .header
-        .set_tag(Fields::MsgSeqNum, self.session.next_out_seq_num);
-      self.session.next_out_seq_num += 1;
+    let precision = self.session.time_precision;
+    {
+      let mut header = msg.header_mut();
+      // A gap fill and a replayed message carry their own sequence number.
+      if !header.as_block().has(MsgSeqNum) {
+        header.set(MsgSeqNum, self.session.next_out_seq_num);
+        self.session.next_out_seq_num += 1;
+      }
+      header
+        .set(SenderCompID, self.session_id.sender_comp_id.as_str())
+        .set(TargetCompID, self.session_id.target_comp_id.as_str())
+        .set_raw(SendingTime, &SENDING_TIME_PLACEHOLDER[..precision.width()]);
     }
-
-    msg
-      .header
-      .set_tag(Fields::SenderCompID, self.session_id.sender_comp_id.clone());
-    msg
-      .header
-      .set_tag(Fields::TargetCompID, self.session_id.target_comp_id.clone());
-    msg
-      .header
-      .set_tag(Fields::SendingTime, SENDING_TIME_PLACEHOLDER);
-
-    let mut msg = msg.as_message()?;
-    debug!("Sending message: {:?}", msg);
 
     // The snapshot handed out alongside the message is taken here, after this
     // message's sequence number has been consumed and before the next one is.
     // A single call can emit several messages; labelling them from the state at
     // the end would give them all the last sequence number.
-    out.transmit(&mut msg, &self.session)?;
+    out.transmit(Unstamped::new(&mut msg, precision), &self.session)?;
+    debug!("Sent message: {msg}");
     out.event(Event::RawMessageSent(&msg, &self.session))
   }
 
   /// Send an application or admin message, deferring it if a replay is running.
   fn send(
     &mut self,
-    mut msg: builder::Message,
+    mut msg: Message,
     out: &mut impl SessionOutput,
   ) -> Result<()> {
     if let Some(replay) = self.replay.as_mut() {
@@ -363,10 +360,7 @@ impl SessionState {
       return Ok(());
     }
 
-    msg.header.remove_tag(Fields::MsgSeqNum);
-    msg.header.remove_tag(Fields::PossDupFlag);
-
-    debug!("Sending message to session: {:?}", msg);
+    msg.header_mut().remove(MsgSeqNum).remove(PossDupFlag);
     self.transmit(msg, out)
   }
 
@@ -382,23 +376,23 @@ impl SessionState {
     end_seq_no: u64,
     out: &mut impl SessionOutput,
   ) -> Result<()> {
-    let mut gap_fill =
-      builder::Message::new(self.session.fix_version.clone(), "4")?;
-    gap_fill.body.set_tag(Fields::GapFillFlag, "Y");
-    gap_fill.header.set_tag(Fields::MsgSeqNum, begin_seq_no);
-    gap_fill.body.set_tag(Fields::NewSeqNo, end_seq_no + 1);
+    let mut gap_fill = self.message(msg_type::SequenceReset);
+    gap_fill.header_mut().set(MsgSeqNum, begin_seq_no);
+    gap_fill
+      .body_mut()
+      .set(GapFillFlag, true)
+      .set(NewSeqNo, end_seq_no + 1);
     self.transmit(gap_fill, out)
   }
 
   /// Send a Logout(35=5) carrying a diagnostic reason.
   fn send_logout(
     &mut self,
-    text: impl Into<builder::TypedValue>,
+    text: &str,
     out: &mut impl SessionOutput,
   ) -> Result<()> {
-    let mut logout =
-      builder::Message::new(self.session.fix_version.clone(), "5")?;
-    logout.body.set_tag(Fields::Text, text);
+    let mut logout = self.message(msg_type::Logout);
+    logout.body_mut().set(Text, text);
     self.transmit(logout, out)
   }
 
@@ -408,20 +402,11 @@ impl SessionState {
 
   fn replay_message(
     &mut self,
-    mut message: builder::Message,
+    mut message: Message,
     out: &mut impl SessionOutput,
   ) -> Result<()> {
-    let msg_seq_num = message
-      .header
-      .tag(Fields::MsgSeqNum)
-      .ok_or_else(|| {
-        Error::protocol_violation("No MsgSeqNum in replay message")
-      })?
-      .as_int()
-      .ok_or_else(|| Error::protocol_violation("MsgSeqNum is not an integer"))?
-      as u64;
-
-    let is_admin = message.is_admin_message();
+    let msg_seq_num = message.header().req(MsgSeqNum)?;
+    let is_admin = message.is_admin();
     let replay = self
       .replay
       .as_mut()
@@ -437,15 +422,10 @@ impl SessionState {
         // The peer needs to know when the message was *originally* sent, so the
         // stored SendingTime is preserved as OrigSendingTime before the output
         // stamps a fresh one.
-        message.header.set_tag(
-          Fields::OrigSendingTime,
-          message
-            .header
-            .tag(Fields::SendingTime)
-            .ok_or_else(|| Error::protocol_violation("Missing SendingTime"))?
-            .clone(),
-        );
-        message.header.set_tag(Fields::PossDupFlag, "Y");
+        message
+          .header_mut()
+          .copy_value(tags::SendingTime, tags::OrigSendingTime)?
+          .set(PossDupFlag, true);
         self.transmit(message, out)
       }
     }
@@ -471,9 +451,8 @@ impl SessionState {
 
     // Re-synchronise: the peer's answer to this tells us the replay landed.
     let tr_id = self.next_test_request_id("HELO-");
-    let mut test_request =
-      builder::Message::new(self.session.fix_version.clone(), "1")?;
-    test_request.body.set_tag(Fields::TestReqID, tr_id.clone());
+    let mut test_request = self.message(msg_type::TestRequest);
+    test_request.body_mut().set(TestReqID, tr_id.as_str());
     self.transmit(test_request, out)?;
     self.recovery_tr_id = Some(tr_id);
 
@@ -490,49 +469,28 @@ impl SessionState {
   /// of "N", or absent, which the specification defines as the default — asks
   /// the peer to accept a new sequence number without regard to the message's
   /// own, and is rejected.
-  fn gap_fill_new_seq_num(msg: &builder::Message) -> Result<u64> {
-    if msg
-      .body
-      .tag(Fields::GapFillFlag)
-      .ok_or_else(|| Error::protocol_violation("Missing GapFillFlag"))?
-      .as_string()
-      != "Y"
-    {
+  fn gap_fill_new_seq_num(msg: &Message) -> Result<u64> {
+    if msg.body().get(GapFillFlag)? != Some(true) {
       return Err(Error::protocol_violation(
         "Sequence reset message is garbage and not supported",
       ));
     }
-
-    Ok(
-      msg
-        .body
-        .tag(Fields::NewSeqNo)
-        .ok_or_else(|| Error::protocol_violation("Missing NewSeqNo"))?
-        .as_int()
-        .ok_or_else(|| Error::protocol_violation("Expected integer"))?
-        as u64,
-    )
+    Ok(msg.body().req(NewSeqNo)?)
   }
 
   fn handle_session_message(
     &mut self,
-    msg: builder::Message,
+    msg: Message,
     now: Instant,
     out: &mut impl SessionOutput,
   ) -> Result<Progress> {
-    let msg_seq_num = msg
-      .header
-      .tag(Fields::MsgSeqNum)
-      .ok_or_else(|| Error::protocol_violation("Missing MsgSeqNum"))?
-      .as_int()
-      .ok_or_else(|| Error::protocol_violation("MsgSeqNum is not an integer"))?
-      as u64;
+    let msg_seq_num = msg.header().req(MsgSeqNum)?;
 
     // A SequenceReset-GapFill stands in for the messages it skips over, so it
     // occupies a slot in the stream and is subject to the same sequence checks
     // as any other message. Accepting one differs only in where the expected
     // inbound sequence number lands: at NewSeqNo rather than one further on.
-    let gap_fill_new_seq_num = if msg.fix_message.msg_type == "4" {
+    let gap_fill_new_seq_num = if msg.msg_type() == "4" {
       Some(Self::gap_fill_new_seq_num(&msg)?)
     } else {
       None
@@ -564,10 +522,10 @@ impl SessionState {
         // the approach the session layer specification recommends, and it
         // avoids holding an unbounded queue of out-of-order messages.
         if self.rerequest_in_progress.is_none() {
-          let mut rr = builder::Message::new(msg.fix_version.clone(), "2")?;
-          rr.body
-            .set_tag(Fields::BeginSeqNo, self.session.next_in_seq_num);
-          rr.body.set_tag(Fields::EndSeqNo, 0);
+          let mut rr = self.message(msg_type::ResendRequest);
+          rr.body_mut()
+            .set(BeginSeqNo, self.session.next_in_seq_num)
+            .set(EndSeqNo, 0u64);
           self.rerequest_in_progress = Some(msg_seq_num);
           self.transmit(rr, out)?;
         }
@@ -577,7 +535,7 @@ impl SessionState {
         // discarding one loses it for good, and this is the only opportunity
         // to act on it. Neither consumes the sequence number: the gap fill
         // that eventually covers it will.
-        return match msg.fix_message.msg_type.as_str() {
+        return match msg.msg_type() {
           // Service the retransmission the peer asked for. Our own request for
           // the messages we are missing has already gone out above.
           "2" => self.dispatch_message(msg, now, out),
@@ -595,7 +553,7 @@ impl SessionState {
         // One of the two peers has lost session state and the connection is no
         // longer recoverable.
         self.send_logout(
-          format!(
+          &format!(
             "Invalid MsgSeqNum; too low. Expected {} but got {}.",
             self.session.next_in_seq_num, msg_seq_num
           ),
@@ -630,23 +588,21 @@ impl SessionState {
 
   fn dispatch_message(
     &mut self,
-    msg: builder::Message,
+    msg: Message,
     _now: Instant,
     out: &mut impl SessionOutput,
   ) -> Result<Progress> {
     out.event(Event::SessionState(&self.session))?;
 
-    match msg.fix_message.msg_type.as_str() {
+    match msg.msg_type() {
       "A" => {
         // we already mostly handled this
       }
       // Heartbeat
       "0" => {
-        if let Some(test_req_id) =
-          msg.body.tag(Fields::TestReqID).map(|v| v.as_string())
-        {
+        if let Some(test_req_id) = msg.body().get(TestReqID)? {
           if let Some(recovery_tr_id) = &self.recovery_tr_id {
-            if &test_req_id == recovery_tr_id {
+            if test_req_id == recovery_tr_id.as_str() {
               debug!(
                 "Received heartbeat for recovery test request, session is now established"
               );
@@ -658,34 +614,16 @@ impl SessionState {
       }
       // TestRequest
       "1" => {
-        let mut heartbeat =
-          builder::Message::new(msg.fix_version.clone(), "0")?;
-        heartbeat.body.set_tag(
-          Fields::TestReqID,
-          msg
-            .body
-            .tag(Fields::TestReqID)
-            .ok_or_else(|| Error::protocol_violation("Missing TestReqID"))?
-            .as_string(),
-        );
+        let mut heartbeat = self.message(msg_type::Heartbeat);
+        heartbeat
+          .body_mut()
+          .set(TestReqID, msg.body().req(TestReqID)?);
         self.send(heartbeat, out)?;
       }
       // ResendRequest
       "2" => {
-        let begin_seq_no = msg
-          .body
-          .tag(Fields::BeginSeqNo)
-          .ok_or_else(|| Error::protocol_violation("Missing BeginSeqNo"))?
-          .as_int()
-          .ok_or_else(|| Error::protocol_violation("Expected integer"))?
-          as u64;
-        let end_seq_no = msg
-          .body
-          .tag(Fields::EndSeqNo)
-          .ok_or_else(|| Error::protocol_violation("Missing EndSeqNo"))?
-          .as_int()
-          .ok_or_else(|| Error::protocol_violation("Expected integer"))?
-          as u64;
+        let begin_seq_no = msg.body().req(BeginSeqNo)?;
+        let end_seq_no = msg.body().req(EndSeqNo)?;
         if self.replay.is_some() {
           return Err(Error::protocol_violation(
             "ResendRequest while a resend is already in progress",
@@ -710,7 +648,7 @@ impl SessionState {
         self.send_logout("Logout message received. Closing session.", out)?;
         return Ok(Progress::Close);
       }
-      _ if msg.is_admin_message() => {
+      _ if msg.is_admin() => {
         // Ignore other admin messages
         // FIXME: Not Reject and BusinessMessageReject!
       }

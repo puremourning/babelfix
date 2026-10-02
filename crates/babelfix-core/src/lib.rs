@@ -47,7 +47,7 @@ pub mod message;
 pub mod session;
 pub mod time;
 
-pub use message::{FixMessage, Message, Value};
+pub use message::Message;
 
 /// The error type returned by all fallible babelfix operations.
 ///

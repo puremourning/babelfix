@@ -1,39 +1,48 @@
-//! Test-only [googletest] matchers for babelfix FIX messages and session events.
+//! Test-only [googletest] matchers for babelfix messages and session events.
 //!
-//! Two families, one per message representation:
-//!
-//! * [`message`] — matchers over the wire form [`FixMessage`](babelfix::FixMessage).
-//!   Values are string-or-bytes (the wire has no numeric/bool type), so
-//!   [`message::tag`] takes a `Matcher<&str>` and [`message::data`] a
-//!   `Matcher<&[u8]>`.
-//! * [`builder`] / [`typedvalue`] — matchers over the typed
-//!   [`builder::Message`](babelfix::message::builder::Message). Here values are
-//!   [`TypedValue`](babelfix::message::builder::TypedValue)s, so the
-//!   [`typedvalue`] matchers assert the *variant* as well as the value — which
-//!   is the point of testing the typed form.
+//! * [`message`] — flat matchers over a whole [`Message`]: a tag anywhere in it
+//!   (the first occurrence, at any depth), as text or bytes.
+//! * [`block`] — structural matchers: a field in the header or body, an
+//!   instance of a repeating group.
+//! * [`value`] — matchers over a field's text, decoding it as needed
+//!   (`value::float(eq(100.0))`).
 //!
 //! Compose them inside `matches_pattern!` on a `SessionEvent`, e.g.
 //!
 //! ```ignore
 //! matches_pattern!(&SessionEvent::RawMessageReceived(
-//!     all!(message::tag(35, eq("A")), message::tag(108, eq("30"))),
-//!     anything(),
+//!     ref all!(message::tag(35, eq("A")), message::tag(108, eq("30"))),
+//!     ref anything(),
 //! ))
 //! ```
 #![allow(dead_code)]
 
 use babelfix as fix;
-use googletest::matcher::{Matcher, MatcherBase, MatcherResult};
+use fix::message::{Block, Message};
 
-/// Matchers over the wire form, [`FixMessage`](babelfix::FixMessage).
+/// The first occurrence of `tag` anywhere in the message, as its value bytes.
+fn find(msg: &Message, tag: u32) -> Option<&[u8]> {
+  msg
+    .walk()
+    .filter(|c| c.tag() == tag)
+    .find_map(|c| c.value())
+}
+
+/// `tag` among a block's own fields.
+fn find_in<'a>(block: &Block<'a>, tag: u32) -> Option<&'a [u8]> {
+  block.raw(tag)
+}
+
+fn text(bytes: &[u8]) -> Option<&str> {
+  std::str::from_utf8(bytes).ok()
+}
+
+/// Matchers over a whole message.
 pub mod message {
-  use super::fix;
   use googletest::description::Description;
   use googletest::matcher::{Matcher, MatcherBase, MatcherResult};
 
-  fn find(msg: &fix::FixMessage, tag: u32) -> Option<&fix::Value> {
-    msg.tags.iter().find(|(t, _)| *t == tag).map(|(_, v)| v)
-  }
+  use super::{Message, find, text};
 
   #[derive(MatcherBase)]
   pub struct HasTagMatcher {
@@ -44,13 +53,9 @@ pub mod message {
     HasTagMatcher { tag }
   }
 
-  impl Matcher<&fix::FixMessage> for HasTagMatcher {
-    fn matches(&self, actual: &fix::FixMessage) -> MatcherResult {
-      if find(actual, self.tag).is_some() {
-        MatcherResult::Match
-      } else {
-        MatcherResult::NoMatch
-      }
+  impl Matcher<&Message> for HasTagMatcher {
+    fn matches(&self, actual: &Message) -> MatcherResult {
+      find(actual, self.tag).is_some().into()
     }
 
     fn describe(&self, sense: MatcherResult) -> Description {
@@ -64,11 +69,13 @@ pub mod message {
       }
     }
 
-    fn explain_match(&self, actual: &fix::FixMessage) -> Description {
+    fn explain_match(&self, actual: &Message) -> Description {
       match find(actual, self.tag) {
-        Some(v) => {
-          Description::new().text(format!("whose tag {} is {v:?}", self.tag))
-        }
+        Some(v) => Description::new().text(format!(
+          "whose tag {} is {:?}",
+          self.tag,
+          String::from_utf8_lossy(v)
+        )),
         None => {
           Description::new().text(format!("which has no tag {}", self.tag))
         }
@@ -82,41 +89,37 @@ pub mod message {
     inner: M,
   }
 
-  /// Matches when tag `tag` is present as a (non-data) string value that the
-  /// `inner` matcher accepts.
+  /// Matches when tag `tag` is present with a text value `inner` accepts.
   pub fn tag<M>(tag: u32, inner: M) -> TagMatcher<M> {
     TagMatcher { tag, inner }
   }
 
-  impl<M> Matcher<&fix::FixMessage> for TagMatcher<M>
+  impl<M> Matcher<&Message> for TagMatcher<M>
   where
     M: for<'a> Matcher<&'a str>,
   {
-    fn matches(&self, actual: &fix::FixMessage) -> MatcherResult {
-      match find(actual, self.tag) {
-        Some(v) if !v.is_data() => self.inner.matches(v.as_str(&actual.data)),
-        _ => MatcherResult::NoMatch,
+    fn matches(&self, actual: &Message) -> MatcherResult {
+      match find(actual, self.tag).and_then(text) {
+        Some(s) => self.inner.matches(s),
+        None => MatcherResult::NoMatch,
       }
     }
 
     fn describe(&self, sense: MatcherResult) -> Description {
       Description::new()
-        .text(format!("has string tag {} whose value", self.tag))
+        .text(format!("has tag {} whose value", self.tag))
         .nested(self.inner.describe(sense))
     }
 
-    fn explain_match(&self, actual: &fix::FixMessage) -> Description {
+    fn explain_match(&self, actual: &Message) -> Description {
       match find(actual, self.tag) {
-        Some(v) if !v.is_data() => {
-          let s = v.as_str(&actual.data);
-          Description::new()
+        Some(v) => match text(v) {
+          Some(s) => Description::new()
             .text(format!("whose tag {} is {s:?},", self.tag))
-            .nested(self.inner.explain_match(s))
-        }
-        Some(_) => Description::new().text(format!(
-          "whose tag {} is binary data, not a string",
-          self.tag
-        )),
+            .nested(self.inner.explain_match(s)),
+          None => Description::new()
+            .text(format!("whose tag {} is not text: {v:?}", self.tag)),
+        },
         None => {
           Description::new().text(format!("which has no tag {}", self.tag))
         }
@@ -130,36 +133,33 @@ pub mod message {
     inner: M,
   }
 
-  /// Matches when tag `tag` is present and its raw bytes match `inner`.
+  /// Matches when tag `tag` is present and its bytes match `inner`.
   pub fn data<M>(tag: u32, inner: M) -> DataMatcher<M> {
     DataMatcher { tag, inner }
   }
 
-  impl<M> Matcher<&fix::FixMessage> for DataMatcher<M>
+  impl<M> Matcher<&Message> for DataMatcher<M>
   where
     M: for<'a> Matcher<&'a [u8]>,
   {
-    fn matches(&self, actual: &fix::FixMessage) -> MatcherResult {
+    fn matches(&self, actual: &Message) -> MatcherResult {
       match find(actual, self.tag) {
-        Some(v) => self.inner.matches(v.as_bytes(&actual.data)),
+        Some(v) => self.inner.matches(v),
         None => MatcherResult::NoMatch,
       }
     }
 
     fn describe(&self, sense: MatcherResult) -> Description {
       Description::new()
-        .text(format!("has data tag {} whose bytes", self.tag))
+        .text(format!("has tag {} whose bytes", self.tag))
         .nested(self.inner.describe(sense))
     }
 
-    fn explain_match(&self, actual: &fix::FixMessage) -> Description {
+    fn explain_match(&self, actual: &Message) -> Description {
       match find(actual, self.tag) {
-        Some(v) => {
-          let b = v.as_bytes(&actual.data);
-          Description::new()
-            .text(format!("whose tag {} is {b:?},", self.tag))
-            .nested(self.inner.explain_match(b))
-        }
+        Some(v) => Description::new()
+          .text(format!("whose tag {} is {v:?},", self.tag))
+          .nested(self.inner.explain_match(v)),
         None => {
           Description::new().text(format!("which has no tag {}", self.tag))
         }
@@ -168,36 +168,58 @@ pub mod message {
   }
 }
 
-/// Matchers over a single [`TypedValue`](babelfix::message::builder::TypedValue).
-///
-/// Each asserts the value's *variant* and applies an inner matcher to the
-/// contained value, so a numeric field stored as `String` will (correctly) not
-/// match [`int`].
-pub mod typedvalue {
-  use babelfix::message::builder::TypedValue;
+/// Matchers over one field's text.
+pub mod value {
   use googletest::description::Description;
   use googletest::matcher::{Matcher, MatcherBase, MatcherResult};
 
-  macro_rules! scalar_matcher {
-    ($name:ident, $ctor:ident, $variant:ident, $ty:ty, $bound:tt, $label:literal) => {
+  #[derive(MatcherBase)]
+  pub struct StringMatcher<M> {
+    inner: M,
+  }
+
+  /// The text itself.
+  pub fn string<M>(inner: M) -> StringMatcher<M> {
+    StringMatcher { inner }
+  }
+
+  impl<M> Matcher<&str> for StringMatcher<M>
+  where
+    M: for<'a> Matcher<&'a str>,
+  {
+    fn matches(&self, actual: &str) -> MatcherResult {
+      self.inner.matches(actual)
+    }
+
+    fn describe(&self, sense: MatcherResult) -> Description {
+      self.inner.describe(sense)
+    }
+
+    fn explain_match(&self, actual: &str) -> Description {
+      self.inner.explain_match(actual)
+    }
+  }
+
+  macro_rules! parsed_matcher {
+    ($name:ident, $ctor:ident, $ty:ty, $label:literal) => {
       #[derive(MatcherBase)]
       pub struct $name<M> {
         inner: M,
       }
 
-      #[doc = concat!("Matches a `TypedValue::", stringify!($variant), "` whose value the `inner` matcher accepts.")]
+      #[doc = concat!("The text, parsed as ", $label, ".")]
       pub fn $ctor<M>(inner: M) -> $name<M> {
         $name { inner }
       }
 
-      impl<M> Matcher<&TypedValue> for $name<M>
+      impl<M> Matcher<&str> for $name<M>
       where
-        M: $bound,
+        M: Matcher<$ty>,
       {
-        fn matches(&self, actual: &TypedValue) -> MatcherResult {
-          match actual {
-            TypedValue::$variant(v) => self.inner.matches(*v),
-            _ => MatcherResult::NoMatch,
+        fn matches(&self, actual: &str) -> MatcherResult {
+          match actual.parse::<$ty>() {
+            Ok(v) => self.inner.matches(v),
+            Err(_) => MatcherResult::NoMatch,
           }
         }
 
@@ -207,138 +229,43 @@ pub mod typedvalue {
             .nested(self.inner.describe(sense))
         }
 
-        fn explain_match(&self, actual: &TypedValue) -> Description {
-          match actual {
-            TypedValue::$variant(v) => Description::new()
+        fn explain_match(&self, actual: &str) -> Description {
+          match actual.parse::<$ty>() {
+            Ok(v) => Description::new()
               .text(format!(concat!("which is ", $label, " {:?},"), v))
-              .nested(self.inner.explain_match(*v)),
-            other => Description::new()
-              .text(format!(concat!("which is {:?}, not ", $label), other)),
+              .nested(self.inner.explain_match(v)),
+            Err(_) => Description::new()
+              .text(format!(concat!("which is {:?}, not ", $label), actual)),
           }
         }
       }
     };
   }
 
-  // Copy scalars: the contained value is dereferenced and matched by value.
-  scalar_matcher!(IntMatcher, int, Int, i64, (Matcher<i64>), "an integer");
-  scalar_matcher!(FloatMatcher, float, Float, f64, (Matcher<f64>), "a float");
-  scalar_matcher!(
-    BoolMatcher,
-    bool,
-    Boolean,
-    bool,
-    (Matcher<bool>),
-    "a boolean"
-  );
-  scalar_matcher!(CharMatcher, char, Char, char, (Matcher<char>), "a char");
-
-  // Reference values (str / bytes) need a by-reference projection.
-  #[derive(MatcherBase)]
-  pub struct StringMatcher<M> {
-    inner: M,
-  }
-
-  /// Matches a `TypedValue::String` whose value the `inner` matcher accepts.
-  pub fn string<M>(inner: M) -> StringMatcher<M> {
-    StringMatcher { inner }
-  }
-
-  impl<M> Matcher<&TypedValue> for StringMatcher<M>
-  where
-    M: for<'a> Matcher<&'a str>,
-  {
-    fn matches(&self, actual: &TypedValue) -> MatcherResult {
-      match actual {
-        TypedValue::String(s) => self.inner.matches(s.as_str()),
-        _ => MatcherResult::NoMatch,
-      }
-    }
-
-    fn describe(&self, sense: MatcherResult) -> Description {
-      Description::new()
-        .text("is a string which")
-        .nested(self.inner.describe(sense))
-    }
-
-    fn explain_match(&self, actual: &TypedValue) -> Description {
-      match actual {
-        TypedValue::String(s) => Description::new()
-          .text(format!("which is the string {s:?},"))
-          .nested(self.inner.explain_match(s.as_str())),
-        other => {
-          Description::new().text(format!("which is {other:?}, not a string"))
-        }
-      }
-    }
-  }
-
-  #[derive(MatcherBase)]
-  pub struct DataMatcher<M> {
-    inner: M,
-  }
-
-  /// Matches a `TypedValue::Data` whose bytes the `inner` matcher accepts.
-  pub fn data<M>(inner: M) -> DataMatcher<M> {
-    DataMatcher { inner }
-  }
-
-  impl<M> Matcher<&TypedValue> for DataMatcher<M>
-  where
-    M: for<'a> Matcher<&'a [u8]>,
-  {
-    fn matches(&self, actual: &TypedValue) -> MatcherResult {
-      match actual {
-        TypedValue::Data(d) => self.inner.matches(d.as_slice()),
-        _ => MatcherResult::NoMatch,
-      }
-    }
-
-    fn describe(&self, sense: MatcherResult) -> Description {
-      Description::new()
-        .text("is binary data which")
-        .nested(self.inner.describe(sense))
-    }
-
-    fn explain_match(&self, actual: &TypedValue) -> Description {
-      match actual {
-        TypedValue::Data(d) => Description::new()
-          .text(format!("which is the data {d:?},"))
-          .nested(self.inner.explain_match(d.as_slice())),
-        other => {
-          Description::new().text(format!("which is {other:?}, not data"))
-        }
-      }
-    }
-  }
+  parsed_matcher!(IntMatcher, int, i64, "an integer");
+  parsed_matcher!(FloatMatcher, float, f64, "a number");
 }
 
-/// Matchers over the typed [`builder::Message`](babelfix::message::builder::Message).
-///
-/// [`tag`] and [`group`] operate on a [`Block`](babelfix::message::builder::Block);
-/// [`header`] and [`body`] project the respective block out of a `Message` so
-/// you can address header vs. body fields.
-pub mod builder {
-  use babelfix::message::builder::{Block, Message, TypedValue};
+/// Structural matchers: fields of a block, and group instances.
+pub mod block {
   use googletest::description::Description;
   use googletest::matcher::{Matcher, MatcherBase, MatcherResult};
+
+  use super::{Block, Message, find_in, text};
 
   #[derive(MatcherBase)]
   pub struct HasTagMatcher {
     tag: u32,
   }
 
+  /// Matches a block that holds the field or group.
   pub fn has_tag(tag: u32) -> HasTagMatcher {
     HasTagMatcher { tag }
   }
 
-  impl Matcher<&Block> for HasTagMatcher {
-    fn matches(&self, actual: &Block) -> MatcherResult {
-      if actual.has_tag(self.tag) {
-        MatcherResult::Match
-      } else {
-        MatcherResult::NoMatch
-      }
+  impl<'b> Matcher<&Block<'b>> for HasTagMatcher {
+    fn matches(&self, actual: &Block<'b>) -> MatcherResult {
+      actual.has(self.tag).into()
     }
 
     fn describe(&self, sense: MatcherResult) -> Description {
@@ -351,39 +278,26 @@ pub mod builder {
         }
       }
     }
-
-    fn explain_match(&self, actual: &Block) -> Description {
-      match actual.tag(self.tag) {
-        Some(v) => {
-          Description::new().text(format!("whose tag {} is {v:?}", self.tag))
-        }
-        None => {
-          Description::new().text(format!("which has no tag {}", self.tag))
-        }
-      }
-    }
   }
 
   #[derive(MatcherBase)]
-  pub struct BlockFieldMatcher<M> {
+  pub struct FieldMatcher<M> {
     tag: u32,
     inner: M,
   }
 
-  /// Matches when the block contains tag `tag` whose [`TypedValue`] the `inner`
-  /// matcher accepts. Operates on a [`Block`] (use [`header`]/[`body`] to reach
-  /// a `Message`'s blocks).
-  pub fn tag<M>(tag: u32, inner: M) -> BlockFieldMatcher<M> {
-    BlockFieldMatcher { tag, inner }
+  /// Matches a block holding `tag` with a text value `inner` accepts.
+  pub fn tag<M>(tag: u32, inner: M) -> FieldMatcher<M> {
+    FieldMatcher { tag, inner }
   }
 
-  impl<M> Matcher<&Block> for BlockFieldMatcher<M>
+  impl<'b, M> Matcher<&Block<'b>> for FieldMatcher<M>
   where
-    M: for<'a> Matcher<&'a TypedValue>,
+    M: for<'a> Matcher<&'a str>,
   {
-    fn matches(&self, actual: &Block) -> MatcherResult {
-      match actual.tag(self.tag) {
-        Some(v) => self.inner.matches(v),
+    fn matches(&self, actual: &Block<'b>) -> MatcherResult {
+      match find_in(actual, self.tag).and_then(text) {
+        Some(s) => self.inner.matches(s),
         None => MatcherResult::NoMatch,
       }
     }
@@ -394,11 +308,11 @@ pub mod builder {
         .nested(self.inner.describe(sense))
     }
 
-    fn explain_match(&self, actual: &Block) -> Description {
-      match actual.tag(self.tag) {
-        Some(v) => Description::new()
-          .text(format!("whose tag {} is {v:?},", self.tag))
-          .nested(self.inner.explain_match(v)),
+    fn explain_match(&self, actual: &Block<'b>) -> Description {
+      match find_in(actual, self.tag).and_then(text) {
+        Some(s) => Description::new()
+          .text(format!("whose tag {} is {s:?},", self.tag))
+          .nested(self.inner.explain_match(s)),
         None => {
           Description::new().text(format!("which has no tag {}", self.tag))
         }
@@ -413,8 +327,8 @@ pub mod builder {
     inner: M,
   }
 
-  /// Matches the `index`-th entry of the repeating group identified by its
-  /// `num_in_group` tag; the entry is itself a [`Block`], matched by `inner`.
+  /// Matches a block whose group `num_in_group` has an instance `index` that
+  /// `inner` (a block matcher) accepts.
   pub fn group<M>(
     num_in_group: u32,
     index: usize,
@@ -427,16 +341,13 @@ pub mod builder {
     }
   }
 
-  impl<M> Matcher<&Block> for GroupMatcher<M>
+  impl<'b, M> Matcher<&Block<'b>> for GroupMatcher<M>
   where
-    M: for<'a> Matcher<&'a Block>,
+    M: for<'a, 'c> Matcher<&'a Block<'c>>,
   {
-    fn matches(&self, actual: &Block) -> MatcherResult {
-      match actual
-        .group(self.num_in_group)
-        .and_then(|g| g.get(self.index))
-      {
-        Some(entry) => self.inner.matches(entry),
+    fn matches(&self, actual: &Block<'b>) -> MatcherResult {
+      match actual.group(self.num_in_group).get(self.index) {
+        Some(instance) => self.inner.matches(&instance),
         None => MatcherResult::NoMatch,
       }
     }
@@ -444,29 +355,26 @@ pub mod builder {
     fn describe(&self, sense: MatcherResult) -> Description {
       Description::new()
         .text(format!(
-          "has a group {} whose entry [{}]",
+          "has a group {} whose instance [{}]",
           self.num_in_group, self.index
         ))
         .nested(self.inner.describe(sense))
     }
 
-    fn explain_match(&self, actual: &Block) -> Description {
-      match actual.group(self.num_in_group) {
-        Some(g) => match g.get(self.index) {
-          Some(entry) => Description::new()
-            .text(format!(
-              "whose group {} entry [{}]",
-              self.num_in_group, self.index
-            ))
-            .nested(self.inner.explain_match(entry)),
-          None => Description::new().text(format!(
-            "whose group {} has only {} entries",
-            self.num_in_group,
-            g.len()
-          )),
-        },
-        None => Description::new()
-          .text(format!("which has no group {}", self.num_in_group)),
+    fn explain_match(&self, actual: &Block<'b>) -> Description {
+      let group = actual.group(self.num_in_group);
+      match group.get(self.index) {
+        Some(instance) => Description::new()
+          .text(format!(
+            "whose group {} instance [{}]",
+            self.num_in_group, self.index
+          ))
+          .nested(self.inner.explain_match(&instance)),
+        None => Description::new().text(format!(
+          "whose group {} has {} instance(s)",
+          self.num_in_group,
+          group.len()
+        )),
       }
     }
   }
@@ -476,17 +384,17 @@ pub mod builder {
     inner: M,
   }
 
-  /// Applies `inner` (a block matcher) to a message's header block.
+  /// Applies `inner` (a block matcher) to a message's header.
   pub fn header<M>(inner: M) -> HeaderMatcher<M> {
     HeaderMatcher { inner }
   }
 
   impl<M> Matcher<&Message> for HeaderMatcher<M>
   where
-    M: for<'a> Matcher<&'a Block>,
+    M: for<'a, 'c> Matcher<&'a Block<'c>>,
   {
     fn matches(&self, actual: &Message) -> MatcherResult {
-      self.inner.matches(&actual.header)
+      self.inner.matches(&actual.header())
     }
 
     fn describe(&self, sense: MatcherResult) -> Description {
@@ -498,7 +406,7 @@ pub mod builder {
     fn explain_match(&self, actual: &Message) -> Description {
       Description::new()
         .text("whose header")
-        .nested(self.inner.explain_match(&actual.header))
+        .nested(self.inner.explain_match(&actual.header()))
     }
   }
 
@@ -507,17 +415,17 @@ pub mod builder {
     inner: M,
   }
 
-  /// Applies `inner` (a block matcher) to a message's body block.
+  /// Applies `inner` (a block matcher) to a message's body.
   pub fn body<M>(inner: M) -> BodyMatcher<M> {
     BodyMatcher { inner }
   }
 
   impl<M> Matcher<&Message> for BodyMatcher<M>
   where
-    M: for<'a> Matcher<&'a Block>,
+    M: for<'a, 'c> Matcher<&'a Block<'c>>,
   {
     fn matches(&self, actual: &Message) -> MatcherResult {
-      self.inner.matches(&actual.body)
+      self.inner.matches(&actual.body())
     }
 
     fn describe(&self, sense: MatcherResult) -> Description {
@@ -529,78 +437,72 @@ pub mod builder {
     fn explain_match(&self, actual: &Message) -> Description {
       Description::new()
         .text("whose body")
-        .nested(self.inner.explain_match(&actual.body))
+        .nested(self.inner.explain_match(&actual.body()))
     }
   }
 }
 
 #[test]
 fn matcher_smoke() {
-  use fix::schema::FIX_Latest::Fields;
+  use fix::schema::fields::{HeartBtInt, SenderCompID};
+  use fix::schema::tags;
   use googletest::prelude::*;
 
-  let fix44 = crate::session::FIX_REPO.get_version("FIX.4.4").unwrap();
+  let fix44 = crate::session::DICTS.get("FIX.4.4").unwrap().clone();
 
-  // Construct a typed builder message (HeartBtInt as Int, comp id as String).
-  let built = fix::message::builder::Message::new(fix44.clone(), "A")
-    .unwrap()
-    .with_header_field(Fields::SenderCompID, "CLIENT")
-    .with_body_field(Fields::HeartBtInt, 30i64);
+  let mut built = Message::new(&fix44, "A");
+  built.header_mut().set(SenderCompID, "CLIENT");
+  built.body_mut().set(HeartBtInt, 30u64);
 
-  verify_that!(
-    &built,
-    builder::header(not(builder::has_tag(Fields::HeartBtInt)))
-  )
-  .unwrap();
+  verify_that!(&built, block::header(not(block::has_tag(tags::HeartBtInt))))
+    .unwrap();
 
-  // Typed assertions: variant + value, header vs body.
   verify_that!(
     &built,
     all!(
-      builder::header(builder::tag(
-        Fields::SenderCompID,
-        typedvalue::string(eq("CLIENT"))
+      block::header(block::tag(
+        tags::SenderCompID,
+        value::string(eq("CLIENT"))
       )),
-      builder::body(builder::tag(Fields::HeartBtInt, typedvalue::int(ge(1)))),
+      block::body(block::tag(tags::HeartBtInt, value::int(ge(1)))),
     )
   )
   .unwrap();
-
-  // Type-strictness: HeartBtInt is Int, so a string matcher must NOT match.
   verify_that!(
     &built,
-    builder::body(builder::tag(
-      Fields::HeartBtInt,
-      typedvalue::string(anything())
-    ))
+    block::body(block::tag(tags::HeartBtInt, value::float(eq(30.0))))
+  )
+  .unwrap();
+  // Not a number.
+  verify_that!(
+    &built,
+    block::header(block::tag(tags::SenderCompID, value::int(anything())))
   )
   .unwrap_err();
 
-  // Wire form: everything is a string.
-  let wire = built.as_message().unwrap();
   verify_that!(
-    &wire,
+    &built,
     all!(
       message::tag(35, eq("A")),
-      message::tag(Fields::HeartBtInt, eq("30")),
-      message::tag(Fields::SenderCompID, eq("CLIENT")),
+      message::tag(tags::HeartBtInt, eq("30")),
+      message::tag(tags::SenderCompID, eq("CLIENT")),
     )
   )
   .unwrap();
 
   // Negative (wrong value) and absence both fail.
-  verify_that!(&wire, message::tag(35, eq("D"))).unwrap_err();
-  verify_that!(&wire, message::tag(9999, anything())).unwrap_err();
+  verify_that!(&built, message::tag(35, eq("D"))).unwrap_err();
+  verify_that!(&built, message::tag(9999, anything())).unwrap_err();
 
   // Composition with matches_pattern! on a SessionEvent (the intended usage).
   let ev = fix::session::SessionEvent::RawMessageReceived(
-    wire.clone(),
-    fix::session::Session::default(),
+    built.clone(),
+    fix::session::Session::new(fix44),
   );
   verify_that!(
     &ev,
-    // NB: `ref` is required because the fields (FixMessage, Session) are not
-    // Copy, so matches_pattern! must match them by reference.
+    // NB: `ref` is required because the fields are not Copy, so
+    // matches_pattern! must match them by reference.
     matches_pattern!(&fix::session::SessionEvent::RawMessageReceived(
       ref message::tag(35, eq("A")),
       ref anything(),
@@ -613,15 +515,12 @@ fn matcher_smoke() {
     &ev,
     matches_pattern!(&fix::session::SessionEvent::MessageReceived(
         ref all!(
-          builder::header(not(builder::has_tag(Fields::TargetCompID))),
-          builder::header(builder::tag(
-            Fields::SenderCompID,
-            typedvalue::string(eq("CLIENT"))
+          block::header(not(block::has_tag(tags::TargetCompID))),
+          block::header(block::tag(
+            tags::SenderCompID,
+            value::string(eq("CLIENT"))
           )),
-          builder::body(builder::tag(
-            Fields::HeartBtInt,
-            typedvalue::int(lt(100))
-          )),
+          block::body(block::tag(tags::HeartBtInt, value::int(lt(100)))),
         )
     ))
   )

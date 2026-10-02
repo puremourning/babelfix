@@ -6,8 +6,8 @@
 //! produces.
 //!
 //! A [`Session`] holds the mutable per-connection state — inbound/outbound
-//! sequence numbers, the heartbeat interval and the negotiated
-//! [`FixVersion`](crate::repository::FixVersion). The [`crate::endpoint`] layer
+//! sequence numbers, the heartbeat interval and the negotiated FIX version's
+//! [`Dictionary`](crate::message::Dictionary). The [`crate::endpoint`] layer
 //! runs the session loop internally; applications interact with a live session
 //! through a [`SessionHandle`]:
 //!
@@ -28,15 +28,15 @@
 //!
 //! ```no_run
 //! use babelfix_tokio::session::{SessionHandle, SessionEvent};
-//! use babelfix_tokio::schema::FIX_Latest::Fields;
+//! use babelfix_tokio::schema::fields::ClOrdID;
 //! use futures::StreamExt;
 //!
 //! async fn drive(mut handle: SessionHandle) {
 //!     while let Some(event) = handle.events.next().await {
 //!         match event {
 //!             SessionEvent::MessageReceived(msg) => {
-//!                 if let Some(t) = msg.body.tag(Fields::ClOrdID) {
-//!                     println!("received order {}", t.as_string());
+//!                 if let Ok(Some(id)) = msg.body().get(ClOrdID) {
+//!                     println!("received order {id}");
 //!                 }
 //!             }
 //!             SessionEvent::Disconnected => break,
@@ -78,14 +78,14 @@ pub enum SessionCommand {
   /// It is an error to attempt to send a message while a replay is in progress;
   /// use [`SessionCommand::Replay`] to send messages in response to a
   /// [`SessionEvent::ResendRequest`].
-  Send(crate::message::builder::Message),
+  Send(crate::message::Message),
 
   /// Replay the sequence number in `MsgSeqNum` with the supplied message. Only
   /// valid between receipt of a [`SessionEvent::ResendRequest`] and a
   /// subsequent [`SessionCommand::ReplayComplete`].
   ///
   /// For more details on resends, see [`SessionEvent::ResendRequest`].
-  Replay(crate::message::builder::Message),
+  Replay(crate::message::Message),
 
   /// Indicate that all messages for the current resend request have been sent.
   ///
@@ -133,7 +133,7 @@ pub enum SessionEvent {
   /// well-sequenced messages.
   ///
   /// FIXME: Should include the socket receive time
-  RawMessageReceived(crate::message::FixMessage, Session),
+  RawMessageReceived(crate::message::Message, Session),
 
   /// Emitted when any FIX message was sent to the remote, including admin
   /// messages. Useful for auditing, logging and display. `SendingTime` is the
@@ -145,7 +145,7 @@ pub enum SessionEvent {
   /// so that it can be replayed in response to any future resend request
   /// [`SessionEvent::ResendRequest`]. Note that this library does not provide
   /// any persistence at all, so you must implement your own persistence.
-  RawMessageSent(crate::message::FixMessage, Session),
+  RawMessageSent(crate::message::Message, Session),
 
   /// Applications should use this event for business processing.
   ///
@@ -155,7 +155,7 @@ pub enum SessionEvent {
   /// messages before any new messages, thus the application does not need to be
   /// concerned with processing out-of-sequence messages, except to the extent
   /// that `PossDupFlag` might be set on the message by the remote.
-  MessageReceived(crate::message::builder::Message),
+  MessageReceived(crate::message::Message),
 
   /// The remote requested replay (resend) of messages from the given sequence
   /// number range (inclusive of `end_seq_no`). `end_seq_no` is always supplied,
@@ -177,7 +177,7 @@ pub enum SessionEvent {
   ResendRequest {
     /// The resend request message itself. Applications do not typically need to
     /// inspect this.
-    resend_request: crate::message::builder::Message,
+    resend_request: crate::message::Message,
     /// The first sequence number to be resent.
     begin_seq_no: u64,
     /// The last sequence number to be resent (inclusive).
@@ -253,11 +253,10 @@ pub(crate) struct PendingOutput {
 impl PendingOutput {
   pub(crate) fn new(
     delimiter: Option<u8>,
-    precision: crate::time::TimePrecision,
     event_sender: mpsc::Sender<SessionEvent>,
   ) -> Self {
     Self {
-      encoder: FixEncoder::new(delimiter).with_precision(precision),
+      encoder: FixEncoder::new(delimiter),
       bytes: BytesMut::with_capacity(4096),
       events: VecDeque::new(),
       event_sender,
@@ -268,14 +267,13 @@ impl PendingOutput {
 impl SessionOutput for PendingOutput {
   fn transmit(
     &mut self,
-    msg: &mut crate::message::FixMessage,
+    msg: babelfix_core::session::Unstamped<'_>,
     _session: &Session,
   ) -> crate::Result<()> {
     // The clock is read here, once per message, immediately before the bytes
     // are produced — the latest point the sans-io boundary allows.
-    self
-      .encoder
-      .encode_stamped(msg, chrono::Utc::now(), &mut self.bytes)
+    let msg = msg.stamp(chrono::Utc::now());
+    self.encoder.encode(msg, &mut self.bytes)
   }
 
   fn event(&mut self, event: Event<'_>) -> crate::Result<()> {
@@ -364,7 +362,7 @@ impl<W: tokio::io::AsyncWrite + Unpin> SessionRunner<W> {
     commands: &mut mpsc::Receiver<SessionCommand>,
   ) -> crate::Result<()>
   where
-    R: Stream<Item = crate::Result<crate::message::FixMessage>> + Unpin,
+    R: Stream<Item = crate::Result<crate::message::Message>> + Unpin,
   {
     loop {
       // `next_deadline` is never `None` for a live session, but a far-future

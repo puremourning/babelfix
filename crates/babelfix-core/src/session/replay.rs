@@ -10,7 +10,7 @@
 //! sequence numbers are currently owed a gap fill. It decides *what* to send;
 //! the caller does the sending.
 
-use crate::message::builder;
+use crate::message::Message;
 use crate::{Error, Result};
 
 /// What the replay wants done for one message the application offered.
@@ -42,7 +42,7 @@ pub struct Replay {
   /// Messages the application asked to send *normally* while the replay was in
   /// progress. They cannot go out mid-retransmission without corrupting the
   /// sequence, so they wait here until the replay finishes.
-  queue: Vec<builder::Message>,
+  queue: Vec<Message>,
 }
 
 impl Replay {
@@ -83,12 +83,12 @@ impl Replay {
   }
 
   /// Hold an ordinary outbound message until the replay finishes.
-  pub(crate) fn defer(&mut self, msg: builder::Message) {
+  pub(crate) fn defer(&mut self, msg: Message) {
     self.queue.push(msg);
   }
 
   /// Take the deferred messages, leaving the queue empty.
-  pub(crate) fn take_queue(&mut self) -> Vec<builder::Message> {
+  pub(crate) fn take_queue(&mut self) -> Vec<Message> {
     std::mem::take(&mut self.queue)
   }
 

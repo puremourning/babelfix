@@ -10,21 +10,24 @@ use googletest::prelude::*;
 mod matchers;
 mod session;
 
-use fix::schema::FIX_Latest::Fields;
+use fix::schema::tags as Fields;
 use matchers::*;
 use session::raw::{RawMessage, RawPeer};
-use session::{FIX_REPO, SessionOptions, expect_event, expect_events};
+use session::{DICTS, SessionOptions, expect_event, expect_events};
 
-fn fix44() -> Arc<fix::repository::FixVersion> {
-  FIX_REPO.get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<fix::message::Dictionary> {
+  DICTS.get("FIX.4.4").unwrap().clone()
 }
 
-fn order(cl_ord_id: &str) -> anyhow::Result<fix::message::builder::Message> {
-  let mut msg = fix::message::builder::Message::new(fix44(), "D")?;
-  msg.body.set_tag(Fields::ClOrdID, cl_ord_id);
-  msg.body.set_tag(Fields::Symbol, "AAPL");
-  msg.body.set_tag(Fields::Side, "1");
-  msg.body.set_tag(Fields::OrderQty, 100i64);
+fn order(cl_ord_id: &str) -> anyhow::Result<fix::message::Message> {
+  use fix::schema::{codesets, fields::*};
+  let mut msg = fix::message::Message::new(&fix44(), "D");
+  msg
+    .body_mut()
+    .set(ClOrdID, cl_ord_id)
+    .set(Symbol, "AAPL")
+    .set(Side, codesets::Side::Buy)
+    .set(OrderQty, 100u64);
   Ok(msg)
 }
 
@@ -54,9 +57,11 @@ async fn application_messages_round_trip() -> anyhow::Result<()> {
 
   let mut msg = order("order-1")?;
   for account in ["ACCT-A", "ACCT-B"] {
-    let mut alloc = fix::message::builder::Block::new();
-    alloc.set_tag(Fields::AllocAccount, account);
-    msg.body.push_group(Fields::NoAllocs, alloc);
+    msg
+      .body_mut()
+      .group_mut(Fields::NoAllocs)
+      .push()
+      .set(fix::schema::fields::AllocAccount, account);
   }
   client
     .session
@@ -66,13 +71,13 @@ async fn application_messages_round_trip() -> anyhow::Result<()> {
   expect_events! {
     { server(server_session_id) awaiting
       << fix::session::SessionEvent::MessageReceived(
-          builder::body(all!(
-            builder::tag(Fields::ClOrdID, typedvalue::string(eq("order-1"))),
-            builder::tag(Fields::OrderQty, typedvalue::float(eq(100.0))),
-            builder::group(Fields::NoAllocs, 0, builder::tag(
-              Fields::AllocAccount, typedvalue::string(eq("ACCT-A")))),
-            builder::group(Fields::NoAllocs, 1, builder::tag(
-              Fields::AllocAccount, typedvalue::string(eq("ACCT-B")))),
+          block::body(all!(
+            block::tag(Fields::ClOrdID, value::string(eq("order-1"))),
+            block::tag(Fields::OrderQty, value::float(eq(100.0))),
+            block::group(Fields::NoAllocs, 0, block::tag(
+              Fields::AllocAccount, value::string(eq("ACCT-A")))),
+            block::group(Fields::NoAllocs, 1, block::tag(
+              Fields::AllocAccount, value::string(eq("ACCT-B")))),
           ))) };
   };
 
@@ -88,8 +93,8 @@ async fn application_messages_round_trip() -> anyhow::Result<()> {
   expect_events! {
     { client awaiting
       << fix::session::SessionEvent::MessageReceived(
-          builder::body(builder::tag(
-            Fields::ClOrdID, typedvalue::string(eq("order-2"))))) };
+          block::body(block::tag(
+            Fields::ClOrdID, value::string(eq("order-2"))))) };
   };
 
   Ok(())
@@ -118,13 +123,13 @@ async fn session_owns_the_sequence_and_identity_header_fields()
     .await?;
 
   let mut msg = order("order-1")?;
-  msg.header.set_tag(Fields::MsgSeqNum, 999i64);
-  msg.header.set_tag(Fields::PossDupFlag, "Y");
-  msg.header.set_tag(Fields::SenderCompID, "BOGUS");
-  msg.header.set_tag(Fields::TargetCompID, "BOGUS");
   msg
-    .header
-    .set_tag(Fields::SendingTime, "19700101-00:00:00.000");
+    .header_mut()
+    .set_raw(Fields::MsgSeqNum, b"999")
+    .set_raw(Fields::PossDupFlag, b"Y")
+    .set_raw(Fields::SenderCompID, b"BOGUS")
+    .set_raw(Fields::TargetCompID, b"BOGUS")
+    .set_raw(Fields::SendingTime, b"19700101-00:00:00.000");
 
   server
     .lock()
@@ -224,8 +229,8 @@ async fn a_sequence_gap_produces_exactly_one_resend_request()
   expect_events! {
     { server(server_session_id) awaiting
       << fix::session::SessionEvent::MessageReceived(
-          builder::body(builder::tag(
-            Fields::ClOrdID, typedvalue::string(eq("after-gap"))))) };
+          block::body(block::tag(
+            Fields::ClOrdID, value::string(eq("after-gap"))))) };
   };
 
   Ok(())
@@ -328,8 +333,8 @@ async fn session_layer_messages_are_not_delivered_to_the_application()
   expect_events! {
     { server(server_session_id) awaiting
       << fix::session::SessionEvent::MessageReceived(
-          builder::body(builder::tag(
-            Fields::ClOrdID, typedvalue::string(eq("after-reject"))))) };
+          block::body(block::tag(
+            Fields::ClOrdID, value::string(eq("after-reject"))))) };
   };
 
   let events = {
@@ -395,13 +400,10 @@ async fn poss_resend_is_passed_through_to_the_application() -> anyhow::Result<()
     all!(
       // Boolean-valued fields whose Orchestra type is a code set rather than
       // the primitive Boolean arrive as strings.
-      builder::header(builder::tag(
-        Fields::PossResend,
-        typedvalue::string(eq("Y"))
-      )),
-      builder::body(builder::tag(
+      block::header(block::tag(Fields::PossResend, value::string(eq("Y")))),
+      block::body(block::tag(
         Fields::ClOrdID,
-        typedvalue::string(eq("maybe-seen-before"))
+        value::string(eq("maybe-seen-before"))
       )),
     )
   )

@@ -15,17 +15,17 @@ use googletest::prelude::*;
 mod matchers;
 mod session;
 
-use fix::schema::FIX_Latest::Fields;
+use fix::schema::tags as Fields;
 use matchers::*;
 use session::raw::{RawMessage, RawPeer};
-use session::{FIX_REPO, SessionOptions, expect_event, expect_events};
+use session::{DICTS, SessionOptions, expect_event, expect_events};
 
 /// Short enough that three intervals elapse well inside a test, long enough
 /// that scheduling jitter on a loaded machine does not reorder events.
 const HEARTBEAT: Duration = Duration::from_millis(200);
 
-fn fix44() -> Arc<fix::repository::FixVersion> {
-  FIX_REPO.get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<fix::message::Dictionary> {
+  DICTS.get("FIX.4.4").unwrap().clone()
 }
 
 async fn settled_peer(
@@ -125,9 +125,9 @@ async fn heartbeat_with_the_wrong_test_req_id_does_not_complete_recovery()
   peer.logon(Duration::from_secs(30)).await?;
 
   let ack = peer.recv().await?;
-  anyhow::ensure!(ack.get_type() == "A");
+  anyhow::ensure!(ack.msg_type() == "A");
   let test_request = peer.recv().await?;
-  anyhow::ensure!(test_request.get_type() == "1");
+  anyhow::ensure!(test_request.msg_type() == "1");
 
   peer
     .send(RawMessage::new("0").body(Fields::TestReqID, "not-the-one"))
@@ -192,11 +192,12 @@ async fn outbound_traffic_suppresses_heartbeats() -> anyhow::Result<()> {
     async move {
       for i in 0..5 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let mut msg =
-          fix::message::builder::Message::new(fix44(), "D").unwrap();
-        msg.body.set_tag(Fields::ClOrdID, format!("order-{i}"));
-        msg.body.set_tag(Fields::Symbol, "AAPL");
-        msg.body.set_tag(Fields::Side, "1");
+        let mut msg = fix::message::Message::new(&fix44(), "D");
+        msg
+          .body_mut()
+          .set_raw(Fields::ClOrdID, format!("order-{i}").as_bytes())
+          .set_raw(Fields::Symbol, b"AAPL")
+          .set_raw(Fields::Side, b"1");
         let _ = server
           .lock()
           .await
@@ -214,7 +215,7 @@ async fn outbound_traffic_suppresses_heartbeats() -> anyhow::Result<()> {
   while std::time::Instant::now() < deadline {
     let msg = peer.recv().await?;
     anyhow::ensure!(
-      msg.get_type() != "0",
+      msg.msg_type() != "0",
       "Heartbeat emitted while application traffic was flowing"
     );
   }

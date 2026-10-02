@@ -9,18 +9,22 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use babelfix_core as fix;
-use fix::message::builder;
-use fix::schema::FIX_Latest::Fields;
+use fix::message::{Dictionaries, Dictionary, Message};
+use fix::schema::codesets::EncryptMethod;
+use fix::schema::fields::{
+  EncryptMethod, HeartBtInt, MsgSeqNum, SenderCompID, TargetCompID,
+};
+use fix::schema::tags;
 use fix::session::{
   AcceptorHandshake, Event, InitiatorHandshake, Progress, Session,
   SessionIdentifier, SessionOutput,
 };
 
-static FIX_REPO: LazyLock<Arc<fix::repository::FixRepository>> =
-  LazyLock::new(|| Arc::new(fix::repository::orchestrate().unwrap()));
+static DICTS: LazyLock<Arc<Dictionaries>> =
+  LazyLock::new(|| Dictionaries::standard().unwrap());
 
-fn fix44() -> Arc<fix::repository::FixVersion> {
-  FIX_REPO.get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<Dictionary> {
+  DICTS.get("FIX.4.4").unwrap().clone()
 }
 
 const LOGON_TIMEOUT: Duration = Duration::from_secs(30);
@@ -35,23 +39,24 @@ struct Trace {
 impl SessionOutput for Trace {
   fn transmit(
     &mut self,
-    msg: &mut fix::FixMessage,
+    msg: fix::session::Unstamped<'_>,
     _session: &Session,
   ) -> fix::Result<()> {
     self.clock += 1;
     let when = chrono::DateTime::from_timestamp(1_700_000_000, self.clock)
       .expect("valid timestamp");
-    fix::codec::stamp_sending_time(msg, when, Default::default())
+    msg.stamp(when);
+    Ok(())
   }
 
   fn event(&mut self, event: Event<'_>) -> fix::Result<()> {
     self.events.push(match event {
       Event::ConnectionEstablished => "ConnectionEstablished".into(),
       Event::RawMessageReceived(m, _) => {
-        format!("RawMessageReceived({})", m.get_type())
+        format!("RawMessageReceived({})", m.msg_type())
       }
       Event::RawMessageSent(m, _) => {
-        format!("RawMessageSent({})", m.get_type())
+        format!("RawMessageSent({})", m.msg_type())
       }
       Event::SessionState(_) => "SessionState".into(),
       Event::MessageReceived(_) => "MessageReceived".into(),
@@ -70,19 +75,21 @@ fn session() -> Session {
 }
 
 /// A frame as it would arrive from the peer named `from`, addressed to `to`.
-fn frame(msg_type: &str, seq: u32, from: &str, to: &str) -> fix::FixMessage {
-  let mut msg = builder::Message::new(fix44(), msg_type).unwrap();
-  msg.header.set_tag(Fields::MsgSeqNum, seq);
-  msg.header.set_tag(Fields::SenderCompID, from);
-  msg.header.set_tag(Fields::TargetCompID, to);
+fn frame(msg_type: &str, seq: u32, from: &str, to: &str) -> Message {
+  let mut msg = Message::new(&fix44(), msg_type);
   msg
-    .header
-    .set_tag(Fields::SendingTime, "20231114-22:13:20.000000000");
+    .header_mut()
+    .set(MsgSeqNum, seq)
+    .set(SenderCompID, from)
+    .set(TargetCompID, to)
+    .set_raw(tags::SendingTime, b"20231114-22:13:20.000000000");
   if msg_type == "A" {
-    msg.body.set_tag(Fields::HeartBtInt, "30");
-    msg.body.set_tag(Fields::EncryptMethod, "0");
+    msg
+      .body_mut()
+      .set(HeartBtInt, 30u64)
+      .set(EncryptMethod, EncryptMethod::None);
   }
-  msg.as_message().unwrap()
+  Message::parse(&fix44(), msg.to_bytes()).unwrap()
 }
 
 fn id(us: &str, them: &str) -> SessionIdentifier {
@@ -176,11 +183,8 @@ fn the_peer_logon_is_available_before_accepting() {
   hs.identify(frame("A", 1, "CLIENT", "SERVER")).unwrap();
 
   let logon = hs.peer_logon().expect("the Logon that named the session");
-  assert_eq!(logon.fix_message.msg_type, "A");
-  assert_eq!(
-    logon.body.tag(Fields::HeartBtInt).map(|v| v.as_string()),
-    Some("30".to_string())
-  );
+  assert_eq!(logon.msg_type(), "A");
+  assert_eq!(logon.body().get(HeartBtInt).unwrap(), Some(30));
 }
 
 /// A first frame that is not a Logon is refused before anything is derived

@@ -94,6 +94,22 @@ impl Message {
     }
   }
 
+  /// Write `SendingTime(52)`, in place when the header already holds a slot of
+  /// the right width (the session reserves one), so stamping allocates nothing
+  /// and moves nothing.
+  pub(crate) fn stamp_sending_time(&mut self, value: &[u8]) {
+    let (start, end) = self.region_range(Region::Header);
+    if let Some(i) = self.find_in(start, end, 0, 52, None) {
+      let e = self.tape[i as usize];
+      if e.seg == Seg::Arena && e.len as usize == value.len() {
+        self.arena[e.value_range()].copy_from_slice(value);
+        self.clean = false;
+        return;
+      }
+    }
+    self.header_mut().set_raw(52, value);
+  }
+
   // -------------------------------------------------------------------------
   // Tape surgery
   // -------------------------------------------------------------------------

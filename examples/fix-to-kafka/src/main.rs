@@ -138,7 +138,11 @@ mod storage {
           heartbeat_interval: value.heartbeat_interval,
           next_in_seq_num: value.next_in_seq_num,
           next_out_seq_num: value.next_out_seq_num,
-          fix_version: app.repo.get_version(&session_id.begin_string).unwrap(),
+          dict: app
+            .dicts
+            .for_begin_string(session_id.begin_string.as_bytes())
+            .unwrap()
+            .clone(),
           time_precision: Default::default(),
         })
       })
@@ -223,7 +227,7 @@ impl Config {
 }
 
 struct App {
-  repo: Arc<fix::repository::FixRepository>,
+  dicts: Arc<fix::message::Dictionaries>,
   db: kv::Store,
   producer: Producer,
 
@@ -233,7 +237,7 @@ struct App {
 impl App {
   fn new(
     config: Config,
-    repo: Arc<fix::repository::FixRepository>,
+    dicts: Arc<fix::message::Dictionaries>,
     producer: Producer,
   ) -> anyhow::Result<Self> {
     let db = kv::Store::new(kv::Config::new(config.db_path))?;
@@ -247,7 +251,7 @@ impl App {
     }
 
     Ok(Self {
-      repo,
+      dicts,
       db,
       producer,
       session_tasks: std::sync::Mutex::new(Vec::new()),
@@ -257,26 +261,24 @@ impl App {
   async fn produce(
     &self,
     session_handle: &fix::session::SessionHandle,
-    fix_message: fix::message::FixMessage,
+    fix_message: fix::message::Message,
   ) {
+    use fix::schema::fields::{MsgSeqNum, SenderCompID};
+
     let topic = format!(
       "fix-{}-{}-{}",
       session_handle.session_id.begin_string,
       session_handle.session_id.sender_comp_id,
       session_handle.session_id.target_comp_id
     );
+    let header = fix_message.header();
     let key = bytes::Bytes::from(format!(
       "{}-{}",
-      fix_message
-        .get_tag(fix::schema::FIX_Latest::Fields::SenderCompID)
-        .unwrap()
-        .as_str(&fix_message.data),
-      fix_message
-        .get_tag(fix::schema::FIX_Latest::Fields::MsgSeqNum)
-        .unwrap()
-        .as_str(&fix_message.data),
+      header.get(SenderCompID).ok().flatten().unwrap_or_default(),
+      header.get(MsgSeqNum).ok().flatten().unwrap_or_default(),
     ));
-    let payload = fix_message.into_bytes();
+    // The exact bytes received, or the message's encoding if it was built.
+    let payload = fix_message.to_bytes();
     self
       .producer
       .produce(ProduceMessage {
@@ -326,15 +328,15 @@ async fn main() -> anyhow::Result<()> {
     .build()
     .await;
 
-  let repo = Arc::new(fix::repository::orchestrate()?);
+  let dicts = fix::message::Dictionaries::standard()?;
   let mut endpoint = fix::endpoint::serve(
     (config.server.host.clone(), config.server.port),
-    Arc::clone(&repo),
+    Arc::clone(&dicts),
     fix::endpoint::EndpointConfig::default(),
   )
   .await?;
 
-  let app = Arc::new(App::new(config, repo, producer)?);
+  let app = Arc::new(App::new(config, dicts, producer)?);
 
   let token = tokio_util::sync::CancellationToken::new();
 

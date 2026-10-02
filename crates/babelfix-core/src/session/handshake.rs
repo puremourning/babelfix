@@ -27,7 +27,7 @@
 //! # use babelfix_core::session::{AcceptorHandshake, SessionOutput, Session};
 //! # fn accept(
 //! #   out: &mut impl SessionOutput,
-//! #   frame: babelfix_core::FixMessage,
+//! #   frame: babelfix_core::message::Message,
 //! #   lookup: impl Fn(&babelfix_core::session::SessionIdentifier) -> Session,
 //! # ) -> babelfix_core::Result<()> {
 //! let mut hs = AcceptorHandshake::new(Duration::from_secs(30), Instant::now());
@@ -50,9 +50,11 @@ use tracing::debug;
 use super::{
   Event, Progress, Session, SessionIdentifier, SessionOutput, SessionState,
 };
-use crate::message::{FixMessage, builder};
-use crate::repository::{FieldBlock, FixVersion};
-use crate::schema::FIX_Latest::Fields;
+use crate::message::Message;
+use crate::repository::FieldBlock;
+use crate::schema::codesets::EncryptMethod;
+use crate::schema::fields::*;
+use crate::schema::{msg_type, tags};
 use crate::{Error, Result};
 
 /// A completed logon exchange: the session, and whether it survived it.
@@ -69,13 +71,12 @@ pub struct Established {
   pub progress: Progress,
 }
 
-/// The peer's Logon, in both the forms still needed: parsed, to feed the
-/// session, and as it arrived, to report as `RawMessageReceived`.
+/// The peer's Logon, held until the application accepts the session it
+/// names.
 #[derive(Debug)]
 struct PendingLogon {
   session_id: SessionIdentifier,
-  logon: builder::Message,
-  raw: FixMessage,
+  logon: Message,
 }
 
 // ---------------------------------------------------------------------------
@@ -127,14 +128,13 @@ impl InitiatorHandshake {
   /// The peer's Logon completes the exchange.
   pub fn on_peer_logon(
     mut self,
-    msg: FixMessage,
+    logon: Message,
     now: Instant,
     out: &mut impl SessionOutput,
   ) -> Result<Established> {
-    let logon = builder::Message::from_message(&msg)?;
     expect_logon(&logon)?;
 
-    out.event(Event::RawMessageReceived(&msg, self.state.session()))?;
+    out.event(Event::RawMessageReceived(&logon, self.state.session()))?;
     let progress = self.state.start(logon, now, out)?;
     Ok(Established {
       state: self.state,
@@ -180,14 +180,13 @@ impl AcceptorHandshake {
   /// is no session, so there is nothing an event could be *about* — and a first
   /// frame that turns out not to be a Logon must be refused without the
   /// application having been told anything about it at all.
-  pub fn identify(&mut self, msg: FixMessage) -> Result<&SessionIdentifier> {
+  pub fn identify(&mut self, logon: Message) -> Result<&SessionIdentifier> {
     if self.pending.is_some() {
       return Err(Error::protocol_violation(
         "peer sent a second message before the session was accepted",
       ));
     }
 
-    let logon = builder::Message::from_message(&msg)?;
     // Checked before anything is derived from the message, so a peer opening
     // with garbage cannot cause an identity to be read out of it.
     expect_logon(&logon)?;
@@ -198,11 +197,7 @@ impl AcceptorHandshake {
     Ok(
       &self
         .pending
-        .insert(Box::new(PendingLogon {
-          session_id,
-          logon,
-          raw: msg,
-        }))
+        .insert(Box::new(PendingLogon { session_id, logon }))
         .session_id,
     )
   }
@@ -216,7 +211,7 @@ impl AcceptorHandshake {
   /// The peer's Logon, for applications that authenticate on it —
   /// `Username`/`Password`, or whatever else the peer put in there. Available
   /// between [`identify`](Self::identify) and [`accept`](Self::accept).
-  pub fn peer_logon(&self) -> Option<&builder::Message> {
+  pub fn peer_logon(&self) -> Option<&Message> {
     self.pending.as_ref().map(|p| &p.logon)
   }
 
@@ -232,11 +227,7 @@ impl AcceptorHandshake {
         "accept called before the peer identified itself",
       ));
     };
-    let PendingLogon {
-      session_id,
-      logon,
-      raw,
-    } = *pending;
+    let PendingLogon { session_id, logon } = *pending;
 
     // Only now is there a session to attach anything to.
     out.event(Event::ConnectionEstablished)?;
@@ -247,7 +238,7 @@ impl AcceptorHandshake {
     // persisting from these events must see what arrived before what it
     // answered with, or a crash between the two leaves it believing it sent a
     // Logon in response to nothing.
-    out.event(Event::RawMessageReceived(&raw, state.session()))?;
+    out.event(Event::RawMessageReceived(&logon, state.session()))?;
 
     let reply = logon_message(state.session())?;
     state.send_logon(reply, out)?;
@@ -274,27 +265,20 @@ fn expired(deadline: Instant, now: Instant) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Build a Logon carrying the session's negotiated settings.
-pub fn logon_message(session: &Session) -> Result<builder::Message> {
-  let fix_version: &std::sync::Arc<FixVersion> = &session.fix_version;
-  let mut logon = builder::Message::new(fix_version.clone(), "A")?;
+pub fn logon_message(session: &Session) -> Result<Message> {
+  let fix = session.dict.version();
+  let mut logon = Message::new(&session.dict, msg_type::Logon);
+  let mut body = logon.body_mut();
 
-  logon.body.set_tag(
-    Fields::HeartBtInt,
-    session.heartbeat_interval.as_secs().to_string(),
-  );
-  if logon
-    .fix_message
-    .is_member(fix_version.as_ref(), Fields::DefaultApplVerID)
+  body.set(HeartBtInt, session.heartbeat_interval.as_secs());
+  if fix
+    .get_message("A")
+    .is_some_and(|m| m.is_member(fix, tags::DefaultApplVerID))
   {
-    logon.body.set_tag(
-      Fields::DefaultApplVerID,
-      "10", // TODO: Default application version: FIXLatest
-    );
+    // TODO: Default application version: FIXLatest
+    body.set_raw(DefaultApplVerID, b"10");
   }
-  logon.body.set_tag(
-    Fields::EncryptMethod,
-    "0", // No encryption
-  );
+  body.set(EncryptMethod, EncryptMethod::None);
   Ok(logon)
 }
 
@@ -302,35 +286,34 @@ pub fn logon_message(session: &Session) -> Result<builder::Message> {
 ///
 /// The peer's `SenderCompID` is our `TargetCompID` and vice versa — the
 /// identity is always expressed from the point of view of the side holding it.
-pub fn session_id_from_logon(
-  logon: &builder::Message,
-) -> Result<SessionIdentifier> {
+pub fn session_id_from_logon(logon: &Message) -> Result<SessionIdentifier> {
   Ok(SessionIdentifier {
-    begin_string: tag(logon, Fields::BeginString, "BeginString")?,
-    sender_comp_id: tag(logon, Fields::TargetCompID, "TargetCompID")?,
-    target_comp_id: tag(logon, Fields::SenderCompID, "SenderCompID")?,
+    begin_string: logon.begin_string().to_owned(),
+    sender_comp_id: comp_id(logon, TargetCompID)?,
+    target_comp_id: comp_id(logon, SenderCompID)?,
   })
 }
 
 /// Reject anything that is not a Logon(35=A).
-pub fn expect_logon(msg: &builder::Message) -> Result<()> {
-  if msg.fix_message.msg_type.as_str() != "A" {
+pub fn expect_logon(msg: &Message) -> Result<()> {
+  if msg.msg_type() != "A" {
     return Err(Error::protocol_violation(format!(
       "First message was not a logon, got: {}",
-      msg.fix_message.msg_type
+      msg.msg_type()
     )));
   }
   Ok(())
 }
 
-fn tag(msg: &builder::Message, tag: u32, name: &str) -> Result<String> {
-  Ok(
-    msg
-      .header
-      .tag(tag)
-      .ok_or_else(|| {
-        Error::protocol_violation(format!("Logon message missing {name}"))
-      })?
-      .as_string(),
-  )
+fn comp_id(
+  msg: &Message,
+  field: crate::message::Field<crate::message::datatypes::Str>,
+) -> Result<String> {
+  let value = msg.header().get(field)?.ok_or_else(|| {
+    Error::protocol_violation(format!(
+      "Logon message missing {}",
+      msg.dict().field_name(field.tag()).unwrap_or("CompID")
+    ))
+  })?;
+  Ok(value.to_str().into_owned())
 }

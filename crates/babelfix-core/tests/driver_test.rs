@@ -11,17 +11,21 @@ use std::time::{Duration, Instant};
 use babelfix_core as fix;
 use fix::codec::FixDecoder;
 use fix::driver::SessionDriver;
-use fix::message::builder;
-use fix::schema::FIX_Latest::Fields;
+use fix::message::{Dictionaries, Dictionary, Message};
+use fix::schema::codesets::{EncryptMethod, Side};
+use fix::schema::fields::{
+  ClOrdID, EncryptMethod, HeartBtInt, OrderQty, Side, Symbol,
+};
+use fix::schema::tags;
 use fix::session::{
   Command, Event, Progress, Session, SessionIdentifier, SessionState,
 };
 
-static FIX_REPO: LazyLock<Arc<fix::repository::FixRepository>> =
-  LazyLock::new(|| Arc::new(fix::repository::orchestrate().unwrap()));
+static DICTS: LazyLock<Arc<Dictionaries>> =
+  LazyLock::new(|| Dictionaries::standard().unwrap());
 
-fn fix44() -> Arc<fix::repository::FixVersion> {
-  FIX_REPO.get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<Dictionary> {
+  DICTS.get("FIX.4.4").unwrap().clone()
 }
 
 const DELIM: u8 = b'|';
@@ -48,11 +52,10 @@ impl Seen {
       match event {
         Event::MessageReceived(msg) => {
           self.app_messages.push(
-            msg
-              .body
-              .tag(Fields::ClOrdID)
-              .map(|v| v.as_string())
-              .unwrap_or_default(),
+            String::from_utf8_lossy(
+              msg.body().raw(tags::ClOrdID).unwrap_or_default(),
+            )
+            .into_owned(),
           );
         }
         Event::RecoveryCompleted => self.recovery_completed = true,
@@ -68,19 +71,23 @@ impl Seen {
   }
 }
 
-fn logon_message() -> builder::Message {
-  let mut msg = builder::Message::new(fix44(), "A").unwrap();
-  msg.body.set_tag(Fields::HeartBtInt, "30");
-  msg.body.set_tag(Fields::EncryptMethod, "0");
+fn logon_message() -> Message {
+  let mut msg = Message::new(&fix44(), "A");
+  msg
+    .body_mut()
+    .set(HeartBtInt, 30u64)
+    .set(EncryptMethod, EncryptMethod::None);
   msg
 }
 
-fn order(cl_ord_id: &str) -> builder::Message {
-  let mut msg = builder::Message::new(fix44(), "D").unwrap();
-  msg.body.set_tag(Fields::ClOrdID, cl_ord_id);
-  msg.body.set_tag(Fields::Symbol, "AAPL");
-  msg.body.set_tag(Fields::Side, "1");
-  msg.body.set_tag(Fields::OrderQty, 100i64);
+fn order(cl_ord_id: &str) -> Message {
+  let mut msg = Message::new(&fix44(), "D");
+  msg
+    .body_mut()
+    .set(ClOrdID, cl_ord_id)
+    .set(Symbol, "AAPL")
+    .set(Side, Side::Buy)
+    .set(OrderQty, 100u64);
   msg
 }
 
@@ -93,7 +100,7 @@ fn driver(us: &str, them: &str) -> SessionDriver {
   let mut session = Session::new(fix44());
   session.heartbeat_interval = HEARTBEAT;
   let state = SessionState::new(session_id, session, Instant::now());
-  SessionDriver::new(state, FIX_REPO.clone(), Some(DELIM), clock)
+  SessionDriver::new(state, DICTS.clone(), Some(DELIM), clock)
 }
 
 /// Take everything a driver has queued for the wire.
@@ -107,14 +114,14 @@ fn take_wire(d: &mut SessionDriver) -> Vec<u8> {
 /// Decode exactly one message off the front of `bytes`, returning it and the
 /// remainder. Stands in for the part of the handshake that still lives outside
 /// the state machine: reading the first frame to learn who the peer is.
-fn split_one(bytes: &[u8]) -> (builder::Message, Vec<u8>) {
-  let mut decoder = FixDecoder::new(FIX_REPO.clone(), Some(DELIM));
+fn split_one(bytes: &[u8]) -> (Message, Vec<u8>) {
+  let mut decoder = FixDecoder::new(DICTS.clone(), Some(DELIM));
   let mut buf = bytes::BytesMut::from(bytes);
   let msg = decoder
     .decode(&mut buf)
     .expect("decodes")
     .expect("a complete message");
-  (builder::Message::from_message(&msg).unwrap(), buf.to_vec())
+  (msg, buf.to_vec())
 }
 
 /// Two logged-on drivers, plus the instant they started.

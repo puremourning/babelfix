@@ -10,22 +10,25 @@ use googletest::prelude::*;
 mod matchers;
 mod session;
 
-use fix::schema::FIX_Latest::Fields;
+use fix::schema::tags as Fields;
 use matchers::*;
 use session::raw::{RawMessage, RawPeer};
-use session::{FIX_REPO, SessionOptions, expect_event, expect_events};
+use session::{DICTS, SessionOptions, expect_event, expect_events};
 
-fn fix44() -> Arc<fix::repository::FixVersion> {
-  FIX_REPO.get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<fix::message::Dictionary> {
+  DICTS.get("FIX.4.4").unwrap().clone()
 }
 
 /// An application message the session under test can relay.
-fn order(cl_ord_id: &str) -> anyhow::Result<fix::message::builder::Message> {
-  let mut msg = fix::message::builder::Message::new(fix44(), "D")?;
-  msg.body.set_tag(Fields::ClOrdID, cl_ord_id);
-  msg.body.set_tag(Fields::Symbol, "AAPL");
-  msg.body.set_tag(Fields::Side, "1");
-  msg.body.set_tag(Fields::OrderQty, 100i64);
+fn order(cl_ord_id: &str) -> anyhow::Result<fix::message::Message> {
+  use fix::schema::{codesets, fields::*};
+  let mut msg = fix::message::Message::new(&fix44(), "D");
+  msg
+    .body_mut()
+    .set(ClOrdID, cl_ord_id)
+    .set(Symbol, "AAPL")
+    .set(Side, codesets::Side::Buy)
+    .set(OrderQty, 100u64);
   Ok(msg)
 }
 
@@ -34,17 +37,17 @@ fn order(cl_ord_id: &str) -> anyhow::Result<fix::message::builder::Message> {
 fn replayed(
   msg_type: &str,
   seq_num: u64,
-) -> anyhow::Result<fix::message::builder::Message> {
+) -> anyhow::Result<fix::message::Message> {
   let mut msg = if msg_type == "D" {
     order(&format!("order-{seq_num}"))?
   } else {
-    fix::message::builder::Message::new(fix44(), msg_type)?
+    fix::message::Message::new(&fix44(), msg_type)
   };
-  msg.header.set_tag(Fields::MsgSeqNum, seq_num);
   // The original SendingTime, which the session moves to OrigSendingTime.
   msg
-    .header
-    .set_tag(Fields::SendingTime, "20200101-00:00:00.000");
+    .header_mut()
+    .set(fix::schema::fields::MsgSeqNum, seq_num)
+    .set_raw(Fields::SendingTime, b"20200101-00:00:00.000");
   Ok(msg)
 }
 
@@ -308,7 +311,7 @@ async fn inbound_gap_fill_advances_the_expected_sequence_number()
   peer.logon(Duration::from_secs(30)).await?;
 
   let ack = peer.recv().await?;
-  anyhow::ensure!(ack.get_type() == "A");
+  anyhow::ensure!(ack.msg_type() == "A");
   let resend_request = peer.recv().await?;
   verify_that!(
     &resend_request,
@@ -351,8 +354,8 @@ async fn inbound_gap_fill_advances_the_expected_sequence_number()
   expect_events! {
     { server(server_session_id) awaiting
       << fix::session::SessionEvent::MessageReceived(
-          builder::body(builder::tag(
-            Fields::ClOrdID, typedvalue::string(eq("after-gap"))))) };
+          block::body(block::tag(
+            Fields::ClOrdID, value::string(eq("after-gap"))))) };
   };
 
   Ok(())
@@ -482,12 +485,12 @@ async fn resend_request_inside_a_gap_is_still_serviced() -> anyhow::Result<()> {
   peer.logon(Duration::from_secs(30)).await?;
 
   let ack = peer.recv().await?;
-  anyhow::ensure!(ack.get_type() == "A");
+  anyhow::ensure!(ack.msg_type() == "A");
   let our_resend_request = peer.recv().await?;
   verify_that!(&our_resend_request, message::tag(Fields::MsgType, eq("2")))
     .map_err(|e| anyhow::anyhow!("{e}"))?;
   let test_request = peer.recv().await?;
-  anyhow::ensure!(test_request.get_type() == "1");
+  anyhow::ensure!(test_request.msg_type() == "1");
 
   // The peer needs a resend too, and its request falls inside the gap the
   // acceptor is still recovering.
@@ -651,8 +654,8 @@ async fn out_of_sequence_gap_fill_does_not_skip_messages() -> anyhow::Result<()>
   expect_events! {
     { server(server_session_id) awaiting
       << fix::session::SessionEvent::MessageReceived(
-          builder::body(builder::tag(
-            Fields::ClOrdID, typedvalue::string(eq("after-gap"))))) };
+          block::body(block::tag(
+            Fields::ClOrdID, value::string(eq("after-gap"))))) };
   };
 
   Ok(())
@@ -886,8 +889,8 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
 
   // Replaying an admin message gap fills over it: session layer messages are
   // never retransmitted.
-  let mut msg = fix::message::builder::Message::new(fix44(), "A")?;
-  msg.header.set_tag(Fields::MsgSeqNum, 1);
+  let mut msg = fix::message::Message::new(&fix44(), "A");
+  msg.header_mut().set(fix::schema::fields::MsgSeqNum, 1u64);
   client
     .session
     .command(fix::session::SessionCommand::Replay(msg))

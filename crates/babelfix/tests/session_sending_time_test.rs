@@ -24,31 +24,36 @@ use googletest::prelude::*;
 mod matchers;
 mod session;
 
-use fix::schema::FIX_Latest::Fields;
+use fix::schema::tags as Fields;
 use fix::time::TimePrecision;
 use matchers::*;
 use session::raw::{RawMessage, RawPeer};
-use session::{FIX_REPO, SessionOptions};
+use session::{DICTS, SessionOptions};
 
-fn fix44() -> Arc<fix::repository::FixVersion> {
-  FIX_REPO.get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<fix::message::Dictionary> {
+  DICTS.get("FIX.4.4").unwrap().clone()
 }
 
-fn order(cl_ord_id: &str) -> anyhow::Result<fix::message::builder::Message> {
-  let mut msg = fix::message::builder::Message::new(fix44(), "D")?;
-  msg.body.set_tag(Fields::ClOrdID, cl_ord_id);
-  msg.body.set_tag(Fields::Symbol, "AAPL");
-  msg.body.set_tag(Fields::Side, "1");
-  msg.body.set_tag(Fields::OrderQty, 100i64);
+fn order(cl_ord_id: &str) -> anyhow::Result<fix::message::Message> {
+  use fix::schema::{codesets, fields::*};
+  let mut msg = fix::message::Message::new(&fix44(), "D");
+  msg
+    .body_mut()
+    .set(ClOrdID, cl_ord_id)
+    .set(Symbol, "AAPL")
+    .set(Side, codesets::Side::Buy)
+    .set(OrderQty, 100u64);
   Ok(msg)
 }
 
 /// Pull `SendingTime` off a message as it appeared on the wire.
-fn sending_time(msg: &fix::FixMessage) -> String {
+fn sending_time(msg: &fix::message::Message) -> String {
   msg
-    .get_tag(Fields::SendingTime)
+    .header()
+    .get(fix::schema::fields::SendingTime)
+    .unwrap()
     .expect("every outbound message carries SendingTime")
-    .to_string(&msg.data)
+    .to_string()
 }
 
 /// `YYYYMMDD-HH:MM:SS.` is 18 characters; the rest is the fraction.
@@ -145,9 +150,9 @@ async fn each_message_is_stamped_individually() -> anyhow::Result<()> {
   peer.logon(std::time::Duration::from_secs(30)).await?;
 
   let logon_ack = peer.recv().await?;
-  anyhow::ensure!(logon_ack.get_type() == "A", "expected a Logon ack");
+  anyhow::ensure!(logon_ack.msg_type() == "A", "expected a Logon ack");
   let test_request = peer.recv().await?;
-  anyhow::ensure!(test_request.get_type() == "1", "expected a TestRequest");
+  anyhow::ensure!(test_request.msg_type() == "1", "expected a TestRequest");
 
   let first = sending_time(&logon_ack);
   let second = sending_time(&test_request);

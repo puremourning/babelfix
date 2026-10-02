@@ -50,12 +50,12 @@ use bytes::BytesMut;
 use chrono::{DateTime, Utc};
 
 use crate::codec::{FixDecoder, FixEncoder};
-use crate::message::{FixMessage, builder};
+use crate::message::{Dictionaries, Message};
 use crate::session::{
   AcceptorHandshake, Command, Event, EventSink, InitiatorHandshake, Progress,
-  Session, SessionIdentifier, SessionOutput, SessionState,
+  Session, SessionIdentifier, SessionOutput, SessionState, Unstamped,
 };
-use crate::{Error, Result, repository};
+use crate::{Error, Result};
 
 /// Reads the wall clock for `SendingTime`.
 ///
@@ -74,13 +74,10 @@ struct DriverOutput<'a, E> {
 }
 
 impl<E: EventSink> SessionOutput for DriverOutput<'_, E> {
-  fn transmit(
-    &mut self,
-    msg: &mut FixMessage,
-    _session: &Session,
-  ) -> Result<()> {
+  fn transmit(&mut self, msg: Unstamped<'_>, _session: &Session) -> Result<()> {
     // One clock read per message, immediately before the bytes exist.
-    self.encoder.encode_stamped(msg, (self.clock)(), self.bytes)
+    let msg = msg.stamp((self.clock)());
+    self.encoder.encode(msg, self.bytes)
   }
 
   fn event(&mut self, event: Event<'_>) -> Result<()> {
@@ -91,7 +88,8 @@ impl<E: EventSink> SessionOutput for DriverOutput<'_, E> {
 /// What a driver needs besides the session itself.
 #[derive(Clone)]
 pub struct DriverConfig {
-  pub repo: std::sync::Arc<repository::FixRepository>,
+  /// The FIX versions a peer may speak, compiled once and shared.
+  pub dicts: std::sync::Arc<Dictionaries>,
   /// Field separator; `None` means SOH.
   pub delimiter: Option<u8>,
   /// Read once per outbound message, to stamp `SendingTime`.
@@ -166,14 +164,12 @@ impl InitiatorDriver {
     sink: &mut impl EventSink,
   ) -> Result<Self> {
     // The version is already known: it is the one we are asking for.
-    let decoder = FixDecoder::with_version(
-      config.repo.clone(),
+    let decoder = FixDecoder::with_dictionary(
+      config.dicts.clone(),
       config.delimiter,
-      session.fix_version.clone(),
+      session.dict.clone(),
     );
     let mut plumbing = Plumbing::new(config, decoder);
-    plumbing.encoder = FixEncoder::new(plumbing.config.delimiter)
-      .with_precision(session.time_precision);
 
     let logon_timeout = plumbing.config.logon_timeout;
     let handshake = {
@@ -240,7 +236,7 @@ impl InitiatorDriver {
       let config = self.plumbing.config.clone();
       let spare = Plumbing::new(
         config.clone(),
-        FixDecoder::new(config.repo.clone(), config.delimiter),
+        FixDecoder::new(config.dicts.clone(), config.delimiter),
       );
       let plumbing = std::mem::replace(&mut self.plumbing, spare);
       return Ok(Some(EstablishedDriver {
@@ -294,7 +290,7 @@ pub struct AcceptorDriver {
 impl AcceptorDriver {
   /// Answer a connection. Nothing is sent until the peer identifies itself.
   pub fn new(config: DriverConfig, now: Instant) -> Self {
-    let decoder = FixDecoder::new(config.repo.clone(), config.delimiter);
+    let decoder = FixDecoder::new(config.dicts.clone(), config.delimiter);
     let handshake = AcceptorHandshake::new(config.logon_timeout, now);
     Self {
       handshake,
@@ -319,7 +315,7 @@ impl AcceptorDriver {
   }
 
   /// The peer's Logon, for applications that authenticate on it.
-  pub fn peer_logon(&self) -> Option<&crate::message::builder::Message> {
+  pub fn peer_logon(&self) -> Option<&Message> {
     self.handshake.peer_logon()
   }
 
@@ -350,11 +346,6 @@ impl AcceptorDriver {
       handshake,
       mut plumbing,
     } = self;
-
-    // The application's session decides the precision of every timestamp from
-    // here on, including the Logon reply about to go out.
-    plumbing.encoder = FixEncoder::new(plumbing.config.delimiter)
-      .with_precision(session.time_precision);
 
     let established = {
       let mut out = plumbing.output(sink);
@@ -388,16 +379,15 @@ impl SessionDriver {
   /// `clock` is read once per outbound message to stamp `SendingTime`.
   pub fn new(
     state: SessionState,
-    repo: std::sync::Arc<repository::FixRepository>,
+    dicts: std::sync::Arc<Dictionaries>,
     delimiter: Option<u8>,
     clock: Clock,
   ) -> Self {
-    let precision = state.session().time_precision;
-    let fix_version = state.session().fix_version.clone();
+    let dict = state.session().dict.clone();
     Self {
       state,
-      decoder: FixDecoder::with_version(repo, delimiter, fix_version),
-      encoder: FixEncoder::new(delimiter).with_precision(precision),
+      decoder: FixDecoder::with_dictionary(dicts, delimiter, dict),
+      encoder: FixEncoder::new(delimiter),
       in_buf: BytesMut::with_capacity(8192),
       out_buf: BytesMut::with_capacity(8192),
       clock,
@@ -434,7 +424,7 @@ impl SessionDriver {
   /// synchronisation TestRequest.
   pub fn start(
     &mut self,
-    logon: builder::Message,
+    logon: Message,
     now: Instant,
     sink: &mut impl EventSink,
   ) -> Result<Progress> {
@@ -451,7 +441,7 @@ impl SessionDriver {
   /// owns. See [`SessionState::send_logon`].
   pub fn send_logon(
     &mut self,
-    msg: builder::Message,
+    msg: Message,
     sink: &mut impl EventSink,
   ) -> Result<()> {
     let mut out = DriverOutput {

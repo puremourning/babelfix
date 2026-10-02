@@ -734,6 +734,27 @@ fn normalize_orders_group_instances_and_is_canonical() {
 }
 
 #[test]
+fn encoding_appends_after_earlier_messages() {
+  // A driver batches several messages into one buffer before a write; each
+  // message's CheckSum must cover only itself.
+  let first = parse("35=0|49=S|56=T|34=1|52=20261002-10:00:00");
+  let mut second = Message::new(&dict(), "1");
+  second.body_mut().set(TestReqID, "x");
+  let mut out = BytesMut::new();
+  first.encode(&mut out);
+  second.encode(&mut out);
+  let mut out = out;
+  let mut decoder = crate::codec::FixDecoder::with_dictionary(
+    super::Dictionaries::standard().unwrap(),
+    None,
+    dict(),
+  );
+  assert_eq!(decoder.decode(&mut out).unwrap().unwrap(), first);
+  assert_eq!(decoder.decode(&mut out).unwrap().unwrap(), second);
+  assert!(out.is_empty());
+}
+
+#[test]
 fn rule_tags_have_no_leading_zeros() {
   // A fragment skips the framing checks, so only the tag rule can fail.
   let e = Message::parse_fragment(&dict(), b"35=0|049=S", b'|').unwrap_err();

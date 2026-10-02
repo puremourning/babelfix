@@ -16,7 +16,7 @@
 //! # use std::time::Instant;
 //! # use babelfix_core::session::{SessionState, SessionOutput, Progress};
 //! # fn drive(state: &mut SessionState, out: &mut impl SessionOutput,
-//! #          msg: babelfix_core::FixMessage) -> babelfix_core::Result<()> {
+//! #          msg: babelfix_core::message::Message) -> babelfix_core::Result<()> {
 //! let now = Instant::now();
 //! match state.on_message(msg, now, out)? {
 //!   Progress::Continue => {}
@@ -50,9 +50,8 @@ pub use handshake::{
 pub use replay::Replay;
 pub use state::SessionState;
 
-use crate::message::{FixMessage, builder};
-use crate::repository::FixVersion;
-use crate::time::TimePrecision;
+use crate::message::{Dictionary, Message};
+use crate::time::{TimePrecision, fix_time};
 
 /// Identifies a session by the triple FIX uses to route messages.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -67,12 +66,13 @@ pub struct SessionIdentifier {
 
 /// The mutable per-connection state an application must persist to recover a
 /// session: the sequence numbers, plus the negotiated settings.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Session {
   pub next_out_seq_num: u64,
   pub next_in_seq_num: u64,
   pub heartbeat_interval: std::time::Duration,
-  pub fix_version: Arc<FixVersion>,
+  /// The FIX version the session speaks.
+  pub dict: Arc<Dictionary>,
   /// Fractional-second precision for the `SendingTime` stamped on outbound
   /// messages. Defaults to nanoseconds.
   ///
@@ -87,21 +87,64 @@ impl std::fmt::Debug for Session {
       .field("next_out_seq_num", &self.next_out_seq_num)
       .field("next_in_seq_num", &self.next_in_seq_num)
       .field("heartbeat_interval", &self.heartbeat_interval)
-      .field("fix_version", &self.fix_version.name)
+      .field("fix_version", &self.dict.version().name)
       .field("time_precision", &self.time_precision)
       .finish()
   }
 }
 
 impl Session {
-  pub fn new(fix_version: Arc<FixVersion>) -> Self {
+  pub fn new(dict: Arc<Dictionary>) -> Self {
     Self {
       next_out_seq_num: 1,
       next_in_seq_num: 1,
       heartbeat_interval: std::time::Duration::from_secs(30),
-      fix_version,
+      dict,
       time_precision: TimePrecision::default(),
     }
+  }
+}
+
+/// An outbound message whose `SendingTime(52)` is reserved but not yet
+/// written.
+///
+/// The core reads no clock, so the time a message is sent is the driver's to
+/// supply, and the latest moment it can be read is just before encoding. This
+/// type makes that the only way: [`stamp`](Self::stamp) is the sole route to
+/// the message, so a driver cannot encode one it has not stamped.
+///
+/// The session reserves a slot of exactly the timestamp's width, so stamping
+/// is an in-place write: no allocation, no search beyond the header, nothing
+/// moved.
+#[must_use = "an unstamped message is never sent"]
+pub struct Unstamped<'a> {
+  msg: &'a mut Message,
+  precision: TimePrecision,
+}
+
+impl<'a> Unstamped<'a> {
+  pub(crate) fn new(msg: &'a mut Message, precision: TimePrecision) -> Self {
+    Self { msg, precision }
+  }
+
+  /// Write `SendingTime` as `now`, at the session's precision, and hand back
+  /// the message to encode.
+  pub fn stamp(self, now: chrono::DateTime<chrono::Utc>) -> &'a Message {
+    self
+      .msg
+      .stamp_sending_time(fix_time(now, self.precision).as_bytes());
+    self.msg
+  }
+
+  /// The type of the message waiting to be stamped, for logging.
+  pub fn msg_type(&self) -> &str {
+    self.msg.msg_type()
+  }
+}
+
+impl std::fmt::Debug for Unstamped<'_> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "Unstamped({})", self.msg.msg_type())
   }
 }
 
@@ -120,12 +163,12 @@ pub enum Command {
   ///
   /// It is an error to send while a replay is in progress; use
   /// [`Command::Replay`] to answer an [`Event::ResendRequest`].
-  Send(builder::Message),
+  Send(Message),
 
   /// Replay the sequence number in `MsgSeqNum` with the supplied message. Only
   /// valid between an [`Event::ResendRequest`] and the matching
   /// [`Command::ReplayComplete`].
-  Replay(builder::Message),
+  Replay(Message),
 
   /// All messages for the current resend request have been sent. Any remaining
   /// sequence numbers are gap-filled automatically.
@@ -157,7 +200,7 @@ pub enum Event<'a> {
   /// A FIX message arrived, valid or not, admin or application. Useful for
   /// auditing and display. Business logic wants [`Event::MessageReceived`],
   /// which fires only for valid, well-sequenced application messages.
-  RawMessageReceived(&'a FixMessage, &'a Session),
+  RawMessageReceived(&'a Message, &'a Session),
 
   /// A FIX message was handed to the transport, admin messages included. The
   /// `SendingTime` has already been stamped by the [`SessionOutput`], so this
@@ -165,7 +208,7 @@ pub enum Event<'a> {
   ///
   /// Applications must persist these unmodified to answer a future
   /// [`Event::ResendRequest`]; this library provides no persistence of its own.
-  RawMessageSent(&'a FixMessage, &'a Session),
+  RawMessageSent(&'a Message, &'a Session),
 
   /// A valid, in-sequence application message. This is what business logic
   /// should act on.
@@ -173,7 +216,7 @@ pub enum Event<'a> {
   /// Replayed messages are delivered before new ones, so applications never see
   /// these out of order — beyond noticing that the peer may have set
   /// `PossDupFlag`.
-  MessageReceived(&'a builder::Message),
+  MessageReceived(&'a Message),
 
   /// The peer asked for a retransmission of `begin_seq_no..=end_seq_no`.
   /// `end_seq_no` is always concrete, even when the peer sent an open-ended
@@ -184,7 +227,7 @@ pub enum Event<'a> {
   /// automatically, so an application may decline to replay a message — a stale
   /// order, say — without breaking the sequence.
   ResendRequest {
-    resend_request: &'a builder::Message,
+    resend_request: &'a Message,
     begin_seq_no: u64,
     end_seq_no: u64,
   },
@@ -202,12 +245,11 @@ pub trait SessionOutput {
   /// Stamp `SendingTime`, serialise, and arrange for the bytes to reach the
   /// peer.
   ///
-  /// The message arrives with its `SendingTime` slot present but empty; the
-  /// implementation fills it in — see
-  /// [`stamp_sending_time`](crate::codec::stamp_sending_time) — so the clock is
-  /// read once per message, as late as possible, rather than once per pass over
-  /// the state machine. The `&mut` is what makes that stamp visible to the
-  /// [`Event::RawMessageSent`] that follows.
+  /// The message is [`Unstamped`]: the only way to reach it — and so to encode
+  /// it — is to [`stamp`](Unstamped::stamp) it with the time, which the
+  /// implementation reads from its clock once per message, as late as
+  /// possible. The core never reads a clock itself. The stamp is visible to
+  /// the [`Event::RawMessageSent`] that follows.
   ///
   /// `session` is a snapshot taken *for this message*: the outbound sequence
   /// number has already been consumed. A driver must not substitute the
@@ -215,7 +257,7 @@ pub trait SessionOutput {
   /// them all with the last sequence number.
   fn transmit(
     &mut self,
-    msg: &mut FixMessage,
+    msg: Unstamped<'_>,
     session: &Session,
   ) -> crate::Result<()>;
 

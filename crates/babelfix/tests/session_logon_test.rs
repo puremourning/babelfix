@@ -14,13 +14,13 @@ use googletest::prelude::*;
 mod matchers;
 mod session;
 
-use fix::schema::FIX_Latest::Fields;
+use fix::schema::tags as Fields;
 use matchers::*;
 use session::raw::{RawMessage, RawPeer};
-use session::{FIX_REPO, SessionOptions, expect_event, expect_events};
+use session::{DICTS, SessionOptions, expect_event, expect_events};
 
-fn fix44() -> Arc<fix::repository::FixVersion> {
-  FIX_REPO.get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<fix::message::Dictionary> {
+  DICTS.get("FIX.4.4").unwrap().clone()
 }
 
 /// A clean logon on both sides, followed by the TestRequest/Heartbeat exchange

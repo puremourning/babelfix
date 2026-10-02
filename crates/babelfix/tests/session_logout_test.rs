@@ -10,13 +10,13 @@ use googletest::prelude::*;
 mod matchers;
 mod session;
 
-use fix::schema::FIX_Latest::Fields;
+use fix::schema::tags as Fields;
 use matchers::*;
 use session::raw::{RawMessage, RawPeer};
-use session::{FIX_REPO, SessionOptions, expect_event, expect_events};
+use session::{DICTS, SessionOptions, expect_event, expect_events};
 
-fn fix44() -> Arc<fix::repository::FixVersion> {
-  FIX_REPO.get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<fix::message::Dictionary> {
+  DICTS.get("FIX.4.4").unwrap().clone()
 }
 
 /// A Logout received from the peer is acknowledged with a Logout and then ends
@@ -82,12 +82,12 @@ async fn logout_inside_a_gap_is_acknowledged_once_recovery_completes()
   peer.logon(Duration::from_secs(30)).await?;
 
   let ack = peer.recv().await?;
-  anyhow::ensure!(ack.get_type() == "A");
+  anyhow::ensure!(ack.msg_type() == "A");
   let resend_request = peer.recv().await?;
   verify_that!(&resend_request, message::tag(Fields::MsgType, eq("2")))
     .map_err(|e| anyhow::anyhow!("{e}"))?;
   let test_request = peer.recv().await?;
-  anyhow::ensure!(test_request.get_type() == "1");
+  anyhow::ensure!(test_request.msg_type() == "1");
 
   // The Logout falls inside the gap.
   peer

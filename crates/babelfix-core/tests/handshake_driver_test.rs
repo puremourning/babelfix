@@ -11,15 +11,19 @@ use babelfix_core as fix;
 use fix::driver::{
   AcceptorDriver, DriverConfig, InitiatorDriver, SessionDriver,
 };
-use fix::message::builder;
-use fix::schema::FIX_Latest::Fields;
+use fix::message::{Dictionaries, Dictionary, Message};
+use fix::schema::codesets::{EncryptMethod, Side};
+use fix::schema::fields::{
+  ClOrdID, EncryptMethod, HeartBtInt, OrderQty, Side, Symbol,
+};
+use fix::schema::tags;
 use fix::session::{Command, Event, Session, SessionIdentifier, SessionState};
 
-static FIX_REPO: LazyLock<Arc<fix::repository::FixRepository>> =
-  LazyLock::new(|| Arc::new(fix::repository::orchestrate().unwrap()));
+static DICTS: LazyLock<Arc<Dictionaries>> =
+  LazyLock::new(|| Dictionaries::standard().unwrap());
 
-fn fix44() -> Arc<fix::repository::FixVersion> {
-  FIX_REPO.get_version("FIX.4.4").unwrap()
+fn fix44() -> Arc<Dictionary> {
+  DICTS.get("FIX.4.4").unwrap().clone()
 }
 
 const DELIM: u8 = b'|';
@@ -40,11 +44,10 @@ impl Seen {
     move |event: Event<'_>| {
       if let Event::MessageReceived(msg) = event {
         self.app_messages.push(
-          msg
-            .body
-            .tag(Fields::ClOrdID)
-            .map(|value| value.as_string())
-            .unwrap_or_default(),
+          String::from_utf8_lossy(
+            msg.body().raw(tags::ClOrdID).unwrap_or_default(),
+          )
+          .into_owned(),
         );
       }
       Ok(())
@@ -68,32 +71,36 @@ fn id(us: &str, them: &str) -> SessionIdentifier {
 
 fn config() -> DriverConfig {
   DriverConfig {
-    repo: FIX_REPO.clone(),
+    dicts: DICTS.clone(),
     delimiter: Some(DELIM),
     clock,
     logon_timeout: HEARTBEAT,
   }
 }
 
-fn logon_message() -> builder::Message {
-  let mut msg = builder::Message::new(fix44(), "A").unwrap();
-  msg.body.set_tag(Fields::HeartBtInt, "30");
-  msg.body.set_tag(Fields::EncryptMethod, "0");
+fn logon_message() -> Message {
+  let mut msg = Message::new(&fix44(), "A");
+  msg
+    .body_mut()
+    .set(HeartBtInt, 30u64)
+    .set(EncryptMethod, EncryptMethod::None);
   msg
 }
 
-fn order(cl_ord_id: &str) -> builder::Message {
-  let mut msg = builder::Message::new(fix44(), "D").unwrap();
-  msg.body.set_tag(Fields::ClOrdID, cl_ord_id);
-  msg.body.set_tag(Fields::Symbol, "AAPL");
-  msg.body.set_tag(Fields::Side, "1");
-  msg.body.set_tag(Fields::OrderQty, 100i64);
+fn order(cl_ord_id: &str) -> Message {
+  let mut msg = Message::new(&fix44(), "D");
+  msg
+    .body_mut()
+    .set(ClOrdID, cl_ord_id)
+    .set(Symbol, "AAPL")
+    .set(Side, Side::Buy)
+    .set(OrderQty, 100u64);
   msg
 }
 
 fn driver(us: &str, them: &str, now: Instant) -> SessionDriver {
   let state = SessionState::new(id(us, them), session(), now);
-  SessionDriver::new(state, FIX_REPO.clone(), Some(DELIM), clock)
+  SessionDriver::new(state, DICTS.clone(), Some(DELIM), clock)
 }
 
 /// Encode a Logon followed immediately by an application message, as one

@@ -11,8 +11,8 @@ use babelfix as fix;
 use fix::endpoint::{self, EndpointConfig};
 use tokio::io::AsyncReadExt;
 
-static FIX_REPO: LazyLock<Arc<fix::repository::FixRepository>> =
-  LazyLock::new(|| Arc::new(fix::repository::orchestrate().unwrap()));
+static DICTS: LazyLock<Arc<fix::message::Dictionaries>> =
+  LazyLock::new(|| fix::message::Dictionaries::standard().unwrap());
 
 /// Short enough to assert on quickly, long enough not to race a loaded machine.
 const SHORT_LOGON_TIMEOUT: Duration = Duration::from_millis(300);
@@ -23,7 +23,7 @@ const SHORT_LOGON_TIMEOUT: Duration = Duration::from_millis(300);
 async fn the_logon_timeout_is_honoured() -> anyhow::Result<()> {
   let endpoint = endpoint::serve(
     ("127.0.0.1", 0),
-    FIX_REPO.clone(),
+    DICTS.clone(),
     EndpointConfig::default().logon_timeout(SHORT_LOGON_TIMEOUT),
   )
   .await?;
@@ -69,13 +69,13 @@ async fn shutting_down_an_initiator_stops_it_reconnecting() -> anyhow::Result<()
   // the backoff ladder — which is exactly where shutdown has to be observed.
   let initiator = endpoint::connect(
     vec![("127.0.0.1".to_string(), 1)],
-    FIX_REPO.clone(),
+    DICTS.clone(),
     fix::session::SessionIdentifier {
       begin_string: "FIX.4.4".into(),
       sender_comp_id: "CLIENT".into(),
       target_comp_id: "SERVER".into(),
     },
-    fix::session::Session::new(FIX_REPO.get_version("FIX.4.4").unwrap()),
+    fix::session::Session::new(DICTS.get("FIX.4.4").unwrap().clone()),
     EndpointConfig::default()
       .connect_timeout(Duration::from_millis(50))
       .backoff([Duration::from_millis(10)]),
@@ -113,13 +113,13 @@ async fn shutting_down_an_initiator_stops_it_reconnecting() -> anyhow::Result<()
 async fn connecting_to_nothing_is_an_error() {
   let result = endpoint::connect(
     vec![],
-    FIX_REPO.clone(),
+    DICTS.clone(),
     fix::session::SessionIdentifier {
       begin_string: "FIX.4.4".into(),
       sender_comp_id: "CLIENT".into(),
       target_comp_id: "SERVER".into(),
     },
-    fix::session::Session::new(FIX_REPO.get_version("FIX.4.4").unwrap()),
+    fix::session::Session::new(DICTS.get("FIX.4.4").unwrap().clone()),
     EndpointConfig::default(),
   );
   assert!(result.is_err());

@@ -42,8 +42,6 @@ pub mod tape;
 pub mod types;
 mod view;
 
-pub mod legacy;
-
 pub use dict::{Dictionaries, Dictionary};
 pub use edit::{BlockMut, CursorMut, GroupMut};
 pub use error::{
@@ -56,12 +54,6 @@ pub use types::{
   Time, Timestamp, ToFix, ValueWriter, datatypes,
 };
 pub use view::{Block, Cursor, EntryKind, Group, GroupIter, Pos};
-
-// The previous representation, until its callers have moved over.
-pub use legacy::{
-  FixMessage, ValRef, Value, builder, peek_checksum,
-  peek_infer_version_and_length,
-};
 
 /// The FIX field delimiter, Start of Heading.
 pub const SOH: u8 = 0x01;
