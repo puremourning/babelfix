@@ -1076,3 +1076,51 @@ fn large_groups_build_and_round_trip() {
   assert_eq!(again.body().group(NoPartyIDs).len(), 5000);
   assert_eq!(again, m);
 }
+
+/// An instance exists once something is in it: what the views report matches
+/// what is written.
+#[test]
+fn empty_instances_are_pruned() {
+  let mut m = Message::new(&dict(), "D");
+  m.body_mut().set(ClOrdID, "a");
+  m.body_mut().group_mut(NoPartyIDs).push();
+  assert!(!m.body().has(NoPartyIDs));
+  assert_eq!(m.body().group(NoPartyIDs).len(), 0);
+
+  {
+    let mut body = m.body_mut();
+    let mut parties = body.group_mut(NoPartyIDs);
+    parties.push().set(PartyID, "A");
+    parties.push();
+    parties.push().set(PartyID, "C");
+    assert_eq!(parties.len(), 2);
+  }
+  assert_eq!(m.body().group(NoPartyIDs).len(), 2);
+
+  // A nested chain of empty instances goes all the way up.
+  m.body_mut()
+    .group_mut(NoPartyIDs)
+    .push()
+    .group_mut(NoPartySubIDs)
+    .push();
+  assert_eq!(m.body().group(NoPartyIDs).len(), 2);
+  let again = Message::parse(&dict(), m.to_bytes()).unwrap();
+  assert_eq!(again, m);
+
+  // Removing an instance's last field removes the instance, and the group
+  // with it if that was the last instance.
+  let mut m = parse("35=D|11=a|453=1|448=A|55=S");
+  m.cursor_mut(&"body/453[0]/448".parse().unwrap())
+    .unwrap()
+    .remove();
+  assert!(!m.body().has(NoPartyIDs));
+  assert_eq!(piped(&m), piped(&parse("35=D|11=a|55=S")));
+  {
+    let mut body = m.body_mut();
+    let mut parties = body.group_mut(NoPartyIDs);
+    parties.push().set(PartyID, "A");
+    parties.get_mut(0).unwrap().remove(PartyID);
+  }
+  assert!(!m.body().has(NoPartyIDs));
+  assert_eq!(piped(&m), piped(&parse("35=D|11=a|55=S")));
+}

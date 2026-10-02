@@ -173,7 +173,7 @@ impl Message {
 
   /// Whether the instance at `idx` writes anything: a field, or a nested group
   /// that does. An instance holding only empty groups writes nothing.
-  fn instance_writes(&self, idx: u32) -> bool {
+  pub(crate) fn instance_writes(&self, idx: u32) -> bool {
     let end = self.next_sibling(idx);
     let mut i = idx + 1;
     while i < end {
@@ -278,8 +278,13 @@ impl PartialEq for Message {
     if self.dict.begin_string() != other.dict.begin_string() {
       return false;
     }
-    let mut a = self.walk().filter(|c| !matches!(c.tag(), 9 | 10));
-    let mut b = other.walk().filter(|c| !matches!(c.tag(), 9 | 10));
+    // BodyLength and CheckSum are derived; a group with no instances (a
+    // parsed `453=0`, say) is not written, so it is not compared either.
+    let compared = |c: &super::Cursor<'_>| {
+      !matches!(c.tag(), 9 | 10) && c.count() != Some(0)
+    };
+    let mut a = self.walk().filter(compared);
+    let mut b = other.walk().filter(compared);
     loop {
       match (a.next(), b.next()) {
         (None, None) => return true,

@@ -3,7 +3,8 @@
 //! One type, [`Message`], whether it was parsed from the wire or built by hand.
 //! Read it through [`Block`]s — [`header`](Message::header),
 //! [`body`](Message::body), and the instances of repeating [`Group`]s — and edit
-//! it through the same shapes, mutably: [`BlockMut`], [`GroupMut`].
+//! it through the same shapes, mutably: [`BlockMut`], [`GroupMut`], and
+//! [`InstanceMut`] for an instance, which removes itself if it is left empty.
 //!
 //! ```no_run
 //! # use babelfix_core::message::{Message, Dictionary};
@@ -44,7 +45,7 @@ mod validate;
 mod view;
 
 pub use dict::{Dictionaries, Dictionary};
-pub use edit::{BlockMut, CursorMut, GroupMut};
+pub use edit::{BlockMut, CursorMut, GroupMut, InstanceMut};
 pub use error::{
   FieldError, FieldErrorKind, ParseError, ValueError, reject_reason,
 };

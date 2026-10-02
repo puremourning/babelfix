@@ -63,6 +63,42 @@ pub struct BlockMut<'a> {
   place: Place,
 }
 
+/// A group instance being built or edited: a [`BlockMut`] (which it
+/// dereferences to) that tidies up after itself.
+///
+/// If it is dropped with nothing in the instance, the instance goes — and its
+/// group, if that was the last one — so an instance only exists once something
+/// is in it, and a group's length always matches what is written.
+pub struct InstanceMut<'a> {
+  block: BlockMut<'a>,
+}
+
+impl<'a> std::ops::Deref for InstanceMut<'a> {
+  type Target = BlockMut<'a>;
+  fn deref(&self) -> &BlockMut<'a> {
+    &self.block
+  }
+}
+
+impl<'a> std::ops::DerefMut for InstanceMut<'a> {
+  fn deref_mut(&mut self) -> &mut BlockMut<'a> {
+    &mut self.block
+  }
+}
+
+impl Drop for InstanceMut<'_> {
+  fn drop(&mut self) {
+    let BlockMut { msg, place } = &mut self.block;
+    msg.prune(place);
+  }
+}
+
+impl std::fmt::Debug for InstanceMut<'_> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    std::fmt::Debug::fmt(&self.block, f)
+  }
+}
+
 /// A repeating group being built or edited.
 pub struct GroupMut<'a> {
   msg: &'a mut Message,
@@ -93,6 +129,28 @@ impl Message {
     BlockMut {
       msg: self,
       place: Place::region(Region::Body),
+    }
+  }
+
+  /// If `place` is an instance with nothing in it, remove it, and its group if
+  /// that was the group's last instance.
+  fn prune(&mut self, place: &Place) {
+    let Owner::Instance(q) = place.owner else {
+      return;
+    };
+    if self.instance_writes(q) {
+      return;
+    }
+    // An instance's ancestors end `.., group, instance`.
+    let [outer @ .., g, _] = place.ancestors.as_slice() else {
+      return;
+    };
+    let mut to_group = outer.to_vec();
+    to_group.push(*g);
+    self.remove_at(place.region, &to_group, q);
+    self.tape[*g as usize].off -= 1;
+    if self.tape[*g as usize].off == 0 {
+      self.remove_at(place.region, outer, *g);
     }
   }
 
@@ -615,10 +673,21 @@ impl std::fmt::Debug for BlockMut<'_> {
 }
 
 impl<'a> GroupMut<'a> {
+  /// The Group entry, if it still exists: an instance view dropped empty can
+  /// remove the group along with its last instance.
+  fn group(&self) -> Option<u32> {
+    let (_, _, depth) = self.msg.owner_range(self.parent.owner);
+    self.idx.filter(|&g| {
+      self.msg.tape.get(g as usize).is_some_and(|e| {
+        e.kind == Kind::Group && e.tag == self.tag && e.depth == depth
+      })
+    })
+  }
+
   /// Number of instances.
   pub fn len(&self) -> usize {
     self
-      .idx
+      .group()
       .map_or(0, |g| self.msg.tape[g as usize].off as usize)
   }
 
@@ -638,7 +707,7 @@ impl<'a> GroupMut<'a> {
   /// The tape index of the `n`th instance, or of the end of the group when
   /// `n == len()`.
   fn instance_at(&self, n: usize) -> Option<u32> {
-    let g = self.idx?;
+    let g = self.group()?;
     let end = self.msg.next_sibling(g);
     if n == self.len() {
       return Some(end);
@@ -655,7 +724,7 @@ impl<'a> GroupMut<'a> {
 
   /// Make sure the Group entry exists; returns its index.
   fn ensure(&mut self) -> u32 {
-    if let Some(g) = self.idx {
+    if let Some(g) = self.group() {
       return g;
     }
     let (_, _, depth) = self.msg.owner_range(self.parent.owner);
@@ -676,23 +745,25 @@ impl<'a> GroupMut<'a> {
   }
 
   /// A view of the instance entry at `q`.
-  fn instance_view(&mut self, g: u32, q: u32) -> BlockMut<'_> {
+  fn instance_view(&mut self, g: u32, q: u32) -> InstanceMut<'_> {
     let mut ancestors = self.inner_ancestors(g);
     ancestors.push(q);
-    BlockMut {
-      msg: &mut *self.msg,
-      place: Place {
-        owner: Owner::Instance(q),
-        region: self.parent.region,
-        def: self.def,
-        ancestors,
+    InstanceMut {
+      block: BlockMut {
+        msg: &mut *self.msg,
+        place: Place {
+          owner: Owner::Instance(q),
+          region: self.parent.region,
+          def: self.def,
+          ancestors,
+        },
       },
     }
   }
 
-  /// Add an instance at the end; returns it, empty, to fill in. An instance
-  /// left empty is not written (empty means absent).
-  pub fn push(&mut self) -> BlockMut<'_> {
+  /// Add an instance at the end; returns it, empty, to fill in. If the view is
+  /// dropped with nothing in the instance, the instance goes too.
+  pub fn push(&mut self) -> InstanceMut<'_> {
     let n = self.len();
     self.insert(n)
   }
@@ -702,7 +773,7 @@ impl<'a> GroupMut<'a> {
   /// # Panics
   ///
   /// If `n > len()`.
-  pub fn insert(&mut self, n: usize) -> BlockMut<'_> {
+  pub fn insert(&mut self, n: usize) -> InstanceMut<'_> {
     assert!(n <= self.len(), "instance {n} of {}", self.len());
     let g = self.ensure();
     let at = self.instance_at(n).expect("checked above");
@@ -721,15 +792,15 @@ impl<'a> GroupMut<'a> {
   }
 
   /// The `n`th instance, to edit.
-  pub fn get_mut(&mut self, n: usize) -> Option<BlockMut<'_>> {
-    let g = self.idx?;
+  pub fn get_mut(&mut self, n: usize) -> Option<InstanceMut<'_>> {
+    let g = self.group()?;
     let q = self.instance_at(n).filter(|_| n < self.len())?;
     Some(self.instance_view(g, q))
   }
 
   /// Remove the `n`th instance. Removing the last removes the group.
   pub fn remove(&mut self, n: usize) -> &mut Self {
-    let Some(g) = self.idx else {
+    let Some(g) = self.group() else {
       return self;
     };
     if n >= self.len() {
@@ -751,7 +822,7 @@ impl<'a> GroupMut<'a> {
     &mut self,
     mut keep: impl FnMut(Block<'_>) -> bool,
   ) -> &mut Self {
-    let Some(g) = self.idx else {
+    let Some(g) = self.group() else {
       return self;
     };
     let end = self.msg.next_sibling(g);
@@ -784,7 +855,8 @@ impl<'a> GroupMut<'a> {
 
   /// Remove the whole group.
   pub fn clear(&mut self) -> &mut Self {
-    if let Some(g) = self.idx.take() {
+    if let Some(g) = self.group() {
+      self.idx = None;
       self
         .msg
         .remove_at(self.parent.region, &self.parent.ancestors, g);
@@ -818,7 +890,7 @@ impl<'a> CursorMut<'a> {
   }
 
   /// Remove this field, group or instance.
-  pub fn remove(mut self) {
+  pub fn remove(self) {
     let c = self.as_cursor();
     let tag = c.tag();
     match c.kind() {
@@ -832,13 +904,22 @@ impl<'a> CursorMut<'a> {
         owner.block_mut().group_mut(tag).remove(n);
       }
       _ => {
-        self.block_mut().remove(tag);
+        let place = self.msg.place_of(self.idx);
+        let mut block = BlockMut {
+          msg: &mut *self.msg,
+          place,
+        };
+        block.remove(tag);
+        // Removing an instance's last field removes the instance, as
+        // dropping an empty InstanceMut does.
+        let BlockMut { msg, place } = &mut block;
+        msg.prune(place);
       }
     }
   }
 
   /// On a group: add an instance at the end, and return it to fill in.
-  pub fn push_instance(&mut self) -> Option<BlockMut<'_>> {
+  pub fn push_instance(&mut self) -> Option<InstanceMut<'_>> {
     let c = self.as_cursor();
     if c.kind() != super::EntryKind::Group {
       return None;
@@ -846,10 +927,17 @@ impl<'a> CursorMut<'a> {
     let tag = c.tag();
     let mut block = self.block_mut();
     let mut group = block.group_mut(tag);
-    let place = group.push().place.clone();
-    Some(BlockMut {
-      msg: &mut *self.msg,
-      place,
+    let mut view = group.push();
+    // The view is replaced by the one returned: take its place so it lets go
+    // without pruning the new, still-empty instance.
+    let place =
+      std::mem::replace(&mut view.block.place, Place::region(Region::Body));
+    drop(view);
+    Some(InstanceMut {
+      block: BlockMut {
+        msg: &mut *self.msg,
+        place,
+      },
     })
   }
 }
