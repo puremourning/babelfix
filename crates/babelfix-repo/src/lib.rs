@@ -58,6 +58,12 @@ pub struct FixVersion {
   pub groups: HashMap<u32, Arc<Group>>,
   pub messages: HashMap<String, Arc<Message>>,
   pub codesets: HashMap<String, Arc<Vec<EnumValue>>>,
+  /// The underlying datatype of each codeset (`int`, `char`, `String`, ...),
+  /// keyed by codeset name.
+  pub codeset_types: HashMap<String, String>,
+  /// Datatype name → its `baseType`, for datatypes that have one (`Qty` →
+  /// `float`, `SeqNum` → `int`, ...).
+  pub datatypes: HashMap<String, Option<String>>,
   pub begin_string: String,
 }
 
@@ -66,10 +72,32 @@ pub struct FixVersion {
 pub struct Field {
   pub id: u32,
   pub name: String,
+  /// The Orchestra `type`: a datatype name, or a codeset name.
   pub field_type: String,
+  /// For a field of datatype `data`/`XMLData`: the tag of the Length field that
+  /// must immediately precede it on the wire (Orchestra `lengthId`).
+  pub length_id: Option<u32>,
+  /// For a codeset field whose values are open-ended: the datatype the codeset
+  /// is unioned with (`Reserved100Plus`, `Qty`, ...; Orchestra `unionDataType`).
+  pub union_data_type: Option<String>,
 }
 
 impl Field {
+  /// The field's datatype, looking through a codeset to the codeset's own
+  /// underlying type. `Side` (a `SideCodeSet`) is `char`; `OrderQty` is `Qty`.
+  pub fn datatype<'a>(&'a self, fix_repo: &'a FixVersion) -> &'a str {
+    fix_repo
+      .codeset_types
+      .get(&self.field_type)
+      .map(String::as_str)
+      .unwrap_or(&self.field_type)
+  }
+
+  /// Whether the field's type is a codeset.
+  pub fn is_codeset(&self, fix_repo: &FixVersion) -> bool {
+    fix_repo.codeset_types.contains_key(&self.field_type)
+  }
+
   pub fn enum_values(
     &self,
     fix_repo: &FixVersion,
@@ -361,6 +389,23 @@ impl FixRepository {
 }
 
 impl FixVersion {
+  /// Whether `datatype` is `ancestor` or is derived from it through the
+  /// `baseType` chain: `Qty` is a `float`, `SeqNum` is an `int`.
+  pub fn datatype_is(&self, datatype: &str, ancestor: &str) -> bool {
+    let mut current = Some(datatype);
+    // Bounded, in case a malformed repository has a baseType cycle.
+    for _ in 0..16 {
+      match current {
+        Some(t) if t == ancestor => return true,
+        Some(t) => {
+          current = self.datatypes.get(t).and_then(|b| b.as_deref());
+        }
+        None => return false,
+      }
+    }
+    false
+  }
+
   /// Get a field by ID
   pub fn get_field(&self, id: u32) -> Option<Arc<Field>> {
     self.fields.get(&id).cloned()

@@ -148,3 +148,47 @@ fn test_full_fix_orchestrate() {
   assert!(!new_order_single.is_member(&fix44, 555));
   assert!(new_order_single.is_member(&fix44, 100))
 }
+
+#[test]
+fn test_datatype_metadata() {
+  let repo = orchestrate().unwrap();
+  for name in ["FIX.4.2", "FIX.4.4", "FIX.Latest"] {
+    let fix = repo.get_version(name).unwrap();
+
+    // Data fields name the Length field that must precede them.
+    let raw_data = fix.get_field(96).unwrap();
+    assert_eq!(raw_data.length_id, Some(95), "{name}");
+    assert_eq!(fix.get_field(95).unwrap().length_id, None, "{name}");
+
+    // Codeset fields resolve to the codeset's underlying datatype.
+    let side = fix.get_field(54).unwrap();
+    assert!(side.is_codeset(&fix), "{name}");
+    assert_eq!(side.datatype(&fix), "char", "{name}");
+
+    // Derived datatypes resolve through baseType.
+    let order_qty = fix.get_field(38).unwrap();
+    assert_eq!(order_qty.datatype(&fix), "Qty", "{name}");
+    assert!(fix.datatype_is("Qty", "float"), "{name}");
+    assert!(!fix.datatype_is("Qty", "int"), "{name}");
+  }
+
+  // FIX 4.2 predates SeqNum/NumInGroup/Length: such fields are plain `int`
+  // there, so structure must come from group definitions and lengthId, never
+  // from datatype names.
+  let fix42 = repo.get_version("FIX.4.2").unwrap();
+  assert!(!fix42.datatypes.contains_key("SeqNum"));
+  assert!(
+    repo
+      .get_version("FIX.4.4")
+      .unwrap()
+      .datatype_is("SeqNum", "int")
+  );
+
+  let latest = repo.get_version("FIX.Latest").unwrap();
+  let security_id_source = latest.get_field(22).unwrap();
+  assert_eq!(
+    security_id_source.union_data_type.as_deref(),
+    Some("Reserved100Plus")
+  );
+  assert_eq!(latest.get_field(213).unwrap().length_id, Some(212));
+}

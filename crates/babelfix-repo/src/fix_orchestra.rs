@@ -115,12 +115,29 @@ impl FixOrchestraParser {
           id,
           name: attrs.get("name").cloned().unwrap(),
           field_type: attrs.get("type").cloned().unwrap(),
+          length_id: attrs.get("lengthId").and_then(|l| l.parse().ok()),
+          union_data_type: attrs.get("unionDataType").cloned(),
         });
+      }
+      "fixr:datatype" => {
+        let attrs = self.get_attributes(e);
+        if let Some(name) = attrs.get("name") {
+          self
+            .current_fix_version
+            .datatypes
+            .insert(name.clone(), attrs.get("baseType").cloned());
+        }
       }
       "fixr:codeSet" => {
         let attrs = self.get_attributes(e);
-        self.current_codeset =
-          Some((attrs.get("name").cloned().unwrap(), Vec::new()));
+        let name = attrs.get("name").cloned().unwrap();
+        if let Some(t) = attrs.get("type") {
+          self
+            .current_fix_version
+            .codeset_types
+            .insert(name.clone(), t.clone());
+        }
+        self.current_codeset = Some((name, Vec::new()));
       }
       "fixr:code" => {
         let attrs = self.get_attributes(e);
