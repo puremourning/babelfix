@@ -7,6 +7,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+publish = false
+
 [dependencies]
 babelfix = { workspace = true, features = [ "serde" ] }
 tokio.workspace = true
