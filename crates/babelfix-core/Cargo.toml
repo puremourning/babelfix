@@ -3,7 +3,10 @@ name = "babelfix-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# Dual: our code is MIT; the typed schema `build.rs` generates (fields,
+# message types, codesets) derives from the Apache-2.0 FIX Orchestra data, so
+# redistributors must satisfy both licenses.
+license = "MIT AND Apache-2.0"
 authors.workspace = true
 repository.workspace = true
 description = "Sans-io core of the babelfix FIX engine: messages, codec and session state machine"

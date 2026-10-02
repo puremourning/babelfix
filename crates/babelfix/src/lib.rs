@@ -89,9 +89,10 @@
 //!
 //! ## Licensing
 //!
-//! babelfix is MIT licensed. The `babelfix-repo` and `babelfix-repogen` crates
-//! additionally bundle and derive from the Apache-2.0 licensed FIX Orchestra
-//! data, and are therefore released under `MIT AND Apache-2.0`.
+//! babelfix is MIT licensed. The `babelfix-repo`, `babelfix-repogen` and
+//! `babelfix-core` crates additionally bundle or derive from the Apache-2.0
+//! licensed FIX Orchestra data, and are therefore released under
+//! `MIT AND Apache-2.0`.
 
 pub use babelfix_core::{
   Error, Result, codec, driver, message, repository, schema, time,
