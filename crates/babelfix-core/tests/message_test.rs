@@ -1031,3 +1031,48 @@ fn fragments_move_late_header_data_fields_and_refuse_late_header_groups() {
   );
   assert_eq!(e.tag, Some(627));
 }
+
+#[test]
+fn retain_rebuilds_a_group_in_one_pass() {
+  let mut m = parse(
+    "35=D|11=a|453=4|448=A|802=1|523=a1|448=B|448=C|802=2|523=c1|523=c2|448=D|55=S",
+  );
+  m.body_mut()
+    .group_mut(NoPartyIDs)
+    .retain(|p| matches!(p.raw(tags::PartyID), Some(b"A" | b"C")));
+  assert_eq!(
+    piped(&m),
+    piped(&parse(
+      "35=D|11=a|453=2|448=A|802=1|523=a1|448=C|802=2|523=c1|523=c2|55=S"
+    ))
+  );
+  // Fields after the group, and further edits, still find their places.
+  m.body_mut().set(Symbol, "T");
+  m.body_mut().group_mut(NoPartyIDs).push().set(PartyID, "E");
+  let again = Message::parse(&dict(), m.to_bytes()).unwrap();
+  assert_eq!(again.body().group(NoPartyIDs).len(), 3);
+  assert_eq!(again.body().req(Symbol).unwrap(), "T");
+
+  // Keeping nothing removes the group.
+  m.body_mut().group_mut(NoPartyIDs).retain(|_| false);
+  assert!(!m.body().has(NoPartyIDs));
+  Message::parse(&dict(), m.to_bytes()).unwrap();
+}
+
+/// Building a large group costs in proportion to its size. (The benchmark
+/// measures it; this just keeps a quadratic regression from hiding in a slow
+/// test run.)
+#[test]
+fn large_groups_build_and_round_trip() {
+  let mut m = Message::new(&dict(), "D");
+  {
+    let mut body = m.body_mut();
+    let mut parties = body.group_mut(NoPartyIDs);
+    for i in 0..5000 {
+      parties.push().set(PartyID, format!("P{i}").as_str());
+    }
+  }
+  let again = Message::parse(&dict(), m.to_bytes()).unwrap();
+  assert_eq!(again.body().group(NoPartyIDs).len(), 5000);
+  assert_eq!(again, m);
+}

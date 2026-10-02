@@ -5,10 +5,12 @@
 //! into the tape (or fills a slot in the header gap), and the spans of the
 //! groups and instances around it grow by one.
 //!
-//! Mutable views record only *which* block they are — a region, or the index of
-//! an instance entry — and work out its extent from the tape when they need it.
-//! Entries before an insertion point never move, so a view's own index stays
-//! valid however much is inserted into it.
+//! A mutable view records its `Place` once, when it is made: which block it is
+//! (a region, or the index of an instance entry), the group definition that
+//! governs it, and the indices of every group and instance enclosing it. An
+//! insert or remove then grows or shrinks exactly those ancestors, with no
+//! search. Entries before an insertion point never move, so none of those
+//! indices go stale however much is inserted into the view.
 
 use super::SOH;
 use super::dict::{FieldKind, GroupIdx};
@@ -32,20 +34,45 @@ enum Owner {
   Instance(u32),
 }
 
+/// Where a mutable view's block is.
+#[derive(Clone, Debug)]
+struct Place {
+  owner: Owner,
+  region: Region,
+  /// For an instance, the definition of its group, if the dictionary has one.
+  def: Option<GroupIdx>,
+  /// Every Group and Instance entry enclosing the block, outermost first; an
+  /// instance's own entry is last.
+  ancestors: Vec<u32>,
+}
+
+impl Place {
+  fn region(region: Region) -> Self {
+    Self {
+      owner: Owner::Region(region),
+      region,
+      def: None,
+      ancestors: Vec::new(),
+    }
+  }
+}
+
 /// A block (a region, or a group instance) being built or edited.
 pub struct BlockMut<'a> {
   msg: &'a mut Message,
-  owner: Owner,
+  place: Place,
 }
 
 /// A repeating group being built or edited.
 pub struct GroupMut<'a> {
   msg: &'a mut Message,
   /// The block the group is in.
-  parent: Owner,
+  parent: Place,
   tag: u32,
   /// The Group entry, once it exists.
   idx: Option<u32>,
+  /// The group's definition, if the dictionary has one.
+  def: Option<GroupIdx>,
 }
 
 /// A position in a message, for editing. See [`Cursor`].
@@ -58,14 +85,14 @@ impl Message {
   pub fn header_mut(&mut self) -> BlockMut<'_> {
     BlockMut {
       msg: self,
-      owner: Owner::Region(Region::Header),
+      place: Place::region(Region::Header),
     }
   }
 
   pub fn body_mut(&mut self) -> BlockMut<'_> {
     BlockMut {
       msg: self,
-      owner: Owner::Region(Region::Body),
+      place: Place::region(Region::Body),
     }
   }
 
@@ -83,7 +110,7 @@ impl Message {
   ) {
     for i in 0..self.tape.len() {
       let e = self.tape[i];
-      if e.kind != Kind::Field || matches!(e.tag, 8 | 9 | 10 | 35) {
+      if e.kind != Kind::Field || is_framing(e.tag) {
         continue;
       }
       let Some(new) = f(e.tag, self.value(&e)) else {
@@ -146,21 +173,37 @@ impl Message {
     }
   }
 
-  fn owner_region(&self, owner: Owner) -> Region {
-    match owner {
-      Owner::Region(r) => r,
-      Owner::Instance(q) => self.region_of(q),
+  /// The place of the block that holds the entry at `idx`, found by walking
+  /// the tape. Views made from a parent view inherit their place instead; this
+  /// is for starting from a position, as [`CursorMut`] does.
+  fn place_of(&self, idx: u32) -> Place {
+    let region = self.region_of(idx);
+    let mut ancestors = Vec::new();
+    let mut c = Cursor { msg: self, idx };
+    while let Some(up) = c.up() {
+      ancestors.push(up.idx);
+      c = up;
+    }
+    ancestors.reverse();
+    match *ancestors.as_slice() {
+      [.., g, q] if self.tape[q as usize].kind == Kind::Instance => Place {
+        owner: Owner::Instance(q),
+        region,
+        def: self.group_def_at(g),
+        ancestors,
+      },
+      _ => Place::region(region),
     }
   }
 
-  /// Insert `entries` at `at`, inside the container `[start, end)` — a block or
-  /// a group — in `region`. Fills the header gap when inserting at its start;
-  /// otherwise shifts what follows, growing every enclosing group and instance
-  /// and moving the region boundaries after `region`.
+  /// Insert `entries` at `at`, inside the groups and instances `ancestors`, in
+  /// `region`. A region-level insert at the start of the header gap fills gap
+  /// slots; anything else shifts what follows, grows each ancestor, and moves
+  /// the region boundaries after `region`.
   fn insert(
     &mut self,
     region: Region,
-    container: Option<(u32, u32)>,
+    ancestors: &[u32],
     at: u32,
     entries: &[Entry],
   ) {
@@ -174,7 +217,7 @@ impl Message {
     if let Some(gap) = self
       .tape
       .get(a)
-      .filter(|e| e.kind == Kind::Gap && container.is_none())
+      .filter(|e| e.kind == Kind::Gap && ancestors.is_empty())
     {
       let room = gap.span();
       if room >= n {
@@ -186,39 +229,26 @@ impl Message {
       }
     }
 
-    if let Some((start, end)) = container {
-      self.grow_ancestors(region, start, end, n as i64);
-    }
+    self.grow(ancestors, n as i64);
     self.tape.splice(a..a, entries.iter().copied());
     self.shift_boundaries(region, n as i64);
   }
 
-  /// Remove the entry at `at` and everything it spans, from the container
-  /// `[start, end)` in `region`.
-  fn remove_at(
-    &mut self,
-    region: Region,
-    container: Option<(u32, u32)>,
-    at: u32,
-  ) {
+  /// Remove the entry at `at` and everything it spans, from inside the groups
+  /// and instances `ancestors`, in `region`.
+  fn remove_at(&mut self, region: Region, ancestors: &[u32], at: u32) {
     self.clean = false;
     let n = self.tape[at as usize].span();
-    if let Some((start, end)) = container {
-      self.grow_ancestors(region, start, end, -(n as i64));
-    }
+    self.grow(ancestors, -(n as i64));
     self.tape.drain(at as usize..(at + n) as usize);
     self.shift_boundaries(region, -(n as i64));
   }
 
-  /// Every group and instance enclosing the container `[start, end)` grows by
-  /// `n` entries.
-  fn grow_ancestors(&mut self, region: Region, start: u32, end: u32, n: i64) {
-    let (region_start, _) = self.region_range(region);
-    for j in region_start..start {
-      let e = &mut self.tape[j as usize];
-      if matches!(e.kind, Kind::Group | Kind::Instance) && j + e.span() >= end {
-        e.len = (e.len as i64 + n) as u32;
-      }
+  /// Each of `ancestors` grows by `n` entries.
+  fn grow(&mut self, ancestors: &[u32], n: i64) {
+    for &a in ancestors {
+      let e = &mut self.tape[a as usize];
+      e.len = (e.len as i64 + n) as u32;
     }
   }
 
@@ -235,7 +265,8 @@ impl Message {
   }
 
   /// The group definition of the Group entry at `g`, if the dictionary knows
-  /// it in this position.
+  /// it in this position. Walks up the tape; views avoid it by carrying the
+  /// definition down from where they were made.
   pub(crate) fn group_def_at(&self, g: u32) -> Option<GroupIdx> {
     let tag = self.tape[g as usize].tag;
     match (Cursor { msg: self, idx: g }).up() {
@@ -254,37 +285,26 @@ impl Message {
     }
   }
 
-  /// The group definition governing a block, if it is a group instance.
-  fn owner_group_def(&self, owner: Owner) -> Option<GroupIdx> {
-    match owner {
-      Owner::Region(_) => None,
-      Owner::Instance(q) => {
-        let g = (Cursor { msg: self, idx: q }).up()?;
-        self.group_def_at(g.idx)
-      }
-    }
-  }
-
-  /// Whether `tag` is a NumInGroup in this block.
-  fn is_group_tag(&self, owner: Owner, tag: u32) -> Option<GroupIdx> {
-    match owner {
+  /// The group `tag` opens in a block, if it is a NumInGroup there.
+  fn is_group_tag(&self, place: &Place, tag: u32) -> Option<GroupIdx> {
+    match place.owner {
       Owner::Region(r) => {
         self
           .dict
           .top_level_group(self.msg_def, r == Region::Header, tag)
       }
-      Owner::Instance(_) => self
-        .owner_group_def(owner)
-        .and_then(|g| self.dict.nested_group(g, tag)),
+      Owner::Instance(_) => {
+        place.def.and_then(|g| self.dict.nested_group(g, tag))
+      }
     }
   }
 
   /// Where a new entry for `tag` goes in a block: in a group instance, at its
   /// place in the group's definition order (so instances we build conform to
   /// TagValue §4.3.6.3); otherwise at the end.
-  fn insert_pos(&self, owner: Owner, tag: u32) -> u32 {
-    let (start, end, _) = self.owner_range(owner);
-    if let Some(def) = self.owner_group_def(owner) {
+  fn insert_pos(&self, place: &Place, tag: u32) -> u32 {
+    let (start, end, _) = self.owner_range(place.owner);
+    if let Some(def) = place.def {
       let members = &self.dict.group(def).members;
       if let Some(&order) = members.get(&tag) {
         let mut i = start;
@@ -298,7 +318,7 @@ impl Message {
       }
       return end;
     }
-    match owner {
+    match place.owner {
       Owner::Region(Region::Header) => self.header_gap().unwrap_or(end),
       _ => end,
     }
@@ -344,7 +364,7 @@ impl Message {
 impl<'a> BlockMut<'a> {
   /// Read the block as it stands.
   pub fn as_block(&self) -> Block<'_> {
-    let (start, end, depth) = self.msg.owner_range(self.owner);
+    let (start, end, depth) = self.msg.owner_range(self.place.owner);
     Block {
       msg: self.msg,
       start,
@@ -353,22 +373,8 @@ impl<'a> BlockMut<'a> {
     }
   }
 
-  fn region(&self) -> Region {
-    self.msg.owner_region(self.owner)
-  }
-
-  fn container(&self) -> Option<(u32, u32)> {
-    match self.owner {
-      Owner::Region(_) => None,
-      Owner::Instance(_) => {
-        let (s, e, _) = self.msg.owner_range(self.owner);
-        Some((s, e))
-      }
-    }
-  }
-
   fn find(&self, tag: u32) -> Option<u32> {
-    let (start, end, depth) = self.msg.owner_range(self.owner);
+    let (start, end, depth) = self.msg.owner_range(self.place.owner);
     self.msg.find_in(start, end, depth, tag, None)
   }
 
@@ -428,7 +434,7 @@ impl<'a> BlockMut<'a> {
     tag: u32,
     write: impl FnOnce(&mut ValueWriter<'_>) -> Result<(), ValueError>,
   ) -> Result<&mut Self, FieldError> {
-    if is_framing(tag) || self.msg.is_group_tag(self.owner, tag).is_some() {
+    if is_framing(tag) || self.msg.is_group_tag(&self.place, tag).is_some() {
       return Err(FieldError::derived(tag));
     }
     match self.msg.dict.kind(tag) {
@@ -439,12 +445,12 @@ impl<'a> BlockMut<'a> {
         ValueWriter::new(&mut self.msg.arena).put_uint(data.len as u64);
         let mut len = self.msg.finish_field(length, off);
         len.kind = Kind::DataLen;
-        self.place(&[len, data]);
+        self.place_entries(&mut [len, data]);
         Ok(self)
       }
       FieldKind::Plain => {
-        let e = self.msg.write_value(tag, false, write)?;
-        self.place(&[e]);
+        let mut e = [self.msg.write_value(tag, false, write)?];
+        self.place_entries(&mut e);
         Ok(self)
       }
     }
@@ -452,10 +458,9 @@ impl<'a> BlockMut<'a> {
 
   /// Put freshly written entries (a field, or a Length and data pair) in the
   /// block, replacing the existing ones for the same tag.
-  fn place(&mut self, entries: &[Entry]) {
-    let (_, _, depth) = self.msg.owner_range(self.owner);
-    let mut entries = entries.to_vec();
-    for e in &mut entries {
+  fn place_entries(&mut self, entries: &mut [Entry]) {
+    let (_, _, depth) = self.msg.owner_range(self.place.owner);
+    for e in entries.iter_mut() {
       e.depth = depth;
     }
     let tag = entries.last().map_or(0, |e| e.tag);
@@ -465,12 +470,14 @@ impl<'a> BlockMut<'a> {
       Some(i) => {
         // A data field: its Length is the entry before it.
         let i = i as usize;
-        self.msg.tape[i - 1..=i].copy_from_slice(&entries);
+        debug_assert_eq!(self.msg.tape[i - 1].kind, Kind::DataLen);
+        self.msg.tape[i - 1..=i].copy_from_slice(entries);
       }
       None => {
-        let at = self.msg.insert_pos(self.owner, entries[0].tag);
-        let container = self.container();
-        self.msg.insert(self.region(), container, at, &entries);
+        let at = self.msg.insert_pos(&self.place, entries[0].tag);
+        self
+          .msg
+          .insert(self.place.region, &self.place.ancestors, at, entries);
       }
     }
   }
@@ -489,8 +496,7 @@ impl<'a> BlockMut<'a> {
     let Some(mut i) = self.find(tag) else {
       return self;
     };
-    let e = self.msg.tape[i as usize];
-    let pair = match e.kind {
+    let pair = match self.msg.tape[i as usize].kind {
       Kind::Data => {
         i -= 1;
         true
@@ -498,12 +504,12 @@ impl<'a> BlockMut<'a> {
       Kind::DataLen => true,
       _ => false,
     };
-    let region = self.region();
-    let container = self.container();
-    self.msg.remove_at(region, container, i);
+    let Place {
+      region, ancestors, ..
+    } = &self.place;
+    self.msg.remove_at(*region, ancestors, i);
     if pair {
-      let container = self.container();
-      self.msg.remove_at(region, container, i);
+      self.msg.remove_at(*region, ancestors, i);
     }
     self
   }
@@ -532,7 +538,7 @@ impl<'a> BlockMut<'a> {
       Kind::DataLen => first + 2,
       _ => src.msg.next_sibling(first),
     };
-    let (_, _, depth) = self.msg.owner_range(self.owner);
+    let (_, _, depth) = self.msg.owner_range(self.place.owner);
     let base_depth = src.msg.tape[first as usize].depth;
     let mut entries = Vec::with_capacity((last - first) as usize);
     for e in &src.msg.tape[first as usize..last as usize] {
@@ -547,9 +553,10 @@ impl<'a> BlockMut<'a> {
       entries.push(e);
     }
     self.remove(tag);
-    let at = self.msg.insert_pos(self.owner, entries[0].tag);
-    let container = self.container();
-    self.msg.insert(self.region(), container, at, &entries);
+    let at = self.msg.insert_pos(&self.place, entries[0].tag);
+    self
+      .msg
+      .insert(self.place.region, &self.place.ancestors, at, &entries);
     true
   }
 
@@ -569,7 +576,7 @@ impl<'a> BlockMut<'a> {
     }
     if is_framing(to)
       || self.msg.dict.kind(to) != FieldKind::Plain
-      || self.msg.is_group_tag(self.owner, to).is_some()
+      || self.msg.is_group_tag(&self.place, to).is_some()
     {
       return Err(FieldError::derived(to));
     }
@@ -579,8 +586,8 @@ impl<'a> BlockMut<'a> {
       Seg::Wire => msg.arena.extend_from_slice(&msg.wire[e.value_range()]),
       Seg::Arena => msg.arena.extend_from_within(e.value_range()),
     }
-    let entry = self.msg.finish_field(to, off);
-    self.place(&[entry]);
+    let mut entry = [self.msg.finish_field(to, off)];
+    self.place_entries(&mut entry);
     Ok(self)
   }
 
@@ -590,11 +597,13 @@ impl<'a> BlockMut<'a> {
     let idx = self
       .find(tag)
       .filter(|&i| self.msg.tape[i as usize].kind == Kind::Group);
+    let def = self.msg.is_group_tag(&self.place, tag);
     GroupMut {
       msg: self.msg,
-      parent: self.owner,
+      parent: self.place.clone(),
       tag,
       idx,
+      def,
     }
   }
 }
@@ -617,8 +626,13 @@ impl<'a> GroupMut<'a> {
     self.len() == 0
   }
 
-  fn region(&self) -> Region {
-    self.msg.owner_region(self.parent)
+  /// The ancestors of the group's own contents: the parent block's, and the
+  /// group itself.
+  fn inner_ancestors(&self, g: u32) -> Vec<u32> {
+    let mut ancestors = Vec::with_capacity(self.parent.ancestors.len() + 2);
+    ancestors.extend_from_slice(&self.parent.ancestors);
+    ancestors.push(g);
+    ancestors
   }
 
   /// The tape index of the `n`th instance, or of the end of the group when
@@ -626,6 +640,9 @@ impl<'a> GroupMut<'a> {
   fn instance_at(&self, n: usize) -> Option<u32> {
     let g = self.idx?;
     let end = self.msg.next_sibling(g);
+    if n == self.len() {
+      return Some(end);
+    }
     let mut i = g + 1;
     for _ in 0..n {
       if i >= end {
@@ -641,15 +658,8 @@ impl<'a> GroupMut<'a> {
     if let Some(g) = self.idx {
       return g;
     }
-    let (_, _, depth) = self.msg.owner_range(self.parent);
-    let at = self.msg.insert_pos(self.parent, self.tag);
-    let container = match self.parent {
-      Owner::Region(_) => None,
-      Owner::Instance(_) => {
-        let (s, e, _) = self.msg.owner_range(self.parent);
-        Some((s, e))
-      }
-    };
+    let (_, _, depth) = self.msg.owner_range(self.parent.owner);
+    let at = self.msg.insert_pos(&self.parent, self.tag);
     let entry = Entry {
       tag: self.tag,
       kind: Kind::Group,
@@ -658,9 +668,26 @@ impl<'a> GroupMut<'a> {
       len: 1,
       ..Default::default()
     };
-    self.msg.insert(self.region(), container, at, &[entry]);
+    self
+      .msg
+      .insert(self.parent.region, &self.parent.ancestors, at, &[entry]);
     self.idx = Some(at);
     at
+  }
+
+  /// A view of the instance entry at `q`.
+  fn instance_view(&mut self, g: u32, q: u32) -> BlockMut<'_> {
+    let mut ancestors = self.inner_ancestors(g);
+    ancestors.push(q);
+    BlockMut {
+      msg: &mut *self.msg,
+      place: Place {
+        owner: Owner::Instance(q),
+        region: self.parent.region,
+        def: self.def,
+        ancestors,
+      },
+    }
   }
 
   /// Add an instance at the end; returns it, empty, to fill in. An instance
@@ -679,41 +706,38 @@ impl<'a> GroupMut<'a> {
     assert!(n <= self.len(), "instance {n} of {}", self.len());
     let g = self.ensure();
     let at = self.instance_at(n).expect("checked above");
-    let depth = self.msg.tape[g as usize].depth + 1;
-    let container = Some((g + 1, self.msg.next_sibling(g)));
     let instance = Entry {
       kind: Kind::Instance,
-      depth,
+      depth: self.msg.tape[g as usize].depth + 1,
       len: 1,
       ..Default::default()
     };
-    self.msg.insert(self.region(), container, at, &[instance]);
+    let ancestors = self.inner_ancestors(g);
+    self
+      .msg
+      .insert(self.parent.region, &ancestors, at, &[instance]);
     self.msg.tape[g as usize].off += 1;
-    BlockMut {
-      msg: &mut *self.msg,
-      owner: Owner::Instance(at),
-    }
+    self.instance_view(g, at)
   }
 
   /// The `n`th instance, to edit.
   pub fn get_mut(&mut self, n: usize) -> Option<BlockMut<'_>> {
-    let i = self.instance_at(n).filter(|_| n < self.len())?;
-    Some(BlockMut {
-      msg: &mut *self.msg,
-      owner: Owner::Instance(i),
-    })
+    let g = self.idx?;
+    let q = self.instance_at(n).filter(|_| n < self.len())?;
+    Some(self.instance_view(g, q))
   }
 
   /// Remove the `n`th instance. Removing the last removes the group.
   pub fn remove(&mut self, n: usize) -> &mut Self {
-    let (Some(g), Some(i)) = (self.idx, self.instance_at(n)) else {
+    let Some(g) = self.idx else {
       return self;
     };
     if n >= self.len() {
       return self;
     }
-    let container = Some((g + 1, self.msg.next_sibling(g)));
-    self.msg.remove_at(self.region(), container, i);
+    let q = self.instance_at(n).expect("in range");
+    let ancestors = self.inner_ancestors(g);
+    self.msg.remove_at(self.parent.region, &ancestors, q);
     self.msg.tape[g as usize].off -= 1;
     if self.msg.tape[g as usize].off == 0 {
       self.clear();
@@ -721,34 +745,49 @@ impl<'a> GroupMut<'a> {
     self
   }
 
-  /// Keep only the instances for which `keep` returns true.
+  /// Keep only the instances for which `keep` returns true. One pass over the
+  /// group, however many go.
   pub fn retain(
     &mut self,
     mut keep: impl FnMut(Block<'_>) -> bool,
   ) -> &mut Self {
-    let mut n = 0;
-    while n < self.len() {
-      let i = self.instance_at(n).expect("in range");
-      if keep(Block::instance(self.msg, i)) {
-        n += 1;
-      } else {
-        self.remove(n);
+    let Some(g) = self.idx else {
+      return self;
+    };
+    let end = self.msg.next_sibling(g);
+    let mut kept: Vec<Entry> = Vec::with_capacity((end - g - 1) as usize);
+    let mut count = 0;
+    let mut q = g + 1;
+    while q < end {
+      let next = self.msg.next_sibling(q);
+      if keep(Block::instance(self.msg, q)) {
+        kept.extend_from_slice(&self.msg.tape[q as usize..next as usize]);
+        count += 1;
       }
+      q = next;
     }
+    let removed = (end - g - 1) as i64 - kept.len() as i64;
+    if removed == 0 {
+      return self;
+    }
+    if count == 0 {
+      return self.clear();
+    }
+    self.msg.clean = false;
+    self.msg.tape.splice((g + 1) as usize..end as usize, kept);
+    let ancestors = self.inner_ancestors(g);
+    self.msg.grow(&ancestors, -removed);
+    self.msg.shift_boundaries(self.parent.region, -removed);
+    self.msg.tape[g as usize].off = count;
     self
   }
 
   /// Remove the whole group.
   pub fn clear(&mut self) -> &mut Self {
     if let Some(g) = self.idx.take() {
-      let container = match self.parent {
-        Owner::Region(_) => None,
-        Owner::Instance(_) => {
-          let (s, e, _) = self.msg.owner_range(self.parent);
-          Some((s, e))
-        }
-      };
-      self.msg.remove_at(self.region(), container, g);
+      self
+        .msg
+        .remove_at(self.parent.region, &self.parent.ancestors, g);
     }
     self
   }
@@ -765,15 +804,10 @@ impl<'a> CursorMut<'a> {
 
   /// The block this position is in, to edit.
   pub fn block_mut(&mut self) -> BlockMut<'_> {
-    let owner = match self.as_cursor().up() {
-      Some(c) if c.kind() == super::EntryKind::Instance => {
-        Owner::Instance(c.idx)
-      }
-      _ => Owner::Region(self.msg.region_of(self.idx)),
-    };
+    let place = self.msg.place_of(self.idx);
     BlockMut {
       msg: &mut *self.msg,
-      owner,
+      place,
     }
   }
 
@@ -812,17 +846,10 @@ impl<'a> CursorMut<'a> {
     let tag = c.tag();
     let mut block = self.block_mut();
     let mut group = block.group_mut(tag);
-    let n = group.len();
-    let at = {
-      let b = group.insert(n);
-      match b.owner {
-        Owner::Instance(i) => i,
-        Owner::Region(_) => unreachable!(),
-      }
-    };
+    let place = group.push().place.clone();
     Some(BlockMut {
       msg: &mut *self.msg,
-      owner: Owner::Instance(at),
+      place,
     })
   }
 }

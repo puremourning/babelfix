@@ -404,6 +404,26 @@ fn bench_construction(c: &mut Criterion) {
     })
   });
 
+  // A large group: building it should cost in proportion to its size.
+  for n in [100usize, 1000] {
+    group.bench_function(format!("build_group_{n}"), |b| {
+      b.iter(|| {
+        let mut msg = Message::new(&dict, "D");
+        let mut body = msg.body_mut();
+        let mut parties = body.group_mut(tags::NoPartyIDs);
+        for i in 0..n {
+          parties
+            .push()
+            .set_raw(tags::PartyID, format!("P{i}").as_bytes())
+            .set_raw(tags::PartyIDSource, b"D")
+            .set_raw(tags::PartyRole, b"3");
+        }
+        drop(parties);
+        black_box(msg)
+      })
+    });
+  }
+
   // The steady state of a pooled message: no allocation.
   group.bench_function("build_simple_reused", |b| {
     let mut msg = Message::new(&dict, "D");
