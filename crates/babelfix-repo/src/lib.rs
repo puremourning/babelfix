@@ -164,10 +164,10 @@ pub trait FieldBlock {
           }
         }
         MessageElement::Component(comp_ref) => {
-          if let Some(component) = fix.get_component(comp_ref.component_id) {
-            if component.is_member(fix, field) {
-              return true;
-            }
+          if let Some(component) = fix.get_component(comp_ref.component_id)
+            && component.is_member(fix, field)
+          {
+            return true;
           }
         }
         MessageElement::Group(group_ref) => {
@@ -439,20 +439,20 @@ impl FixVersion {
     for element in message.get_elements() {
       match element {
         MessageElement::Group(group) => {
-          if let Some(group) = self.get_group(group.group_id) {
-            if group.num_in_group_tag == num_in_group_tag {
-              return Some(group);
-            }
+          if let Some(group) = self.get_group(group.group_id)
+            && group.num_in_group_tag == num_in_group_tag
+          {
+            return Some(group);
           }
         }
         MessageElement::Component(comp_ref) => {
-          if let Some(component) = self.get_component(comp_ref.component_id) {
-            if let Some(group) = self.get_group_by_num_in_group_tag(
+          if let Some(component) = self.get_component(comp_ref.component_id)
+            && let Some(group) = self.get_group_by_num_in_group_tag(
               component.as_ref(),
               num_in_group_tag,
-            ) {
-              return Some(group);
-            }
+            )
+          {
+            return Some(group);
           }
         }
         MessageElement::Field(_) => {}
@@ -483,10 +483,10 @@ impl FixVersion {
       match element {
         MessageElement::Field(field_ref) => {
           field_refs.push(field_ref.clone());
-          if let Some(max) = max_count {
-            if field_refs.len() >= max {
-              break;
-            }
+          if let Some(max) = max_count
+            && field_refs.len() >= max
+          {
+            break;
           }
         }
         MessageElement::Component(comp_ref) => {
@@ -502,10 +502,10 @@ impl FixVersion {
               required: group.required,
             });
 
-            if let Some(max) = max_count {
-              if field_refs.len() >= max {
-                break;
-              }
+            if let Some(max) = max_count
+              && field_refs.len() >= max
+            {
+              break;
             }
 
             // Then add the fields in the group

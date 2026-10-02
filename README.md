@@ -123,7 +123,7 @@ layer from the FIX Session Layer Technical Specification.
 
 ## Minimum supported Rust version
 
-Rust 1.85 (edition 2024).
+Rust 1.98 (edition 2024), the minimum of the `decimix` crate it depends on.
 
 ## Licence
 

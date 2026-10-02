@@ -221,17 +221,17 @@ impl<'d> Parser<'d> {
         ));
       }
       let value = &buf[val_start..val_end];
-      if kind == Kind::DataLen {
-        if let FieldKind::DataLength { data } = self.dict.kind(tag) {
-          let n = parse_uint_value(value).map_err(|_| {
-            ParseError::reject(
-              INCORRECT_DATA_FORMAT_FOR_VALUE,
-              tag,
-              format!("length field {tag} is not a number"),
-            )
-          })?;
-          pending_data = Some((data, n as usize));
-        }
+      if kind == Kind::DataLen
+        && let FieldKind::DataLength { data } = self.dict.kind(tag)
+      {
+        let n = parse_uint_value(value).map_err(|_| {
+          ParseError::reject(
+            INCORRECT_DATA_FORMAT_FOR_VALUE,
+            tag,
+            format!("length field {tag} is not a number"),
+          )
+        })?;
+        pending_data = Some((data, n as usize));
       }
 
       let is_last = self.framing_rules(tag, field_start, value)?;
@@ -271,13 +271,13 @@ impl<'d> Parser<'d> {
       let Some((checksum_at, checksum)) = self.checksum else {
         return Err(ParseError::garbled("no CheckSum(10)"));
       };
-      if let Some((declared, body_start)) = self.body_length {
-        if declared != (checksum_at - body_start) as u64 {
-          return Err(ParseError::garbled(format!(
-            "BodyLength(9) is {declared} but the body is {} bytes",
-            checksum_at - body_start
-          )));
-        }
+      if let Some((declared, body_start)) = self.body_length
+        && declared != (checksum_at - body_start) as u64
+      {
+        return Err(ParseError::garbled(format!(
+          "BodyLength(9) is {declared} but the body is {} bytes",
+          checksum_at - body_start
+        )));
       }
       // Each field before 10 ends in one delimiter; a delimited rendering
       // carries the checksum of the SOH original.
@@ -550,10 +550,10 @@ impl<'d> Parser<'d> {
 
   fn close_instance(&mut self) {
     let len = self.msg.tape.len();
-    if let Some(frame) = self.stack.last() {
-      if let Some(i) = frame.instance {
-        self.msg.tape[i].len = (len - i) as u32;
-      }
+    if let Some(frame) = self.stack.last()
+      && let Some(i) = frame.instance
+    {
+      self.msg.tape[i].len = (len - i) as u32;
     }
   }
 

@@ -270,10 +270,10 @@ impl<'v> Builder<'v> {
     }
     // Second pass, so the Length side is set however the HashMap iterates.
     for (tag, field) in &fix.fields {
-      if let Some(length) = field.length_id {
-        if let Some(info) = fields.get_mut(&length) {
-          info.kind = FieldKind::DataLength { data: *tag };
-        }
+      if let Some(length) = field.length_id
+        && let Some(info) = fields.get_mut(&length)
+      {
+        info.kind = FieldKind::DataLength { data: *tag };
       }
     }
 

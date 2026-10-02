@@ -599,16 +599,15 @@ impl SessionState {
       }
       // Heartbeat
       "0" => {
-        if let Some(test_req_id) = msg.body().get(TestReqID)? {
-          if let Some(recovery_tr_id) = &self.recovery_tr_id {
-            if test_req_id == recovery_tr_id.as_str() {
-              debug!(
-                "Received heartbeat for recovery test request, session is now established"
-              );
-              self.recovery_tr_id = None;
-              out.event(Event::RecoveryCompleted)?;
-            }
-          }
+        if let Some(test_req_id) = msg.body().get(TestReqID)?
+          && let Some(recovery_tr_id) = &self.recovery_tr_id
+          && test_req_id == recovery_tr_id.as_str()
+        {
+          debug!(
+            "Received heartbeat for recovery test request, session is now established"
+          );
+          self.recovery_tr_id = None;
+          out.event(Event::RecoveryCompleted)?;
         }
       }
       // TestRequest
