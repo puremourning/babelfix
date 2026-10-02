@@ -242,26 +242,65 @@ fn rule_empty_values() {
   assert_eq!(e.tag, Some(11));
 }
 
+/// Duplicates are kept by parsing — reads see the first — and caught by the
+/// opt-in `validate_strict`.
 #[test]
 fn rule_duplicates() {
-  let e = parse_err("35=D|11=a|55=X|11=b");
+  let strict = |body: &str| parse(body).validate_strict().unwrap_err();
+
+  let m = parse("35=D|11=a|55=X|11=b");
+  assert_eq!(m.body().req(ClOrdID).unwrap(), "a");
+  let e = strict("35=D|11=a|55=X|11=b");
   assert_eq!(
     e.reject_reason,
     Some(reject_reason::TAG_APPEARS_MORE_THAN_ONCE)
   );
-  // Across header and body too.
+  assert_eq!(e.tag, Some(11));
+
+  // Header and body together, for the rule (parsing still rejects a header
+  // tag after the body began, which is a different rule).
   assert_eq!(
     parse_err("35=D|49=S|11=a|49=T").reject_reason,
     Some(reject_reason::TAG_SPECIFIED_OUT_OF_REQUIRED_ORDER)
   );
+
   // Within one group instance.
-  let e = parse_err("35=D|11=a|453=1|448=A|447=D|447=D|55=S");
+  let e = strict("35=D|11=a|453=1|448=A|447=D|447=D|55=S");
   assert_eq!(
     e.reject_reason,
     Some(reject_reason::TAG_APPEARS_MORE_THAN_ONCE)
   );
+  assert_eq!(e.tag, Some(447));
+
   // But the same tag in different instances is fine.
-  parse("35=D|11=a|453=2|448=A|447=D|448=B|447=D|55=S");
+  parse("35=D|11=a|453=2|448=A|447=D|448=B|447=D|55=S")
+    .validate_strict()
+    .unwrap();
+  parse(NOS).validate_strict().unwrap();
+}
+
+#[test]
+fn strict_validation_checks_group_field_order() {
+  // Parsing accepts any order after the delimiter.
+  let m = parse("35=D|11=a|453=1|448=A|452=3|447=D|55=S");
+  let e = m.validate_strict().unwrap_err();
+  assert_eq!(
+    e.reject_reason,
+    Some(reject_reason::REPEATING_GROUP_FIELDS_OUT_OF_ORDER)
+  );
+  assert_eq!(e.tag, Some(447));
+  // Built messages are in definition order, so they pass.
+  let mut b = Message::new(&dict(), "D");
+  b.body_mut()
+    .group_mut(NoPartyIDs)
+    .push()
+    .set(PartyRole, PartyRole::ClientID)
+    .set(
+      PartyIDSource,
+      crate::schema::codesets::PartyIDSource::Proprietary,
+    )
+    .set(PartyID, "X");
+  b.validate_strict().unwrap();
 }
 
 #[test]
@@ -285,8 +324,11 @@ fn rule_num_in_group_count() {
 
 #[test]
 fn rule_unknown_groups() {
-  // An unknown group with two instances: its delimiter repeats.
-  let e = parse_err("35=D|11=a|9000=2|9001=x|9001=y|55=S");
+  // An unknown group with two instances: its delimiter repeats, which
+  // strict validation catches.
+  let e = parse("35=D|11=a|9000=2|9001=x|9001=y|55=S")
+    .validate_strict()
+    .unwrap_err();
   assert_eq!(
     e.reject_reason,
     Some(reject_reason::TAG_APPEARS_MORE_THAN_ONCE)

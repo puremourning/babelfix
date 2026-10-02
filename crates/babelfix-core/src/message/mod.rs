@@ -40,6 +40,7 @@ mod parse;
 mod path;
 pub mod tape;
 pub mod types;
+mod validate;
 mod view;
 
 pub use dict::{Dictionaries, Dictionary};

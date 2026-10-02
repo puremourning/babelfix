@@ -7,16 +7,21 @@
 //! | 8, 9, 35 first, in that order; 10 last (TV §4.3.3) | enforced |
 //! | header, then body, then trailer (TV §4.3.3) | a header tag after the body has begun: reason 14 |
 //! | no empty values (TV §4.2.5) | reason 4 |
-//! | a tag at most once per message, or per group instance (TV §4.3.2) | reason 13 |
 //! | NumInGroup matches the instances present | reason 16 |
 //! | a data field immediately follows its Length (TV §4.2.5) | enforced; its value is exactly Length bytes, SOH and all |
 //! | field order *within* a group instance (TV §4.3.6.3) | not checked: fields join an instance by membership, and an instance starts at its delimiter |
 //! | unknown tags | kept |
+//! | a tag at most once per message, or per group instance (TV §4.3.2) | not checked; see below |
 //!
-//! An unknown group falls out of the duplicate rule: its NumInGroup looks like
-//! a plain field, so its second instance's first field is a duplicate. A
-//! one-instance unknown group cannot be told apart from a set of unknown tags,
-//! and is accepted as one.
+//! Duplicate tags are seen in the wild, whether to tolerate them is a matter of
+//! counterparty agreement, and checking costs a scan per field — so parsing
+//! keeps them, and reads see the first occurrence. Call
+//! [`Message::validate_strict`] to hold a message to the rule (reason 13), and
+//! to field order within group instances (reason 15).
+//!
+//! An unknown group is caught by the same rule: its NumInGroup looks like a
+//! plain field, so its second instance's first field is a duplicate. A
+//! one-instance unknown group cannot be told apart from a set of unknown tags.
 
 use std::sync::Arc;
 
@@ -398,8 +403,8 @@ impl<'d> Parser<'d> {
   }
 
   /// Place a parsed field on the tape: close groups it does not belong to,
-  /// start an instance if it is a delimiter, move between regions, check for
-  /// duplicates, and open a group if it is a NumInGroup.
+  /// start an instance if it is a delimiter, move between regions, and open a
+  /// group if it is a NumInGroup.
   fn push(&mut self, mut entry: Entry, value: &[u8]) -> Result<(), ParseError> {
     let tag = entry.tag;
 
@@ -442,19 +447,6 @@ impl<'d> Parser<'d> {
       }
     };
     entry.depth = depth;
-
-    // A tag appears at most once in its block.
-    let block_start = match self.stack.last() {
-      Some(frame) => frame.instance.map_or(frame.entry, |i| i + 1),
-      None => 0,
-    };
-    if self.appears_in(block_start, depth, tag) {
-      return Err(ParseError::reject(
-        TAG_APPEARS_MORE_THAN_ONCE,
-        tag,
-        format!("tag {tag} appears more than once"),
-      ));
-    }
 
     let group = if entry.kind == Kind::Field {
       match self.stack.last() {
@@ -508,13 +500,6 @@ impl<'d> Parser<'d> {
   /// nothing holds a tape index that the insert could invalidate.
   fn push_late_header(&mut self, mut entry: Entry) -> Result<(), ParseError> {
     entry.depth = 0;
-    if self.appears_in(0, 0, entry.tag) {
-      return Err(ParseError::reject(
-        TAG_APPEARS_MORE_THAN_ONCE,
-        entry.tag,
-        format!("tag {} appears more than once", entry.tag),
-      ));
-    }
     match self.msg.header_gap() {
       Some(gap) => {
         let room = self.msg.tape[gap as usize].span();
@@ -533,19 +518,6 @@ impl<'d> Parser<'d> {
       }
     }
     Ok(())
-  }
-
-  fn appears_in(&self, start: usize, depth: u8, tag: u32) -> bool {
-    let tape = &self.msg.tape;
-    let mut i = start;
-    while i < tape.len() {
-      let e = &tape[i];
-      if e.depth == depth && e.tag == tag && e.is_tagged() {
-        return true;
-      }
-      i += e.span() as usize;
-    }
-    false
   }
 
   /// The field is the open group's delimiter: end the current instance and
