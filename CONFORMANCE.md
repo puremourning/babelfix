@@ -37,11 +37,11 @@ deviations:
 
 ### 1. SequenceReset-Reset is unsupported — **M**
 
-*S§4.8.6, S§4.8.8 Table 3, TC 11.* `SessionManager::gap_fill_new_seq_num`
+*S§4.8.6, S§4.8.8 Table 3, TC 11.* `SessionState::gap_fill_new_seq_num`
 (`babelfix-core/src/session/state.rs`) requires `GapFillFlag(123)` to be present
-and equal to `Y`. An absent flag produces `ProtocolViolation("Missing
-GapFillFlag")` and `123=N` produces `ProtocolViolation("Sequence reset message
-is garbage and not supported")`; both terminate the session.
+and equal to `Y`. An absent flag and `123=N` both produce
+`ProtocolViolation("Sequence reset message is garbage and not supported")`,
+which terminates the session.
 
 `GapFillFlag` is an optional field whose default is Reset, and Reset is
 mandatory to support: accept the message without regard to its `MsgSeqNum`;
@@ -51,10 +51,10 @@ a warning; `NewSeqNo < NextNumIn` is rejected with `SessionRejectReason(373)` of
 
 ### 2. Garbled messages terminate the connection — **M**
 
-*S§4.5.2, TC 2d, 2m, 3b, 3c, 3e.* The codec returns `Err` for an incorrect
-checksum (`babelfix-tokio/src/endpoint.rs`) or an unparseable frame, and
-the session loop treats a decoder error as fatal
-(`babelfix-core/src/session/state.rs`).
+*S§4.5.2, TC 2d, 2m, 3b, 3c, 3e.* `FixDecoder::decode`
+(`babelfix-core/src/codec.rs`) returns `Err` for an incorrect checksum or an
+unparseable frame (`babelfix-core/src/message/parse.rs`), and the driver
+(`babelfix-core/src/driver.rs`) treats a decoder error as fatal.
 
 A garbled message is presumed to be a transmission error rather than a peer
 defect. The specification requires disregarding it, **not** incrementing
@@ -69,8 +69,11 @@ next message boundary, which the current codec does not attempt.
 ### 3. `Reject(35=3)` is never generated — **M**
 
 *S§4.5.4 and many test cases.* No `Reject` is constructed anywhere in the
-crate, and `SessionRejectReason(373)` is never populated. Every mandatory
-session level rejection is therefore missing, including:
+crate. The parser does classify its errors — a `ParseError` carries the
+`SessionRejectReason(373)` and tag a Reject would need, and
+`Message::validate_strict` checks reasons 13 and 15 on request — but the
+session never sends one. Every mandatory session level rejection is therefore
+missing, including:
 
 | Condition | `SessionRejectReason(373)` | Reference |
 |---|---|---|
@@ -87,9 +90,11 @@ session level rejection is therefore missing, including:
 | Repeating group problems | 15, 16 | TC 14i, 14j |
 
 Where the specification calls for a `Reject`, the current implementation either
-ignores the condition or terminates the session with a `ProtocolViolation`.
-Terminating is the more damaging of the two: a `Reject` leaves the session
-usable.
+ignores the condition or terminates the session: a parse error (reasons 14 and
+16, for example) is fatal, as in item 2, and the duplicate and group order
+rules (13, 15) are not checked at all unless the application calls
+`validate_strict`. Terminating is the more damaging of the two: a `Reject`
+leaves the session usable.
 
 ### 4. `PossDupFlag(43)` is not consulted on an inbound message — **M**
 
@@ -103,16 +108,17 @@ More generally there is no inbound possible-duplicate handling at all: no
 duplicate suppression, and no validation that `OrigSendingTime(122)` is present
 and no later than `SendingTime(52)` (TC 2f, 2g).
 
-### 5. Inbound `Reject` and `BusinessMessageReject` are discarded — **M**
+### 5. Inbound `Reject` is discarded — **M**
 
-*S§4.5.4, TC 7.* `is_admin_message` (`babelfix-core/src/message.rs`)
-includes `3`, `j`, `h`, `Y` and `V`, and `dispatch_message`'s catch-all admin
-arm (`babelfix-core/src/session/state.rs`) ignores them. Sequence number
-handling is correct — the message is counted and the session continues — but
-the application is never told that a message it sent was rejected.
+*S§4.5.4, TC 7.* `dispatch_message`'s catch-all admin arm
+(`babelfix-core/src/session/state.rs`) ignores a `Reject(35=3)`. Sequence
+number handling is correct — the message is counted and the session continues
+— but the application is only told through `Event::RawMessageReceived`, which
+is meant for auditing, not through an event of its own.
 
-There is no `SessionEvent` variant that could carry this; `SessionEvent::Error`
-is present but commented out.
+`BusinessMessageReject(35=j)` is an application message
+(`Message::is_admin`, `babelfix-core/src/message/view.rs`) and is delivered
+as `Event::MessageReceived`.
 
 ### 6. Simultaneous resend requests terminate the session — **M**
 
@@ -127,10 +133,10 @@ which is handled.
 ### 7. A missing `MsgSeqNum` terminates the session abruptly
 
 *S§4.5.3.* `handle_session_message`
-(`babelfix-core/src/session/state.rs`) returns
-`ProtocolViolation("Missing MsgSeqNum")`, dropping the transport layer
-connection. The specification asks for a Logout naming the missing field, since
-this indicates a defect that will only be resolved by changing software.
+(`babelfix-core/src/session/state.rs`) returns an error ("tag 34 is
+missing"), dropping the transport layer connection. The specification asks for
+a Logout naming the missing field, since this indicates a defect that will only
+be resolved by changing software.
 
 ### 8. Message-level identity and timestamp validation is absent — **M**
 
@@ -142,10 +148,11 @@ this indicates a defect that will only be resolved by changing software.
   `SessionRejectReason(373)` of 9 followed by a Logout.
 * `SendingTime(52)` is not validated. There is no SendingTimeThreshold concept,
   so a message from a peer with a badly skewed clock is accepted.
-* `BeginString(8)` is not validated per message. The decoder caches the version
-  inferred from the first message
-  (`babelfix-tokio/src/endpoint.rs`), so a later message with a different
-  `BeginString` is silently parsed under the original version.
+* `BeginString(8)` is validated per message, but a mismatch is handled as a
+  garbled message — fatal, as in item 2 — rather than with the Logout the
+  specification asks for. The decoder (`babelfix-core/src/codec.rs`) latches
+  the version of the first message and `Message::parse` rejects a later one
+  whose `BeginString` differs.
 
 ### 9. The Logout initiator does not wait for the acknowledgement
 
@@ -159,8 +166,8 @@ opportunity to do so.
 The heartbeat timeout Logout (`babelfix-core/src/session/state.rs`) closes
 immediately for the same reason.
 
-A related edge: `SessionCommand::Disconnect` routes its Logout through
-`SessionManager::send`, which queues outbound messages while a resend is in
+A related edge: `Command::Disconnect` routes its Logout through
+`SessionState::send`, which queues outbound messages while a resend is in
 progress. Disconnecting mid-resend therefore queues the Logout and then breaks
 out of the loop, so nothing is transmitted.
 
@@ -168,7 +175,7 @@ out of the loop, so nothing is transmitted.
 
 *S§4.3.4, S§4.3.5.* Each peer uses its own configured interval. The value in
 the inbound Logon is never read, and the acceptor echoes its own value rather
-than the initiator's (`babelfix-tokio/src/endpoint.rs`). The specification
+than the initiator's (`logon_message`, `babelfix-core/src/session/handshake.rs`). The specification
 requires both peers to use the same value within a connection.
 
 `HeartBtInt=0`, meaning heartbeats are disabled, is not handled.
@@ -182,18 +189,8 @@ out of band.
 ### 11. Smaller items
 
 * `DefaultApplVerID(1137)` is hardcoded to `"10"` on outbound Logons
-  (`babelfix-tokio/src/endpoint.rs`), and `EncryptMethod(98)` on an
-  inbound Logon is not validated.
+  (`logon_message`, `babelfix-core/src/session/handshake.rs`), and
+  `EncryptMethod(98)` on an inbound Logon is not validated.
 * Gap fills do not carry `PossDupFlag=Y`. *S§4.8.4* requires it on any message
   sent in response to a `ResendRequest`. Receivers do not generally depend on
   it, but most engines set it.
-* `Session::send` serialises with `as_message()` rather than `into_message()`,
-  which does not skip unset elements. A `FixMessage` reported via
-  `SessionEvent::RawMessageSent` can therefore carry empty tags that
-  `FixMessage::write_to` then omits from the wire, so the event is not a
-  byte-exact record of what was transmitted.
-* Boolean-valued fields whose FIX Orchestra type is a code set rather than the
-  primitive `Boolean` — `PossDupFlag(43)`, `PossResend(97)`, `GapFillFlag(123)`
-  — are parsed into `TypedValue::String` rather than `TypedValue::Boolean`.
-  This is a repository typing issue rather than a session layer one, but it
-  surfaces in the typed message API.

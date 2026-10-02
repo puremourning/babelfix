@@ -58,6 +58,7 @@ use crate::time::{TimePrecision, write_fix_time};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SessionIdentifier {
+  /// The wire `BeginString(8)`: `FIX.4.4`, or `FIXT.1.1` for FIX.Latest.
   pub begin_string: String,
   /// Our `SenderCompID` — the identifier we put on outbound messages.
   pub sender_comp_id: String,
@@ -69,8 +70,11 @@ pub struct SessionIdentifier {
 /// session: the sequence numbers, plus the negotiated settings.
 #[derive(Clone)]
 pub struct Session {
+  /// The `MsgSeqNum` of the next message we send.
   pub next_out_seq_num: u64,
+  /// The `MsgSeqNum` we expect on the next message from the peer.
   pub next_in_seq_num: u64,
+  /// How often each side must send something (`HeartBtInt`).
   pub heartbeat_interval: std::time::Duration,
   /// The FIX version the session speaks.
   pub dict: Arc<Dictionary>,
@@ -152,24 +156,30 @@ impl std::fmt::Debug for Unstamped<'_> {
 
 /// Something the application asks of a live session.
 ///
-/// Note there is no "get session state" command: the state is right there, via
-/// [`SessionState::session`]. It only needed to be a message when the state
-/// lived inside a detached task.
+/// There is no "get session state" command: the state is right there, via
+/// [`SessionState::session`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Command {
   /// Send the message on the session. It is assigned the next outbound sequence
   /// number and has its session header fields populated. Any supplied
-  /// `MsgSeqNum`, `SendingTime`, `SenderCompID` or `TargetCompID` is overwritten
-  /// — applications cannot set these correctly, so they are left to the session.
+  /// `MsgSeqNum`, `PossDupFlag`, `SendingTime`, `SenderCompID` or
+  /// `TargetCompID` is overwritten — applications cannot set these correctly,
+  /// so they are left to the session.
   ///
-  /// It is an error to send while a replay is in progress; use
-  /// [`Command::Replay`] to answer an [`Event::ResendRequest`].
+  /// A message sent while a replay is in progress is queued, and goes out after
+  /// [`Command::ReplayComplete`]. To answer an [`Event::ResendRequest`], use
+  /// [`Command::Replay`].
   Send(Message),
 
   /// Replay the sequence number in `MsgSeqNum` with the supplied message. Only
   /// valid between an [`Event::ResendRequest`] and the matching
   /// [`Command::ReplayComplete`].
+  ///
+  /// Supply the message as it was sent: its `SendingTime` is moved to
+  /// `OrigSendingTime`, `PossDupFlag=Y` is set, and a new `SendingTime` is
+  /// stamped. Admin messages other than Reject and XMLnonFIX are gap-filled
+  /// rather than resent (FIX Session Layer §4.8.5).
   Replay(Message),
 
   /// All messages for the current resend request have been sent. Any remaining
@@ -195,7 +205,8 @@ pub enum Event<'a> {
   /// it is missing from us.
   RecoveryCompleted,
 
-  /// The current sequence numbers. Applications must persist these to recover
+  /// The current sequence numbers, emitted for every inbound message that
+  /// passes the sequence checks. Applications must persist these to recover
   /// the session; they are what an acceptor supplies when a peer reconnects.
   SessionState(&'a Session),
 

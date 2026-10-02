@@ -1,9 +1,5 @@
-//! The session state machine proper.
-//!
-//! Ported from the async `SessionManager` this replaces. Every `.await` in that
-//! version was either a write to the socket sink or a send on the event
-//! channel, so the protocol logic underneath was already synchronous; here it
-//! writes into a [`SessionOutput`] instead.
+//! The session state machine proper. It performs no I/O: it writes messages
+//! and events into a [`SessionOutput`].
 
 use std::time::Instant;
 
@@ -31,10 +27,9 @@ const MISSED_HEARTBEATS_BEFORE_LOGOUT: u32 = 3;
 
 /// Heartbeat deadlines, held as absolute instants.
 ///
-/// The async version used a pair of `tokio::time::Interval`s. Those default to
-/// `MissedTickBehavior::Burst`, so a session that was blocked past two
-/// deadlines would get two ticks back to back and could jump straight to two
-/// missed heartbeats. Deadline arithmetic cannot burst.
+/// Deadlines rather than intervals: a session blocked past two deadlines sees
+/// one late timeout, not two back to back, so it cannot jump straight to two
+/// missed heartbeats.
 #[derive(Debug)]
 struct Timers {
   interval: std::time::Duration,
@@ -127,13 +122,8 @@ impl SessionState {
     }
   }
 
-  /// The current sequence numbers and settings.
-  ///
-  /// This replaces the old `GetSessionState` command: with the state machine no
-  /// longer hidden inside a task, asking it what it thinks is a method call.
-  /// That also removes a hazard by construction — polling the session used to
-  /// travel the same path as commands that transmit, and had to be careful not
-  /// to reset the outbound heartbeat timer on the way past.
+  /// The current sequence numbers and settings. Reading them puts nothing on
+  /// the wire and does not touch the heartbeat timers.
   pub fn session(&self) -> &Session {
     &self.session
   }
@@ -157,13 +147,12 @@ impl SessionState {
     Some(self.timers.next_out.min(self.timers.next_in))
   }
 
-  /// Transmit a message belonging to the logon exchange.
+  /// Transmit a message belonging to the logon exchange, with the session's
+  /// sequence number and header fields applied.
   ///
-  /// The handshake — reading the first frame, deriving the session identity
-  /// from it, and asking the application for the persisted sequence numbers —
-  /// still lives in the driver, so the driver needs a way to put its Logon on
-  /// the wire with the session's sequence number and header fields applied.
-  /// This is that seam, and it closes when logon moves in here.
+  /// The [`AcceptorHandshake`](super::AcceptorHandshake) and
+  /// [`InitiatorHandshake`](super::InitiatorHandshake) use this to send their
+  /// Logon; a hand-rolled handshake can too.
   pub fn send_logon(
     &mut self,
     msg: Message,
@@ -317,9 +306,9 @@ impl SessionState {
 
   /// Stamp the session header fields onto `msg` and hand it to `out`.
   ///
-  /// This was `Session::send`. The `SendingTime` is deliberately left empty for
-  /// the output to fill: one clock read per message, taken as close to the wire
-  /// as the sans-io boundary allows.
+  /// The `SendingTime` is deliberately left for the output to fill: one clock
+  /// read per message, taken as close to the wire as the sans-io boundary
+  /// allows.
   fn transmit(
     &mut self,
     mut msg: Message,

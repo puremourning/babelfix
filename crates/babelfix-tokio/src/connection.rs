@@ -45,6 +45,10 @@
 //! one loop, send from inside the loop". It is a different shape, not a
 //! drop-in.
 //!
+//! It takes no [`EndpointConfig`](crate::endpoint::EndpointConfig): the peer
+//! has 30 seconds to complete the logon exchange, and frames are limited to
+//! [`DEFAULT_MAX_FRAME_LEN`](babelfix_core::codec::DEFAULT_MAX_FRAME_LEN).
+//!
 //! [`run`]: SessionConnection::run
 //! [`step`]: SessionConnection::step
 //! [`AsyncRead`]: tokio::io::AsyncRead

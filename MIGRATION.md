@@ -8,7 +8,9 @@ type, `message::Message`, whether it was parsed or built, and the session
 hands you the codec's message without converting it.
 
 This guide maps the old API onto the new one. The `message` module docs
-cover the API itself, and `message_proposal.md` explains the design.
+cover the API itself, and
+[`docs/message_proposal.md`](https://github.com/puremourning/babelfix/blob/main/docs/message_proposal.md)
+explains the design.
 
 ## At a glance
 
@@ -26,7 +28,7 @@ cover the API itself, and `message_proposal.md` explains the design.
 | `msg.body.set_tag(t, v)`                                                              | `msg.body_mut().set(field, v)`, or `.set_raw(t, bytes)`                                    |
 | `msg.body.remove_tag(t)`                                                              | `msg.body_mut().remove(t)`                                                                 |
 | `msg.body.group_mut(n).push(block)`                                                   | `msg.body_mut().group_mut(n).push().set(..)`                                               |
-| `FixMessage::from_bytes(fix, bytes)` → `(msg, consumed)`                              | `Message::parse(&dict, bytes)?`                                                            |
+| `FixMessage::from_bytes(fix, bytes)` → `(msg, consumed)`                              | `Message::parse(&dict, bytes)?` (exactly one message), or `FixDecoder::decode` for a stream |
 | `FixMessage::from_bytes_delimited(fix, bytes, b'\|')`                                 | `Message::parse_delimited(&dict, &bytes, b'\|')?`, or `parse_fragment` for hand-typed text |
 | `builder::Message::from_message(&m)` / `as_message()` / `into_message()`              | (nothing: there is one type)                                                               |
 | `msg.write_to(&mut buf, SOH)` / `into_bytes()`                                        | `msg.encode(&mut buf)` / `msg.to_bytes()`                                                  |
@@ -48,10 +50,26 @@ let session = babelfix::session::Session::new(fix44.clone());
 let endpoint = babelfix::endpoint::serve(addr, dicts.clone(), config).await?;
 ```
 
+Dictionaries are named by Orchestra version: `FIX.4.2`, `FIX.4.4` and
+`FIX.Latest`. FIX.Latest goes on the wire as `FIXT.1.1`, so
+`dicts.get("FIXT.1.1")` finds nothing, but
+`dicts.for_begin_string(b"FIXT.1.1")` finds FIX.Latest. For Orchestra files of
+your own, `Dictionaries::new(&repository::load_orchestration(path)?)`.
+
 An acceptor learns the version from the peer's first message, which is why
 endpoints, connections and `DriverConfig` take the whole `Dictionaries`. Answer
-`EndpointEvent::NewSession` with
-`dicts.for_begin_string(session_id.begin_string.as_bytes())`.
+`EndpointEvent::NewSession` with a `Session` for the peer's version:
+
+```rust
+EndpointEvent::NewSession { session_id, response } => {
+    // Use the sequence numbers you persisted for this peer.
+    let session = dicts
+        .for_begin_string(session_id.begin_string.as_bytes())
+        .map(|d| Session::new(d.clone()))
+        .ok_or_else(|| Error::unspecified("unknown FIX version"));
+    let _ = response.send(session);
+}
+```
 
 The full Orchestra model (components, documentation, everything a UI shows)
 is still `repository::FixVersion`, available from any dictionary as
@@ -107,6 +125,9 @@ What `get` returns depends on the field's datatype:
 `get` returns `Ok(None)` when the field is absent and `Err(FieldError)` when it
 is present but malformed. `FieldError` carries the tag, and
 `reject_reason()` gives the `SessionRejectReason`.
+
+`Decimal` compares as text: `"1.0"` and `"1.00"` are not equal. Convert with
+`get_as` to compare numbers.
 
 ### Decimals
 
@@ -175,10 +196,17 @@ parties.push().set(PartyID, "CLIENT-A").set(PartyRole, PartyRole::ClientID);
   numbers are integers, decimals are `Decimal` or decimix types, codesets are
   the enum. For anything the dictionary types differently from what a
   counterparty sends, use `set_raw(tag, bytes)`.
+- **Timestamps take a precision.** `set(TransactTime, (Utc::now(),
+  TimePrecision::Micros))`; a bare `DateTime<Utc>` doesn't say how many
+  fractional digits to write.
+- **Text outside Latin-1 is an invalid value.** Like an empty value, it fails
+  a `debug_assert!` in `set` and removes the field in release builds; use
+  `try_set` for text you didn't write.
 - **No empty values.** FIX has none. `set(.., "")` fails a `debug_assert!`
   and removes the field in release builds; `try_set` returns the error instead.
 - **NumInGroup is maintained for you.** You never write it. An instance left
-  empty is not written or counted.
+  empty is removed when you let go of it, and its group with it if that was
+  the last one, so `len()` is always what is written.
 - **Order within a group instance is handled for you.** Fields go in the
   group's definition order, whatever order you set them in.
 - **Data fields are set as pairs.** `set(RawData, bytes)` writes `RawData`
@@ -227,14 +255,32 @@ what a UI holds between frames, take its `path()`:
 
 ```rust
 let path: FieldPath = cursor.path();            // e.g. body/453[1]/452
-msg.cursor_mut(&path)?.set_raw(b"new")?;        // edit in place
-msg.cursor_mut(&group_path)?.push_instance();   // add a repeat
-msg.cursor_mut(&path)?.remove();
 "body/453[1]/452".parse::<FieldPath>()?;        // and back
+
+// A path may no longer resolve, so cursor_mut is an Option.
+if let Some(mut c) = msg.cursor_mut(&path) {
+    c.set_raw(b"new")?;                         // edit in place
+}
+if let Some(mut c) = msg.cursor_mut(&group_path) {
+    if let Some(mut repeat) = c.push_instance() { // add a repeat
+        repeat.set_raw(tags::PartyID, b"?");    // (an empty one is removed)
+    }
+}
+if let Some(c) = msg.cursor_mut(&path) {
+    c.remove();
+}
 ```
 
-`msg.values_mut(|tag, value| ...)` rewrites values throughout the message,
-for placeholders like `{{now}}`. `msg.normalize()` puts every block in
+`values_mut` rewrites values throughout the message, for placeholders like
+`{{now}}`. Return `Some(bytes)` to replace a value, `None` to leave it:
+
+```rust
+msg.values_mut(|_tag, value| (value == b"{{now}}").then(|| now.clone()));
+```
+
+It skips data fields, and BeginString, BodyLength, MsgType and CheckSum. An
+empty replacement, or one containing SOH, is ignored (and fails a
+`debug_assert!`). `msg.normalize()` puts every block in
 definition order. `format!("{msg:#?}")` prints one field per line, with names
 and codeset names from the dictionary.
 
@@ -249,7 +295,7 @@ and codeset names from the dictionary.
   they arrived. A sent message re-encodes identically with `to_bytes()`.
 
 If you implement `SessionOutput` yourself, `transmit` now receives an
-`Unstamped` message. Reading your clock and stamping is the only way to reach
+`Unstamped` message (`babelfix::session::Unstamped`). Reading your clock and stamping is the only way to reach
 it:
 
 ```rust

@@ -23,7 +23,7 @@
 //! [`SessionEvent::MessageReceived`] (inbound *application* messages),
 //! [`SessionEvent::ResendRequest`] (inbound *resend requests*), and
 //! [`SessionEvent::Disconnected`], though handling
-//! [`SessionEvent::RawMessageSent`] and [`SessionEvent::SessionState`] are
+//! [`SessionEvent::RawMessageSent`] and [`SessionEvent::SessionState`] is
 //! usually needed in order to correctly recover the session.
 //!
 //! ```no_run
@@ -63,8 +63,8 @@ use babelfix_core::codec::FixEncoder;
 /// you are writing a driver of your own, in which case `babelfix-core` is
 /// probably the dependency you want.
 pub use babelfix_core::session::{
-  Command, Event, Progress, Replay, Session, SessionIdentifier, SessionOutput,
-  SessionState,
+  Command, Event, EventSink, Progress, Replay, Session, SessionIdentifier,
+  SessionOutput, SessionState, Unstamped,
 };
 
 #[derive(Debug)]
@@ -72,12 +72,13 @@ pub use babelfix_core::session::{
 pub enum SessionCommand {
   /// Send the message on the session. The message is assigned the next outbound
   /// sequence number and has its session header fields populated. Any supplied
-  /// `MsgSeqNum`, `SendingTime`, `SenderCompID` or `TargetCompID` is overwritten
-  /// — applications cannot set these correctly, so they are left to the session.
+  /// `MsgSeqNum`, `PossDupFlag`, `SendingTime`, `SenderCompID` or
+  /// `TargetCompID` is overwritten — applications cannot set these correctly,
+  /// so they are left to the session.
   ///
-  /// It is an error to attempt to send a message while a replay is in progress;
-  /// use [`SessionCommand::Replay`] to send messages in response to a
-  /// [`SessionEvent::ResendRequest`].
+  /// A message sent while a replay is in progress is queued, and goes out
+  /// after [`SessionCommand::ReplayComplete`]. To answer a
+  /// [`SessionEvent::ResendRequest`], use [`SessionCommand::Replay`].
   Send(crate::message::Message),
 
   /// Replay the sequence number in `MsgSeqNum` with the supplied message. Only
@@ -113,12 +114,13 @@ pub enum SessionEvent {
   ConnectionEstablished,
 
   /// Local recovery has completed - the remote has sent all messages missed on
-  /// the session. Note that this does not mean the remote has recevied, or even
+  /// the session. Note that this does not mean the remote has received, or even
   /// requested, any missing messages from us.
   RecoveryCompleted,
 
-  /// Occasionally emitted to indicate the current state of the session,
-  /// including the next expected inbound and outbound sequence numbers.
+  /// The current state of the session, including the next expected inbound and
+  /// outbound sequence numbers. Emitted for every inbound message that passes
+  /// the sequence checks, before it is acted on.
   /// The state is also included in other events and should be persisted by
   /// applications in order to correctly recover - the inbound and outbound
   /// sequence numbers are required to be provided in response to
@@ -129,7 +131,7 @@ pub enum SessionEvent {
   /// this is valid or not. Includes admin messages (logon, logout, resend
   /// request, etc.). Useful for auditing, logging and display. Business
   /// logic and processing should not use this message: rather use the
-  /// [`SessionEvent::MessageReceived`] event, which emitted for valid,
+  /// [`SessionEvent::MessageReceived`] event, which is emitted for valid,
   /// well-sequenced messages.
   ///
   /// FIXME: Should include the socket receive time
@@ -145,6 +147,10 @@ pub enum SessionEvent {
   /// so that it can be replayed in response to any future resend request
   /// [`SessionEvent::ResendRequest`]. Note that this library does not provide
   /// any persistence at all, so you must implement your own persistence.
+  ///
+  /// This is the message, not its bytes:
+  /// [`Message::wire`](crate::message::Message::wire) is `None` for it. Encode
+  /// it again for the bytes that were sent.
   RawMessageSent(crate::message::Message, Session),
 
   /// Applications should use this event for business processing.
@@ -169,6 +175,10 @@ pub enum SessionEvent {
   /// Only messages that were provided by the [`SessionEvent::RawMessageSent`]
   /// event should be replayed, or the application should faithfully construct
   /// each equivalent with the relevant sequence number populated in `MsgSeqNum`.
+  /// Replay the message as it was sent: the session moves its `SendingTime` to
+  /// `OrigSendingTime`, sets `PossDupFlag=Y` and stamps a new `SendingTime`.
+  /// Admin messages other than Reject and XMLnonFIX are gap-filled rather than
+  /// resent.
   /// Any skipped sequence numbers will be gap-filled automatically, allowing
   /// applications to decide not to replay certain messages, for example to avoid
   /// re-sending a stale order request. Once all messages have been replayed, the
@@ -309,8 +319,9 @@ impl SessionOutput for PendingOutput {
 ///
 /// The state is passed to [`run`](Self::run) rather than owned, because until
 /// the logon exchange completes it belongs to the
-/// [`Handshake`](babelfix_core::session::Handshake) — which is also the thing
-/// that creates it.
+/// [`AcceptorHandshake`](babelfix_core::session::AcceptorHandshake) or
+/// [`InitiatorHandshake`](babelfix_core::session::InitiatorHandshake) — which
+/// is also the thing that creates it.
 pub(crate) struct SessionRunner<W> {
   out: PendingOutput,
   writer: W,

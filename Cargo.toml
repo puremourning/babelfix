@@ -48,9 +48,6 @@ bytes = "1.0"
 tokio-util = { version = "0.7", features = ["codec"] }
 chrono = { version = "0.4", features = ["serde"] }
 criterion = { version = "0.8" }
-proc-macro2 = "1.0"
-quote = "1.0"
-syn = { version = "3.0", features = ["full"] }
 thiserror = "2.0"
 googletest = "0.14"
 test-log = {version = "0.2", default-features = false, features = ["trace"]}

@@ -547,6 +547,9 @@ signed_to_fix!(i8, i16, i32, i64, isize);
 /// `00023.23`, `23.`, `.5`. No `+`, no exponent. Convert it with `get_as` to a
 /// decimal type (`decimix::Dec19` with the `decimix` feature), or pass it
 /// straight to another message's `set`, which copies the text.
+///
+/// Equality is textual: `1.0` and `1.00` are different `Decimal`s. Compare
+/// numbers after converting them.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Decimal<'a>(&'a [u8]);
 

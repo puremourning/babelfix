@@ -14,7 +14,7 @@
 //! codes are shared across versions, and FIX.Latest is the superset.
 //!
 //! This crate sits on top of `babelfix-core`, which defines the types the
-//! constants are made of and does not depend on it. It is re-exported from the
+//! constants are made of; `babelfix-core` does not depend on this crate. It is re-exported from the
 //! `babelfix` crate as `babelfix::schema`.
 //!
 //! ```no_run

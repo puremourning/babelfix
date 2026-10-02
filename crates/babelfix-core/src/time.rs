@@ -5,10 +5,10 @@
 //! milliseconds to picoseconds depending on what the counterparties agreed.
 //! [`TimePrecision`] selects how many fractional digits are emitted.
 //!
-//! **This module reads no clock.** It formats an instant it is handed. The
-//! crate does not even enable chrono's `now` feature, so `Utc::now()` is not in
-//! scope here — the driver owns the clock, and stamps `SendingTime` as late as
-//! it can. See [`crate::message`] for where the result is used.
+//! **This module reads no clock.** It formats an instant it is handed. Built on
+//! its own, the crate does not even enable chrono's `now` feature, so
+//! `Utc::now()` is not in scope here — the driver owns the clock, and stamps
+//! `SendingTime` as late as it can. See [`crate::message`] for where the result is used.
 
 use std::fmt;
 

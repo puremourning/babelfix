@@ -158,10 +158,7 @@ name = "babelfix-repo"
 version = "0.1.0"
 dependencies = [
  "include_dir",
- "proc-macro2",
  "quick-xml",
- "quote",
- "syn 3.0.3",
  "thiserror 2.0.19",
 ]
 

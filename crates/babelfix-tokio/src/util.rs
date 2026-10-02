@@ -9,6 +9,8 @@ use tracing::error;
 
 pub use babelfix_core::time::{FixTime, TimePrecision, fix_time};
 
+/// Await `future`, logging an error rather than returning it: for spawned tasks
+/// whose result nobody is waiting on.
 pub async fn wrap_and_report<F, T>(future: F) -> Option<T>
 where
   F: Future<Output = Result<T, crate::Error>> + Send + 'static,

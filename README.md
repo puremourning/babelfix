@@ -14,7 +14,7 @@ with repeating groups, typed fields decoded on demand (prices as decimals, never
 earlier `FixMessage`/`builder::Message` API? See [MIGRATION.md](MIGRATION.md).
 
 The library does not provide any persistence or storage of messages, sequence
-numbers or session state. It is the application's responsiblity to persist them
+numbers or session state. It is the application's responsibility to persist them
 for recovery and session reconnection/replay.
 
 ## Overview
@@ -22,7 +22,8 @@ for recovery and session reconnection/replay.
 babelfix parses, builds and exchanges [FIX](https://www.fixtrading.org/)
 messages. It is built around the FIX Orchestra metadata (embedded for FIX 4.2,
 4.4 and FIX.Latest), so message structure, field types and repeating groups come
-from the specification. Any FIX Orchestra files can be used by the appliction.
+from the specification. An application can load Orchestra files of its own
+instead: see the `Dictionaries` docs.
 
 It is a small stack of layers, each usable on its own:
 
@@ -36,6 +37,10 @@ It is a small stack of layers, each usable on its own:
 | Driver | `babelfix-core::driver` | The above assembled: feed bytes, drain bytes |
 | Connection | `babelfix-tokio::connection` | A session driven inline, without channels |
 | Endpoint | `babelfix-tokio::endpoint` | TCP acceptor/initiator that spawns sessions |
+
+Dictionaries are named by version: `FIX.4.2`, `FIX.4.4` and `FIX.Latest`.
+FIX.Latest's BeginString on the wire is `FIXT.1.1`, which
+`Dictionaries::for_begin_string` understands.
 
 Most applications depend only on the `babelfix` crate, which re-exports all of
 the above.
@@ -110,10 +115,27 @@ assert_eq!(parsed.body().req(Symbol).unwrap(), "AAPL");
 assert_eq!(parsed.body().req(OrderQty).unwrap().as_str(), "100");
 ```
 
-Running a FIX session over TCP — accepting connections with
-[`endpoint::serve`] or initiating them with [`endpoint::connect`], then driving
-the resulting [`session::SessionHandle`] — is covered in the `endpoint` and
-`session` module documentation.
+Timestamps are set with a precision: `set(TransactTime, (Utc::now(),
+TimePrecision::Micros))`. Strings are Latin-1, as FIX defines them; setting
+text outside Latin-1 panics in debug builds, so use `try_set` for text you
+didn't write.
+
+Running a FIX session over TCP — accepting connections with `endpoint::serve`
+or initiating them with `endpoint::connect`, then driving the resulting
+`session::SessionHandle` — is covered in the `endpoint` and `session` module
+documentation.
+
+## Features
+
+| Feature | Default | |
+|---|---|---|
+| `tokio` | yes | The TCP transport: `endpoint`, `connection` and the async session driver. |
+| `decimix` | | Decimal fields as `decimix::Dec19`/`UDec19`, via `get_as` and `set`. |
+| `decimix-finance` | | As `decimix`, plus the `decimix-finance` `Price`, `Qty`, `Amt`, ... types. |
+| `serde` | | `Serialize`/`Deserialize` for `SessionIdentifier` and `TimePrecision`. |
+
+For the sans-io core alone, use `default-features = false`, or depend on
+`babelfix-core` directly.
 
 ## Documentation
 
@@ -127,7 +149,8 @@ layer from the FIX Session Layer Technical Specification.
 
 ## Minimum supported Rust version
 
-Rust 1.98 (edition 2024), the minimum of the `decimix` crate it depends on.
+Rust 1.98 (edition 2024), required by the `decimix` crate behind the optional
+`decimix` features.
 
 ## Licence
 

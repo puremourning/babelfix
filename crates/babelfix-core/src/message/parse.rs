@@ -80,6 +80,10 @@ impl Message {
   ///
   /// The bytes are kept, not copied: the message's fields point into them.
   /// BodyLength and CheckSum are verified.
+  ///
+  /// The bytes must be exactly one message: anything after the CheckSum is an
+  /// error. To take messages off a stream, use
+  /// [`FixDecoder::decode`](crate::codec::FixDecoder::decode).
   pub fn parse(
     dict: &Arc<Dictionary>,
     wire: impl Into<Bytes>,
@@ -92,6 +96,11 @@ impl Message {
   /// Parse a complete message delimited by `delimiter` instead of SOH — `b'|'`
   /// for logs and tests. The bytes are copied, with the delimiters replaced by
   /// SOH.
+  ///
+  /// A data field's contents are sized by its Length and taken as they are, so
+  /// a `|` inside one stays a `|`. A log that turned SOH *inside* a data field
+  /// into `|` as well has lost that byte: the data reads back with `|`, and
+  /// the CheckSum will not match.
   pub fn parse_delimited(
     dict: &Arc<Dictionary>,
     bytes: &[u8],

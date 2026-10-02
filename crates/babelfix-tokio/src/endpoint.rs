@@ -71,8 +71,8 @@ use std::time::Duration;
 
 /// Everything an endpoint needs beyond the addresses and the dictionaries.
 ///
-/// The defaults are the values that used to be hardcoded, so
-/// `EndpointConfig::default()` reproduces the previous behaviour.
+/// Build one from [`EndpointConfig::default()`] and the setters, which each
+/// set the field of the same name.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct EndpointConfig {
@@ -151,12 +151,22 @@ impl EndpointConfig {
   }
 }
 
+/// What an [`Acceptor`] tells the application about each connection.
 pub enum EndpointEvent {
+  /// A peer has sent a valid Logon for `session_id`. Answer on `response`
+  /// with the [`Session`](session::Session) to resume — the sequence numbers
+  /// you persisted for this peer, and the dictionary for its version. An
+  /// `Err`, or dropping `response`, refuses the session: the connection is
+  /// closed without a Logon reply.
   NewSession {
     session_id: session::SessionIdentifier,
     response: oneshot::Sender<Result<session::Session>>,
   },
-  SessionInvalid(String), // Partner address{
+  /// A connection closed, or sent something other than a valid Logon, before
+  /// it named a session. Carries the peer's address.
+  SessionInvalid(String),
+  /// The logon exchange is under way for a session answered with
+  /// [`NewSession`](Self::NewSession). Drive it through the handle.
   SessionConnected(session::SessionHandle),
 }
 
@@ -586,7 +596,7 @@ async fn accept_connection(
   .await
 }
 
-/// Accept FIX connections on `addr`.
+/// Accept FIX connections on `addr`, speaking any version in `dicts`.
 ///
 /// Answer each [`EndpointEvent::NewSession`] with the sequence numbers you have
 /// persisted for that peer, then take the

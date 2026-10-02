@@ -185,12 +185,23 @@ impl Dictionary {
 /// A [`Dictionary`] for each version in a repository, compiled once and shared
 /// by every connection: an acceptor does not know which version a peer speaks
 /// until its Logon arrives.
+///
+/// Dictionaries are named by Orchestra version, which is not always what goes
+/// on the wire. [`standard`](Self::standard) has `FIX.4.2`, `FIX.4.4` and
+/// `FIX.Latest`; FIX.Latest's BeginString is `FIXT.1.1`, so
+/// `get("FIX.Latest")` and `for_begin_string(b"FIXT.1.1")` find the same
+/// dictionary, and `get("FIXT.1.1")` finds nothing.
+///
+/// To use Orchestra files of your own, load them with
+/// [`repository::load_orchestration`](crate::repository::load_orchestration)
+/// and compile with [`new`](Self::new).
 #[derive(Debug, Default)]
 pub struct Dictionaries {
   by_name: std::collections::BTreeMap<String, Arc<Dictionary>>,
 }
 
 impl Dictionaries {
+  /// Compile every version in `repo`.
   pub fn new(repo: &FixRepository) -> Arc<Dictionaries> {
     Arc::new(Dictionaries {
       by_name: repo
@@ -222,6 +233,7 @@ impl Dictionaries {
       .find(|d| d.begin_string().as_bytes() == begin_string)
   }
 
+  /// Every dictionary, in version name order.
   pub fn iter(&self) -> impl Iterator<Item = &Arc<Dictionary>> {
     self.by_name.values()
   }

@@ -436,9 +436,10 @@ impl<'a> BlockMut<'a> {
     self.msg.find_in(start, end, depth, tag, None)
   }
 
-  /// Set a field, replacing any value it had. Invalid values are a bug: they
-  /// fail a `debug_assert!`, and in release builds the field is removed
-  /// (empty means absent). Use [`try_set`](Self::try_set) to handle them.
+  /// Set a field, replacing any value it had. Invalid values — empty, or text
+  /// outside Latin-1 — are a bug: they fail a `debug_assert!`, and in release
+  /// builds the field is removed (empty means absent). Use
+  /// [`try_set`](Self::try_set) for values you don't control.
   pub fn set<M: FieldType, V: ToFix<M>>(
     &mut self,
     field: Field<M>,
@@ -465,6 +466,9 @@ impl<'a> BlockMut<'a> {
     self.settle(tag, result)
   }
 
+  /// [`set_raw`](Self::set_raw), or say why it cannot be: the bytes are empty
+  /// or contain SOH, or the tag is one the message derives (a data field's
+  /// Length, a NumInGroup, or BeginString, BodyLength, MsgType or CheckSum).
   pub fn try_set_raw(
     &mut self,
     tag: impl Tag,

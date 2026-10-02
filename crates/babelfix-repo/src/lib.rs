@@ -7,7 +7,9 @@
 //! The Orchestra files for FIX 4.2, 4.4 and FIX.Latest are embedded in the crate
 //! (`third-party/fix_orchestra`, Apache-2.0 licensed), so nothing needs to be
 //! loaded from disk at runtime — call [`orchestrate`] to build a
-//! [`FixRepository`] from the embedded data and select a version by begin-string:
+//! [`FixRepository`] from the embedded data and select a version by name
+//! (`FIX.4.2`, `FIX.4.4` or `FIX.Latest`; each version's wire BeginString is
+//! [`FixVersion::begin_string`]):
 //!
 //! ```no_run
 //! let repo = babelfix_repo::orchestrate().unwrap();
@@ -28,7 +30,6 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 mod fix_orchestra;
-pub mod fixify;
 
 static FIX_ORCHESTRA: include_dir::Dir<'_> =
   include_dir::include_dir!("$CARGO_MANIFEST_DIR/third-party/fix_orchestra/");

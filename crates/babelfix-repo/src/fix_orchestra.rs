@@ -78,7 +78,6 @@ impl FixOrchestraParser {
         _ => (),
       }
     }
-    println!("Loaded {} FIX versions", self.repository.versions.len());
     Ok(std::mem::take(&mut self.repository))
   }
 

@@ -100,6 +100,7 @@ impl FixDecoder {
     self.dict.as_ref()
   }
 
+  /// The field separator this decoder splits on.
   pub fn delimiter(&self) -> u8 {
     self.delimiter
   }
@@ -200,12 +201,22 @@ fn frame(data: &[u8], delimiter: u8, max: usize) -> Result<Option<Frame>> {
 
 /// Serialises [`Message`]s onto the wire, computing `BodyLength` and
 /// `CheckSum`.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct FixEncoder {
   delimiter: u8,
 }
 
+impl Default for FixEncoder {
+  /// An encoder writing SOH.
+  fn default() -> Self {
+    Self::new(None)
+  }
+}
+
 impl FixEncoder {
+  /// An encoder writing `delimiter` between fields: SOH if `None`. Any other
+  /// delimiter is for display and tests; the checksum is computed as if it
+  /// were SOH.
   pub fn new(delimiter: Option<u8>) -> Self {
     Self {
       delimiter: delimiter.unwrap_or(SOH),

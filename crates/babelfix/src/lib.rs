@@ -4,8 +4,8 @@
 //! driven by the FIX Orchestra metadata repository.
 //!
 //! This crate is an umbrella: it re-exports [`babelfix_core`], which holds the
-//! protocol, and — under the default `tokio` feature — [`babelfix_tokio`],
-//! which holds the transport.
+//! protocol, and — under the default `tokio` feature — `babelfix_tokio`, which
+//! holds the transport.
 //!
 //! | Layer | Module / crate | Responsibility |
 //! |-------|----------------|----------------|
@@ -15,8 +15,8 @@
 //! | Codec | [`codec`] (`babelfix-core`) | Framing a byte stream into messages and back |
 //! | Session | [`session`] (`babelfix-core`) | Sequence numbers, heartbeats, test requests, resend/replay |
 //! | Driver | [`driver`] (`babelfix-core`) | The above assembled: feed bytes, drain bytes, no I/O |
-//! | Endpoint | [`endpoint`] (`babelfix-tokio`) | TCP acceptor/initiator that spawns sessions |
-//! | Connection | [`connection`] (`babelfix-tokio`) | The same session driven inline, without channels |
+//! | Connection | `connection` (`babelfix-tokio`) | The same session driven inline, without channels |
+//! | Endpoint | `endpoint` (`babelfix-tokio`) | TCP acceptor/initiator that spawns sessions |
 //!
 //! ## Which crate do I want?
 //!
@@ -43,6 +43,13 @@
 //! let dicts = Dictionaries::standard().expect("load FIX repository");
 //! let fix44 = dicts.get("FIX.4.4").expect("FIX.4.4 is available");
 //! ```
+//!
+//! Dictionaries are named by version — `FIX.4.2`, `FIX.4.4`, `FIX.Latest` — and
+//! found from a message's BeginString with
+//! [`for_begin_string`](message::Dictionaries::for_begin_string), which knows
+//! FIX.Latest as `FIXT.1.1`. To use your own Orchestra files, load them with
+//! [`repository::load_orchestration`] and compile them with
+//! [`Dictionaries::new`](message::Dictionaries::new).
 //!
 //! The full Orchestra model — components, documentation, everything a tool
 //! might show — stays available as [`repository`], and from each dictionary
@@ -82,10 +89,20 @@
 //!
 //! ## Running a session over TCP
 //!
-//! [`endpoint::serve`] accepts connections and [`endpoint::connect`] initiates
-//! them; both surface a [`session::SessionHandle`] once a peer has logged on. See
-//! the [`endpoint`] and [`session`] module docs for complete server and client
+//! With the `tokio` feature, `endpoint::serve` accepts connections and
+//! `endpoint::connect` initiates them; both surface a `session::SessionHandle`.
+//! See the `endpoint` and `session` module docs for complete server and client
 //! loops.
+//!
+//! ## Features
+//!
+//! * `tokio` (default): the transport — `endpoint`, `connection`, and the
+//!   async `session` driver. Without it, `babelfix` is the sans-io core and
+//!   the schema.
+//! * `decimix`: read and write decimal fields as `decimix::Dec19`/`UDec19`.
+//! * `decimix-finance`: as `decimix`, plus the `decimix-finance` newtypes.
+//! * `serde`: `Serialize`/`Deserialize` for `SessionIdentifier` and
+//!   `TimePrecision`.
 //!
 //! ## Licensing
 //!

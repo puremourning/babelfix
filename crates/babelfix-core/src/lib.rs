@@ -87,6 +87,7 @@ impl From<std::fmt::Error> for Error {
   }
 }
 
+/// Constructors for each variant from a message.
 impl Error {
   pub fn unspecified<S: Into<std::borrow::Cow<'static, str>>>(msg: S) -> Self {
     Error::Unspecified(msg.into())

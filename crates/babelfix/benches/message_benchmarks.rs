@@ -325,8 +325,7 @@ fn test_messages() -> &'static TestMessages {
 }
 
 // ---------------------------------------------------------------------------
-// Parsing: one pass to a structured, typed-on-demand message. This replaces
-// both the flat `FixMessage` parse and the `builder::Message` conversion.
+// Parsing: one pass to a structured, typed-on-demand message.
 // ---------------------------------------------------------------------------
 
 fn bench_parsing(c: &mut Criterion) {
