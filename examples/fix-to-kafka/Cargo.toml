@@ -9,6 +9,9 @@ repository.workspace = true
 
 publish = false
 
+[package.metadata.release]
+release = false
+
 [dependencies]
 babelfix = { workspace = true, features = [ "serde" ] }
 tokio.workspace = true
