@@ -8,9 +8,10 @@ driven by the FIX Orchestra metadata repository.
 
 > babelfix is pre-1.0 — the API may change between minor versions.
 
-The implementation is intended to be practical, rather than optimal. In
-particualr, the `message::Builder` API is designed for ease of use, rather than
-maximum performance.
+Messages are one type, parsed or built: a flat index over the message's bytes,
+with repeating groups, typed fields decoded on demand (prices as decimals, never
+`f64`), and edits that never copy the bytes they leave alone. Upgrading from the
+earlier `FixMessage`/`builder::Message` API? See [MIGRATION.md](MIGRATION.md).
 
 The library does not provide any persistence or storage of messages, sequence
 numbers or session state. It is the application's responsiblity to persist them
@@ -27,9 +28,9 @@ It is a small stack of layers, each usable on its own:
 
 | Layer | Crate | Responsibility |
 |-------|-------|----------------|
-| Schema | `babelfix-repogen` | Compile-time FIX tag-number constants (`schema::FIX_Latest::Fields`) |
+| Schema | `babelfix-core::schema` | Typed field constants, message types and codeset enums, generated from FIX.Latest |
 | Repository | `babelfix-repo` | Parsed Orchestra metadata: versions, messages, fields, components, groups |
-| Message | `babelfix-core::message` | Parse, build and serialise individual messages |
+| Message | `babelfix-core::message` | Parse, read, build, edit and serialise messages |
 | Codec | `babelfix-core::codec` | Frame a byte stream into messages and back |
 | Session | `babelfix-core::session` | Sequence numbers, heartbeats, test requests, resend/replay |
 | Driver | `babelfix-core::driver` | The above assembled: feed bytes, drain bytes |
@@ -57,9 +58,9 @@ cost roughly:
 
 | | µs |
 |---|---|
-| serialise and parse alone | 4.8 |
-| + the session layer (`SessionDriver`) | 8.3 |
-| + sockets, tasks and channels (`endpoint`) | 37.4 |
+| serialise and parse alone | 1.0 |
+| + the session layer (`SessionDriver`) | 2.4 |
+| + sockets, tasks and channels (`endpoint`) | 27.2 |
 
 A loopback TCP round trip carrying the same bytes is 19.6µs of that, so most of
 the difference is the transport rather than anything babelfix does. Re-run
@@ -73,27 +74,36 @@ conclusions.
 babelfix = "0.1"
 ```
 
-Load the embedded repository, then build and serialise a message:
+Compile the embedded dictionaries, then build, serialise and read a message:
 
 ```rust
-use babelfix::{repository, message::builder};
-use babelfix::schema::FIX_Latest::Fields;
+use babelfix::message::{Dictionaries, Message};
+use babelfix::schema::{codesets, fields::*, msg_type};
 
-// The FIX Orchestra data is embedded; nothing is read from disk.
-let repo = repository::orchestrate().unwrap();
-let fix44 = repo.get_version("FIX.4.4").unwrap();
+// The FIX Orchestra data is embedded; nothing is read from disk. Compile the
+// dictionaries once and share them.
+let dicts = Dictionaries::standard().unwrap();
+let fix44 = dicts.get("FIX.4.4").unwrap();
 
-// NewOrderSingle (MsgType = "D"). `new` presets BeginString (8) and MsgType (35).
-let mut order = builder::Message::new(fix44, "D").unwrap();
-order.body.set_tag(Fields::ClOrdID, "order-1");
-order.body.set_tag(Fields::Symbol, "AAPL");
-order.body.set_tag(Fields::Side, "1"); // 1 = Buy
-order.body.set_tag(Fields::OrderQty, 100i64);
+// `new` presets BeginString (8) and MsgType (35).
+let mut order = Message::new(fix44, msg_type::NewOrderSingle);
+order
+    .body_mut()
+    .set(ClOrdID, "order-1")
+    .set(Symbol, "AAPL")
+    .set(Side, codesets::Side::Buy)
+    .set(OrderQty, 100u64);
 
-// BodyLength (9) and CheckSum (10) are computed on serialisation.
-let msg = order.into_message().unwrap();
-// SOH (b'\x01') is the real field separator; b'|' is convenient for logging.
-println!("{}", msg.to_string_delimited(b'|'));
+// BodyLength (9) and CheckSum (10) are computed on serialisation. `Display`
+// shows the wire form with `|` for SOH.
+println!("{order}");
+let wire = order.to_bytes();
+
+// Parsing keeps the bytes and indexes them; fields decode when read, typed by
+// the field: Symbol is a string, OrderQty a decimal.
+let parsed = Message::parse(fix44, wire).unwrap();
+assert_eq!(parsed.body().req(Symbol).unwrap(), "AAPL");
+assert_eq!(parsed.body().req(OrderQty).unwrap().as_str(), "100");
 ```
 
 Running a FIX session over TCP — accepting connections with
