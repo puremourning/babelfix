@@ -10,7 +10,7 @@
 //!
 //! | Layer | Module | Responsibility |
 //! |-------|--------|----------------|
-//! | Schema | [`schema`] | Compile-time FIX tag-number constants |
+//! | Schema | [`schema`] | Typed FIX field, message-type and codeset definitions |
 //! | Repository | [`repository`] | Parsed FIX Orchestra metadata |
 //! | Message | [`message`] | Parsing, building and serialising individual messages |
 //! | Codec | [`codec`] | Framing a byte stream into messages and back |
@@ -23,7 +23,23 @@
 //! directly when you want to drive the protocol from your own event loop.
 
 pub use babelfix_repo as repository;
-pub use babelfix_repogen as schema;
+/// FIX field, message-type and codeset definitions, generated from the
+/// FIX.Latest Orchestra data.
+///
+/// - [`fields`](schema::fields): typed field constants, `Field<M>` and
+///   `GroupField`, for reading and writing messages.
+/// - [`tags`](schema::tags): the same as plain `u32` tag numbers.
+/// - [`msg_type`](schema::msg_type): `MsgType(35)` values by message name.
+/// - [`codesets`](schema::codesets): an enum per codeset.
+///
+/// The per-version `FIX_4_2::Fields`, `FIX_4_4::Fields` and `FIX_Latest::Fields`
+/// tag-number modules are re-exported from `babelfix-repogen` too.
+#[allow(non_upper_case_globals, non_snake_case, non_camel_case_types)]
+#[allow(clippy::all)]
+pub mod schema {
+  pub use babelfix_repogen::*;
+  include!(concat!(env!("OUT_DIR"), "/schema.rs"));
+}
 
 pub mod codec;
 pub mod driver;
@@ -31,7 +47,7 @@ pub mod message;
 pub mod session;
 pub mod time;
 
-pub use message::{FixMessage, Value};
+pub use message::{FixMessage, Message, Value};
 
 /// The error type returned by all fallible babelfix operations.
 ///

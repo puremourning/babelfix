@@ -142,6 +142,8 @@ dependencies = [
  "babelfix-repogen",
  "bytes",
  "chrono",
+ "decimix",
+ "decimix-finance",
  "googletest",
  "serde",
  "test-log",
@@ -494,6 +496,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "decimix"
+version = "0.1.0"
+source = "git+https://github.com/puremourning/decimix#61cfc099b5fd551034a18ef4048bd8bf168b8987"
+dependencies = [
+ "ethnum",
+]
+
+[[package]]
+name = "decimix-finance"
+version = "0.1.0"
+source = "git+https://github.com/puremourning/decimix#61cfc099b5fd551034a18ef4048bd8bf168b8987"
+dependencies = [
+ "decimix",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -546,6 +564,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "ethnum"
+version = "1.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40404c3f5f511ec4da6fe866ddf6a717c309fdbb69fbbad7b0f3edab8f2e835f"
 
 [[package]]
 name = "find-msvc-tools"

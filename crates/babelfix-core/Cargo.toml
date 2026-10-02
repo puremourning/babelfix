@@ -16,6 +16,10 @@ tag = false
 [features]
 default = []
 serde = ["dep:serde"]
+## `FromFix`/`ToFix` impls for `decimix::Dec19` and `UDec19`.
+decimix = ["dep:decimix"]
+## `FromFix`/`ToFix` impls for the `decimix-finance` newtypes.
+decimix-finance = ["decimix", "dep:decimix-finance"]
 
 [dependencies]
 thiserror.workspace = true
@@ -24,6 +28,8 @@ babelfix-repogen.workspace = true
 tracing.workspace = true
 bytes.workspace = true
 serde = { workspace = true, optional = true }
+decimix = { git = "https://github.com/puremourning/decimix", optional = true }
+decimix-finance = { git = "https://github.com/puremourning/decimix", optional = true }
 
 # Deliberately NOT inherited from [workspace.dependencies], and deliberately
 # `default-features = false`: that drops chrono's `clock` (and hence `now`)
@@ -35,6 +41,9 @@ serde = { workspace = true, optional = true }
 # babelfix-core`); a `--workspace` build unifies features and hands `now` back.
 # CI checks the standalone build for exactly this reason.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[build-dependencies]
+babelfix-repo.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
