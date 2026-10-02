@@ -405,13 +405,17 @@ impl SessionState {
     out: &mut impl SessionOutput,
   ) -> Result<()> {
     let msg_seq_num = message.header().req(MsgSeqNum)?;
-    let is_admin = message.is_admin();
+    // Session messages are gap-filled rather than resent, except Reject and
+    // XMLnonFIX, "the only session messages which may be retransmitted"
+    // (FIX Session Layer §4.8.5).
+    let gap_filled =
+      message.is_admin() && !matches!(message.msg_type(), "3" | "n");
     let replay = self
       .replay
       .as_mut()
       .ok_or_else(|| Error::protocol_violation("No replay in progress"))?;
 
-    match replay.offer(msg_seq_num, is_admin) {
+    match replay.offer(msg_seq_num, gap_filled) {
       ReplayStep::Skip | ReplayStep::Absorb => Ok(()),
       ReplayStep::Retransmit { gap_fill } => {
         if let Some((begin, end)) = gap_fill {

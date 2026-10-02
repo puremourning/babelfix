@@ -163,13 +163,29 @@ impl Message {
     let mut i = idx + 1;
     let mut n = 0;
     while i < end {
-      let span = self.tape[i as usize].span();
-      if span > 1 {
+      if self.instance_writes(i) {
         n += 1;
       }
-      i += span;
+      i = self.next_sibling(i);
     }
     n
+  }
+
+  /// Whether the instance at `idx` writes anything: a field, or a nested group
+  /// that does. An instance holding only empty groups writes nothing.
+  fn instance_writes(&self, idx: u32) -> bool {
+    let end = self.next_sibling(idx);
+    let mut i = idx + 1;
+    while i < end {
+      let e = &self.tape[i as usize];
+      match e.kind {
+        Kind::Group if self.live_instances(i) > 0 => return true,
+        Kind::Group | Kind::Gap | Kind::Instance => {}
+        _ => return true,
+      }
+      i = self.next_sibling(i);
+    }
+    false
   }
 }
 

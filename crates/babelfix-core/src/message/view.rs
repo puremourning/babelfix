@@ -526,11 +526,14 @@ impl Message {
     self.dict.begin_string()
   }
 
-  /// Whether this is a session-level (admin) message.
+  /// Whether this is a session-level (admin) message: Heartbeat, TestRequest,
+  /// ResendRequest, Reject, SequenceReset, Logout, Logon or XMLnonFIX (FIX
+  /// Session Layer §9). Everything else — BusinessMessageReject and market
+  /// data included — is an application message.
   pub fn is_admin(&self) -> bool {
     matches!(
       self.msg_type(),
-      "0" | "A" | "1" | "2" | "3" | "4" | "5" | "j" | "h" | "Y" | "V"
+      "0" | "1" | "2" | "3" | "4" | "5" | "A" | "n"
     )
   }
 

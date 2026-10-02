@@ -162,7 +162,14 @@ impl Message {
     let n = entries.len() as u32;
     let a = at as usize;
 
-    if let Some(gap) = self.tape.get(a).filter(|e| e.kind == Kind::Gap) {
+    // The header gap takes region-level inserts only. Something inserted into
+    // a group or instance that happens to end at the gap must grow that group
+    // and instance, which only a splice does.
+    if let Some(gap) = self
+      .tape
+      .get(a)
+      .filter(|e| e.kind == Kind::Gap && container.is_none())
+    {
       let room = gap.span();
       if room >= n {
         self.tape[a..a + n as usize].copy_from_slice(entries);

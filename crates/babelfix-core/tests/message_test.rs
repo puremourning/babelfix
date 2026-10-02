@@ -897,3 +897,69 @@ fn randomised_round_trips() {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Regressions from review
+// ---------------------------------------------------------------------------
+
+/// A group in the header (NoHops) grows correctly however it is added to:
+/// inserts into it must not take the header gap's shortcut.
+#[test]
+fn header_groups_can_be_built_and_extended() {
+  let mut m = Message::new(&dict(), "0");
+  m.header_mut().group_mut(NoHops).push().set(HopCompID, "H1");
+  assert_eq!(m.header().group(NoHops).len(), 1);
+  assert_eq!(
+    m.header()
+      .group(NoHops)
+      .get(0)
+      .unwrap()
+      .req(HopCompID)
+      .unwrap(),
+    "H1"
+  );
+  let again = Message::parse(&dict(), m.to_bytes()).unwrap();
+  assert_eq!(again, m);
+  assert_eq!(again.header().group(NoHops).len(), 1);
+
+  let mut m =
+    parse("35=0|49=S|56=T|34=1|52=20261002-10:00:00|627=1|628=H1|112=x");
+  m.header_mut().group_mut(NoHops).push().set(HopCompID, "H2");
+  let hops: Vec<_> = m
+    .header()
+    .group(NoHops)
+    .iter()
+    .map(|h| h.req(HopCompID).unwrap().to_string())
+    .collect();
+  assert_eq!(hops, ["H1", "H2"]);
+  let again = Message::parse(&dict(), m.to_bytes()).unwrap();
+  assert_eq!(again.header().group(NoHops).len(), 2);
+  assert_eq!(again.body().req(TestReqID).unwrap(), "x");
+}
+
+/// An instance holding nothing but an empty nested group writes nothing, and
+/// is not counted.
+#[test]
+fn instances_with_only_empty_nested_groups_are_not_written() {
+  let mut m = Message::new(&dict(), "D");
+  m.body_mut().set(ClOrdID, "a");
+  m.body_mut()
+    .group_mut(NoPartyIDs)
+    .push()
+    .group_mut(NoPartySubIDs)
+    .push();
+  assert_eq!(piped(&m), piped(&parse("35=D|11=a")));
+  Message::parse(&dict(), m.to_bytes()).unwrap();
+}
+
+#[test]
+fn admin_means_session_layer() {
+  for t in ["0", "1", "2", "3", "4", "5", "A", "n"] {
+    assert!(Message::new(&dict(), t).is_admin(), "{t}");
+  }
+  // BusinessMessageReject, TradingSessionStatus, MarketDataRequestReject,
+  // MarketDataRequest: application messages.
+  for t in ["j", "h", "Y", "V", "D", "8"] {
+    assert!(!Message::new(&dict(), t).is_admin(), "{t}");
+  }
+}

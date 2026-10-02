@@ -19,8 +19,8 @@ pub(crate) enum ReplayStep {
   /// The message falls outside the requested range, or has already been
   /// covered. Drop it.
   Skip,
-  /// An admin message: never retransmitted, so it is gap-filled along with any
-  /// other skipped numbers rather than sent.
+  /// A session message other than Reject or XMLnonFIX: never retransmitted, so
+  /// it is gap-filled along with any other skipped numbers rather than sent.
   Absorb,
   /// Retransmit it, first closing off any preceding run of skipped numbers with
   /// a gap fill over `gap_fill` (inclusive bounds).
@@ -96,7 +96,7 @@ impl Replay {
   pub(crate) fn offer(
     &mut self,
     msg_seq_num: u64,
-    is_admin: bool,
+    gap_filled: bool,
   ) -> ReplayStep {
     if msg_seq_num < self.next_expected_seq_num {
       // Already accounted for.
@@ -111,8 +111,8 @@ impl Replay {
     self.gap_fill_count += msg_seq_num - self.next_expected_seq_num;
     self.next_expected_seq_num = msg_seq_num + 1;
 
-    if is_admin {
-      // Admin messages are never retransmitted; the gap fill stands in.
+    if gap_filled {
+      // Not retransmitted; the gap fill stands in.
       self.gap_fill_count += 1;
       return ReplayStep::Absorb;
     }

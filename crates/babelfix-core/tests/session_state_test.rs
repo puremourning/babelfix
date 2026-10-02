@@ -478,3 +478,55 @@ fn messages_emitted_together_get_distinct_sending_times() {
     "the output left a SendingTime unstamped: {stamps:?}"
   );
 }
+
+/// On replay, session messages are gap-filled over — except Reject and
+/// XMLnonFIX, "the only session messages which may be retransmitted" (FIX
+/// Session Layer §4.8.5). Application messages are resent whatever their type,
+/// including those whose MsgType looks admin-like (V, h, Y, j).
+#[test]
+fn replay_resends_reject_and_application_messages_but_gap_fills_the_rest() {
+  let (mut state, mut out, start) = established();
+  for i in 0..4 {
+    let mut order = Message::new(&fix44(), "D");
+    order.body_mut().set(ClOrdID, format!("order-{i}").as_str());
+    let _ = state
+      .on_command(Command::Send(order), start, &mut out)
+      .unwrap();
+  }
+  out.take_sent();
+
+  let _ = state
+    .on_message(
+      inbound_with("2", 2, &[(tags::BeginSeqNo, "2"), (tags::EndSeqNo, "5")]),
+      start,
+      &mut out,
+    )
+    .unwrap();
+  out.take_sent();
+
+  let stored = |msg_type: &str, seq: u64| {
+    let mut msg = Message::new(&fix44(), msg_type);
+    msg
+      .header_mut()
+      .set(MsgSeqNum, seq)
+      .set_raw(tags::SendingTime, b"20231114-22:13:20.000");
+    if msg_type == "V" {
+      msg.body_mut().set_raw(tags::MDReqID, b"md-1");
+    }
+    msg
+  };
+  for (msg_type, seq) in [("V", 2), ("3", 3), ("0", 4), ("j", 5)] {
+    let _ = state
+      .on_command(Command::Replay(stored(msg_type, seq)), start, &mut out)
+      .unwrap();
+  }
+  let _ = state
+    .on_command(Command::ReplayComplete, start, &mut out)
+    .unwrap();
+
+  let sent: Vec<(String, u64)> = out.take_sent();
+  let types: Vec<&str> = sent.iter().map(|(t, _)| t.as_str()).collect();
+  // V and the Reject resent; the Heartbeat gap-filled (35=4); j resent; then
+  // the post-replay TestRequest.
+  assert_eq!(types, ["V", "3", "4", "j", "1"], "{sent:?}");
+}
