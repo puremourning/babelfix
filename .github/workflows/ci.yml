@@ -15,28 +15,24 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  test:
-    name: test (${{ matrix.rust }})
+  # Shared test matrix (stable, beta, nightly, MSRV), rustfmt, clippy and docs
+  # from puremourning/rust-ci.
+  #
+  # MIRI is left off because it is too slow on the test suite - probably due to
+  # parsing the orchestra XMLs.
+  ci:
+    uses: puremourning/rust-ci/.github/workflows/ci.yml@v1
+    with:
+      msrv: "1.98"
+
+  decimal:
+    name: test (decimal features)
     runs-on: ubuntu-latest
-    # nightly rolls new lints constantly and RUSTFLAGS=-Dwarnings also applies to
-    # dependency builds, so allow the nightly entry to fail without failing CI.
-    continue-on-error: ${{ matrix.rust == 'nightly' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        rust: [stable, beta, nightly, "1.98.0"]
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.rust }}
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --workspace --all-targets
-      - name: Test
-        run: cargo test --workspace
-      - name: Test decimal features
-        run: cargo test -p babelfix-core -p babelfix --features babelfix/decimix-finance
+      - run: cargo test -p babelfix-core -p babelfix --features babelfix/decimix-finance
 
   sans-io:
     name: babelfix-core is sans-io
@@ -68,52 +64,3 @@ jobs:
             echo "::error::babelfix-core has enabled chrono's clock"
             exit 1
           fi
-
-  fmt:
-    name: rustfmt
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
-  clippy:
-    name: clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -Dwarnings
-
-  docs:
-    name: docs
-    runs-on: ubuntu-latest
-    env:
-      # Fail on broken intra-doc links and other rustdoc lints.
-      RUSTDOCFLAGS: -Dwarnings
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --workspace --no-deps
-
-  # MIRI is disabled because it is too slow on the test suite - proabbly due to
-  # parsing the orchestra XMLs.
-  # miri:
-  #   name: miri
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v5
-  #     - uses: dtolnay/rust-toolchain@nightly
-  #       with:
-  #         components: miri
-  #     - uses: Swatinem/rust-cache@v2
-  #     - name: Setup miri
-  #       run: cargo miri setup
-  #     - name: Run miri
-  #       run: cargo miri test --workspace
