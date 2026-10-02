@@ -87,7 +87,7 @@ let body = msg.body();                         // also msg.header(), msg.trailer
 
 body.get(ClOrdID)?                             // Result<Option<FixStr>, FieldError>
 body.req(ClOrdID)?                             // missing is an error too
-body.get_as::<Dec19>(Price)?                   // with the `decimix` feature
+body.get_as::<Dec19>(Price)?                   // with the `decimix` feature (below)
 body.raw(tags::Text)                           // Option<&[u8]>, never fails
 msg.find(MsgSeqNum)?                           // header or body, top level
 ```
@@ -107,6 +107,27 @@ What `get` returns depends on the field's datatype:
 `get` returns `Ok(None)` when the field is absent and `Err(FieldError)` when it
 is present but malformed. `FieldError` carries the tag, and
 `reject_reason()` gives the `SessionRejectReason`.
+
+### Decimals
+
+Decimal fields decode to `Decimal`, the validated text. To get numbers, enable
+the `decimix` feature (on `babelfix` or `babelfix-core`) and convert with
+`get_as`/`req_as`; `set` takes them directly:
+
+```toml
+babelfix = { version = "0.1", features = ["decimix"] }   # or "decimix-finance"
+```
+
+```rust
+use decimix::{Dec19, UDec19};
+
+let px: Option<Dec19> = order.body().get_as(Price)?;
+let qty: UDec19 = order.body().req_as(OrderQty)?;      // Qty is unsigned
+er.body_mut().set(OrderQty, qty);
+```
+
+`decimix-finance` adds the same conversions for its `Price`, `Qty`,
+`DeltaQty`, `Amt` and `Percentage` types.
 
 Converting `TypedValue`:
 - `.as_string()` (which allocated) becomes `get(..)?.map(|s| s.to_string())`,

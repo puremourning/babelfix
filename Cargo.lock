@@ -126,6 +126,7 @@ dependencies = [
  "bytes",
  "chrono",
  "criterion",
+ "decimix",
  "futures",
  "googletest",
  "test-log",

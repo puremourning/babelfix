@@ -74,6 +74,10 @@ conclusions.
 babelfix = "0.1"
 ```
 
+Prices and quantities are never `f64`. They decode to their validated text,
+and with the `decimix` feature (`features = ["decimix"]`, or `"decimix-finance"`)
+convert exactly to `decimix` decimals with `get_as`.
+
 Compile the embedded dictionaries, then build, serialise and read a message:
 
 ```rust
