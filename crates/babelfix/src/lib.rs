@@ -9,7 +9,7 @@
 //!
 //! | Layer | Module / crate | Responsibility |
 //! |-------|----------------|----------------|
-//! | Schema | [`schema`] (`babelfix-core`) | Typed field constants, message types and codeset enums, generated from FIX.Latest |
+//! | Schema | [`schema`] (`babelfix-schema`) | Typed field constants, message types and codeset enums, generated from FIX.Latest |
 //! | Repository | [`repository`] (`babelfix-repo`) | Parsed FIX Orchestra metadata: versions, messages, fields, components, groups |
 //! | Message | [`message`] (`babelfix-core`) | Parsing, reading, building, editing and serialising FIX messages |
 //! | Codec | [`codec`] (`babelfix-core`) | Framing a byte stream into messages and back |
@@ -89,13 +89,17 @@
 //!
 //! ## Licensing
 //!
-//! babelfix is MIT licensed. The `babelfix-repo` and `babelfix-core` crates
+//! babelfix is MIT licensed. The `babelfix-repo` and `babelfix-schema` crates
 //! additionally bundle or derive from the Apache-2.0 licensed FIX Orchestra
 //! data, and are therefore released under `MIT AND Apache-2.0`.
 
 pub use babelfix_core::{
-  Error, Result, codec, driver, message, repository, schema, time,
+  Error, Result, codec, driver, message, repository, time,
 };
+
+/// Typed FIX field constants, message types and codeset enums, generated from
+/// the FIX.Latest Orchestra data. See [`babelfix_schema`].
+pub use babelfix_schema as schema;
 
 /// The session layer.
 ///

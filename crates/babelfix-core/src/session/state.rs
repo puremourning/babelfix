@@ -9,14 +9,13 @@ use std::time::Instant;
 
 use tracing::{debug, error, info};
 
+use super::fields::*;
 use super::replay::{Replay, ReplayStep};
 use super::{
   Command, Event, Progress, Session, SessionIdentifier, SessionOutput,
   Unstamped,
 };
 use crate::message::Message;
-use crate::schema::fields::*;
-use crate::schema::{msg_type, tags};
 use crate::time::MAX_LEN;
 use crate::{Error, Result};
 
@@ -424,7 +423,7 @@ impl SessionState {
         // stamps a fresh one.
         message
           .header_mut()
-          .copy_value(tags::SendingTime, tags::OrigSendingTime)?
+          .copy_value(SendingTime, OrigSendingTime)?
           .set(PossDupFlag, true);
         self.transmit(message, out)
       }

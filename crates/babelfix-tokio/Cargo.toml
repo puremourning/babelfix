@@ -27,3 +27,7 @@ tokio-util.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# For the doc examples' field constants; the driver itself never names one.
+babelfix-schema = { path = "../babelfix-schema" }

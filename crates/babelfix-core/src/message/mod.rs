@@ -7,7 +7,7 @@
 //!
 //! ```no_run
 //! # use babelfix_core::message::{Message, Dictionary};
-//! # use babelfix_core::schema::fields::*;
+//! # use babelfix_schema::fields::*;
 //! # fn f(dict: &std::sync::Arc<Dictionary>, order: &Message) -> Result<(), babelfix_core::message::FieldError> {
 //! let body = order.body();
 //! let symbol = body.req(Symbol)?;                 // FixStr, borrowed from `order`
@@ -22,8 +22,8 @@
 //! # Ok(()) }
 //! ```
 //!
-//! Fields are typed: every constant in [`schema::fields`](crate::schema::fields)
-//! carries its datatype, so `get` decodes to the right type and `set` accepts
+//! Fields are typed: every constant in the `babelfix-schema` crate's `fields`
+//! (`babelfix::schema::fields`) carries its datatype, so `get` decodes to the right type and `set` accepts
 //! only values of it. See [`types`] for the datatypes, and [`Decimal`],
 //! [`FixStr`] for the two you meet most.
 //!
@@ -79,6 +79,3 @@ pub(crate) mod test_support {
     DICT.get_or_init(|| dict_for("FIX.4.4")).clone()
   }
 }
-
-#[cfg(test)]
-mod tests;

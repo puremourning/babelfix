@@ -3,10 +3,7 @@ name = "babelfix-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-# Dual: our code is MIT; the typed schema `build.rs` generates (fields,
-# message types, codesets) derives from the Apache-2.0 FIX Orchestra data, so
-# redistributors must satisfy both licenses.
-license = "MIT AND Apache-2.0"
+license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Sans-io core of the babelfix FIX engine: messages, codec and session state machine"
@@ -44,10 +41,11 @@ decimix-finance = { git = "https://github.com/puremourning/decimix", optional = 
 # CI checks the standalone build for exactly this reason.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 
-[build-dependencies]
-babelfix-repo.workspace = true
-
 [dev-dependencies]
+# The schema depends on the core, not the other way round; the core's
+# integration tests and doc examples use it. Path-only, so `cargo publish`
+# strips it rather than requiring the schema to be published first.
+babelfix-schema = { path = "../babelfix-schema" }
 anyhow.workspace = true
 googletest.workspace = true
 test-log.workspace = true

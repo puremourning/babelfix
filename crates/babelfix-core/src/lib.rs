@@ -10,7 +10,6 @@
 //!
 //! | Layer | Module | Responsibility |
 //! |-------|--------|----------------|
-//! | Schema | [`schema`] | Typed FIX field, message-type and codeset definitions |
 //! | Repository | [`repository`] | Parsed FIX Orchestra metadata |
 //! | Message | [`message`] | Parsing, building and serialising individual messages |
 //! | Codec | [`codec`] | Framing a byte stream into messages and back |
@@ -18,24 +17,15 @@
 //! | Driver | [`driver`] | The above assembled: feed bytes, drain bytes |
 //! | Time | [`time`] | FIX UTC timestamp formatting (no clock) |
 //!
+//! The typed field, message-type and codeset definitions generated from FIX
+//! Orchestra live in `babelfix-schema`, which builds on this crate; `babelfix`
+//! re-exports them as `babelfix::schema`.
+//!
 //! Most applications should depend on `babelfix` instead, which re-exports this
 //! crate alongside a batteries-included tokio driver. Depend on `babelfix-core`
 //! directly when you want to drive the protocol from your own event loop.
 
 pub use babelfix_repo as repository;
-/// FIX field, message-type and codeset definitions, generated from the
-/// FIX.Latest Orchestra data.
-///
-/// - [`fields`](schema::fields): typed field constants, `Field<M>` and
-///   `GroupField`, for reading and writing messages.
-/// - [`tags`](schema::tags): the same as plain `u32` tag numbers.
-/// - [`msg_type`](schema::msg_type): `MsgType(35)` values by message name.
-/// - [`codesets`](schema::codesets): an enum per codeset.
-#[allow(non_upper_case_globals, non_snake_case, non_camel_case_types)]
-#[allow(clippy::all)]
-pub mod schema {
-  include!(concat!(env!("OUT_DIR"), "/schema.rs"));
-}
 
 pub mod codec;
 pub mod driver;

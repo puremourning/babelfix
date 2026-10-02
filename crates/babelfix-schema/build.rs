@@ -1,5 +1,5 @@
-//! Generates the typed schema (`crate::schema::{fields, tags, msg_type,
-//! codesets}`) from the FIX.Latest Orchestra data.
+//! Generates the typed schema (`fields`, `tags`, `msg_type`, `codesets`)
+//! from the FIX.Latest Orchestra data.
 //!
 //! One set of constants serves every FIX version: tag numbers, datatypes and
 //! codes are shared, and FIX.Latest is the superset.
@@ -40,7 +40,7 @@ fn generate(fix: &FixVersion) -> String {
   src.push_str(
     "/// Typed field constants: `Field<M>` for a field of datatype `M`, \
      `GroupField` for a NumInGroup.\npub mod fields {\n  \
-     use crate::message::types::{Field, GroupField, datatypes as dt};\n  \
+     use babelfix_core::message::types::{Field, GroupField, datatypes as dt};\n  \
      use super::codesets as cs;\n",
   );
   for f in &fields {
@@ -84,7 +84,7 @@ fn generate(fix: &FixVersion) -> String {
   // msg_type
   src.push_str(
     "/// `MsgType(35)` values, by message name.\npub mod msg_type {\n  \
-     use crate::message::types::MsgType;\n",
+     use babelfix_core::message::types::MsgType;\n",
   );
   let mut messages: Vec<_> = fix.messages.values().collect();
   messages.sort_by(|a, b| a.name.cmp(&b.name));
@@ -106,8 +106,8 @@ fn generate(fix: &FixVersion) -> String {
      /// or one agreed bilaterally, as `Reserved100Plus` codesets invite — is\n\
      /// `Unlisted`, carrying its bytes, and can be written back as it came.\n\
      pub mod codesets {\n  \
-     use crate::message::ValueError;\n  \
-     use crate::message::types::{FieldType, ToFix, ValueWriter};\n",
+     use babelfix_core::message::ValueError;\n  \
+     use babelfix_core::message::types::{FieldType, ToFix, ValueWriter};\n",
   );
   let mut names = HashSet::new();
   for cs in codesets_used.keys() {

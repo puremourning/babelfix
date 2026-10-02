@@ -20,6 +20,7 @@ serde = ["babelfix-core/serde", "babelfix-tokio?/serde"]
 
 [dependencies]
 babelfix-core.workspace = true
+babelfix-schema.workspace = true
 babelfix-tokio = { workspace = true, optional = true }
 
 # The integration tests and benchmarks run against the umbrella crate, which is

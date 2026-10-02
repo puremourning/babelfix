@@ -22,7 +22,7 @@
 //! the tokio transport without the umbrella.
 
 pub use babelfix_core::{
-  Error, Result, codec, driver, message, repository, schema, time,
+  Error, Result, codec, driver, message, repository, time,
 };
 
 pub mod connection;

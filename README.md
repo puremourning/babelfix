@@ -28,7 +28,7 @@ It is a small stack of layers, each usable on its own:
 
 | Layer | Crate | Responsibility |
 |-------|-------|----------------|
-| Schema | `babelfix-core::schema` | Typed field constants, message types and codeset enums, generated from FIX.Latest |
+| Schema | `babelfix-schema` | Typed field constants, message types and codeset enums, generated from FIX.Latest |
 | Repository | `babelfix-repo` | Parsed Orchestra metadata: versions, messages, fields, components, groups |
 | Message | `babelfix-core::message` | Parse, read, build, edit and serialise messages |
 | Codec | `babelfix-core::codec` | Frame a byte stream into messages and back |
@@ -129,10 +129,10 @@ Rust 1.85 (edition 2024).
 
 Licensed under the [MIT license](LICENSE).
 
-The `babelfix-repo` and `babelfix-core` crates additionally bundle or derive
+The `babelfix-repo` and `babelfix-schema` crates additionally bundle or derive
 from the [FIX Orchestra](https://www.fixtrading.org/standards/fix-orchestra/)
 reference data, which is licensed under Apache-2.0: `babelfix-repo` embeds it,
-and `babelfix-core` generates its schema from it. Those crates are therefore
+and `babelfix-schema` is generated from it. Those crates are therefore
 distributed under
 `MIT AND Apache-2.0`; the upstream licence and notice are retained under
 `crates/babelfix-repo/third-party/fix_orchestra/`.

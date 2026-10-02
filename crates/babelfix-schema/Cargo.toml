@@ -1,0 +1,25 @@
+[package]
+name = "babelfix-schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# Dual: our code is MIT; the schema `build.rs` generates (fields, message types,
+# codesets) derives from the Apache-2.0 FIX Orchestra data, so redistributors
+# must satisfy both licenses.
+license = "MIT AND Apache-2.0"
+authors.workspace = true
+repository.workspace = true
+description = "Typed FIX field, message-type and codeset definitions for babelfix, generated from FIX Orchestra"
+categories = ["network-programming"]
+keywords = ["fix-protocol", "financial", "fix", "trading"]
+
+# Published by `cargo release` alongside the workspace, but the shared tag is
+# created once by the umbrella `babelfix` crate.
+[package.metadata.release]
+tag = false
+
+[dependencies]
+babelfix-core.workspace = true
+
+[build-dependencies]
+babelfix-repo.workspace = true

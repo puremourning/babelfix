@@ -9,12 +9,12 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use babelfix_core as fix;
-use fix::message::{Dictionaries, Dictionary, Message};
-use fix::schema::codesets::EncryptMethod;
-use fix::schema::fields::{
+use babelfix_schema::codesets::EncryptMethod;
+use babelfix_schema::fields::{
   EncryptMethod, HeartBtInt, MsgSeqNum, SenderCompID, TargetCompID,
 };
-use fix::schema::tags;
+use babelfix_schema::tags;
+use fix::message::{Dictionaries, Dictionary, Message};
 use fix::session::{
   AcceptorHandshake, Event, InitiatorHandshake, Progress, Session,
   SessionIdentifier, SessionOutput,

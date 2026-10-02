@@ -47,14 +47,12 @@ use std::time::{Duration, Instant};
 
 use tracing::debug;
 
+use super::fields::*;
 use super::{
   Event, Progress, Session, SessionIdentifier, SessionOutput, SessionState,
 };
 use crate::message::Message;
 use crate::repository::FieldBlock;
-use crate::schema::codesets::EncryptMethod;
-use crate::schema::fields::*;
-use crate::schema::{msg_type, tags};
 use crate::{Error, Result};
 
 /// A completed logon exchange: the session, and whether it survived it.
@@ -273,12 +271,12 @@ pub fn logon_message(session: &Session) -> Result<Message> {
   body.set(HeartBtInt, session.heartbeat_interval.as_secs());
   if fix
     .get_message("A")
-    .is_some_and(|m| m.is_member(fix, tags::DefaultApplVerID))
+    .is_some_and(|m| m.is_member(fix, DefaultApplVerID))
   {
     // TODO: Default application version: FIXLatest
     body.set_raw(DefaultApplVerID, b"10");
   }
-  body.set(EncryptMethod, EncryptMethod::None);
+  body.set_raw(EncryptMethod, b"0"); // None
   Ok(logon)
 }
 

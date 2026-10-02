@@ -1,7 +1,8 @@
 //! Typed fields: what a tag's value decodes to, and what can be written to it.
 //!
-//! Every field constant in [`schema::fields`](crate::schema::fields) is a
-//! [`Field<M>`], where `M` is a *datatype marker* from [`datatypes`]. The marker
+//! Every field constant in `babelfix-schema`'s `fields` module (re-exported as
+//! `babelfix::schema::fields`) is a [`Field<M>`], where `M` is a *datatype
+//! marker* from [`datatypes`]. The marker
 //! says how the value's bytes decode ([`FieldType::Value`]) and, through
 //! [`ToFix`] and [`FromFix`] impls keyed on it, what may be written to the field
 //! and what it may be converted to:
@@ -208,7 +209,7 @@ impl<'a> ValueWriter<'a> {
 
 /// The datatype markers. Each names a FIX datatype and is the `M` in a
 /// [`Field<M>`]. Codeset markers are generated alongside their enums in
-/// [`schema::codesets`](crate::schema::codesets).
+/// `babelfix-schema`'s `codesets` module.
 pub mod datatypes {
   /// String, and the many datatypes derived from it: Currency, Exchange,
   /// Country, MultipleCharValue, MonthYear, TZTimestamp, XID, ...

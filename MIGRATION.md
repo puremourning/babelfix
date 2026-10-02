@@ -61,8 +61,10 @@ is still `repository::FixVersion`, available from any dictionary as
 ## Field constants
 
 `schema::FIX_Latest::Fields`, the other per-version modules, and the
-`babelfix-repogen` crate behind them are gone. In their place are four modules,
-all generated from FIX.Latest (tag numbers are shared across versions):
+`babelfix-repogen` crate behind them are gone. In their place is the
+`babelfix-schema` crate, re-exported as `babelfix::schema` (if you depend on
+`babelfix-core` alone, add `babelfix-schema` too). It has four modules, all
+generated from FIX.Latest (tag numbers are shared across versions):
 
 - **`schema::fields`**: typed constants. `Price: Field<datatypes::Price>`,
   `Side: Field<codesets::SideCodeSet>`, `NoPartyIDs: GroupField`. Use these

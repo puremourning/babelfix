@@ -121,6 +121,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "babelfix-core",
+ "babelfix-schema",
  "babelfix-tokio",
  "bytes",
  "chrono",
@@ -139,6 +140,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "babelfix-repo",
+ "babelfix-schema",
  "bytes",
  "chrono",
  "decimix",
@@ -163,10 +165,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "babelfix-schema"
+version = "0.1.0"
+dependencies = [
+ "babelfix-core",
+ "babelfix-repo",
+]
+
+[[package]]
 name = "babelfix-tokio"
 version = "0.1.0"
 dependencies = [
  "babelfix-core",
+ "babelfix-schema",
  "bytes",
  "chrono",
  "futures",

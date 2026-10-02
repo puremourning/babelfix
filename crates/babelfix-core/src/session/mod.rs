@@ -37,6 +37,7 @@
 //! on the peer. A driver that buffers outputs without bound and keeps feeding
 //! inputs deletes that, and a slow application will no longer throttle the wire.
 
+mod fields;
 mod handshake;
 mod replay;
 mod state;

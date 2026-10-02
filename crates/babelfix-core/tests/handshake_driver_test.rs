@@ -8,15 +8,15 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use babelfix_core as fix;
+use babelfix_schema::codesets::{EncryptMethod, Side};
+use babelfix_schema::fields::{
+  ClOrdID, EncryptMethod, HeartBtInt, OrderQty, Side, Symbol,
+};
+use babelfix_schema::tags;
 use fix::driver::{
   AcceptorDriver, DriverConfig, InitiatorDriver, SessionDriver,
 };
 use fix::message::{Dictionaries, Dictionary, Message};
-use fix::schema::codesets::{EncryptMethod, Side};
-use fix::schema::fields::{
-  ClOrdID, EncryptMethod, HeartBtInt, OrderQty, Side, Symbol,
-};
-use fix::schema::tags;
 use fix::session::{Command, Event, Session, SessionIdentifier, SessionState};
 
 static DICTS: LazyLock<Arc<Dictionaries>> =

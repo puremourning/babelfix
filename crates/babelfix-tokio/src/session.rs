@@ -28,7 +28,7 @@
 //!
 //! ```no_run
 //! use babelfix_tokio::session::{SessionHandle, SessionEvent};
-//! use babelfix_tokio::schema::fields::ClOrdID;
+//! use babelfix_schema::fields::ClOrdID;
 //! use futures::StreamExt;
 //!
 //! async fn drive(mut handle: SessionHandle) {

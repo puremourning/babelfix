@@ -9,9 +9,9 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use babelfix_core as fix;
+use babelfix_schema::fields::{ClOrdID, MsgSeqNum, SenderCompID, TargetCompID};
+use babelfix_schema::tags;
 use fix::message::{Dictionaries, Dictionary, Message};
-use fix::schema::fields::{ClOrdID, MsgSeqNum, SenderCompID, TargetCompID};
-use fix::schema::tags;
 use fix::session::{
   Command, Event, Progress, Session, SessionIdentifier, SessionOutput,
   SessionState, Unstamped,

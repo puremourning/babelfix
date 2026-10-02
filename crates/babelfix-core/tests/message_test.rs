@@ -3,11 +3,26 @@
 
 use bytes::BytesMut;
 
-use super::test_support::dict;
-use super::*;
-use crate::schema::codesets::{PartyRole, Side as SideCode};
-use crate::schema::fields::*;
-use crate::schema::{msg_type, tags};
+use std::sync::{Arc, OnceLock};
+
+use babelfix_core::message::*;
+use babelfix_schema::codesets::{PartyRole, Side as SideCode};
+use babelfix_schema::fields::*;
+use babelfix_schema::{msg_type, tags};
+
+/// FIX 4.4.
+fn dict() -> Arc<Dictionary> {
+  static DICT: OnceLock<Arc<Dictionary>> = OnceLock::new();
+  DICT
+    .get_or_init(|| {
+      Dictionaries::standard()
+        .unwrap()
+        .get("FIX.4.4")
+        .unwrap()
+        .clone()
+    })
+    .clone()
+}
 
 /// Frame `body` (`|`-delimited, starting at 35) as a complete SOH message with
 /// correct BodyLength and CheckSum.
@@ -297,7 +312,7 @@ fn strict_validation_checks_group_field_order() {
     .set(PartyRole, PartyRole::ClientID)
     .set(
       PartyIDSource,
-      crate::schema::codesets::PartyIDSource::Proprietary,
+      babelfix_schema::codesets::PartyIDSource::Proprietary,
     )
     .set(PartyID, "X");
   b.validate_strict().unwrap();
@@ -511,12 +526,12 @@ fn empty_instances_are_not_written() {
 #[test]
 fn header_edits_fill_the_gap_without_moving_the_body() {
   let mut m = parse(NOS);
-  let body_start = m.body_start;
+  let body_start = m.body().start();
   m.header_mut()
     .set(PossDupFlag, true)
     .copy_value(tags::SendingTime, tags::OrigSendingTime)
     .unwrap();
-  assert_eq!(m.body_start, body_start);
+  assert_eq!(m.body().start(), body_start);
   assert!(m.header().req(PossDupFlag).unwrap());
   assert_eq!(
     m.header().req(OrigSendingTime).unwrap().to_string(),
@@ -536,7 +551,10 @@ fn header_edits_fill_the_gap_without_moving_the_body() {
 fn data_fields_set_their_length() {
   let mut m = Message::new(&dict(), "A");
   m.body_mut()
-    .set(EncryptMethod, crate::schema::codesets::EncryptMethod::None)
+    .set(
+      EncryptMethod,
+      babelfix_schema::codesets::EncryptMethod::None,
+    )
     .set(HeartBtInt, 30u64)
     .set(RawData, &b"a\x01b"[..]);
   assert_eq!(m.body().req(RawDataLength).unwrap(), 3);
@@ -786,8 +804,8 @@ fn encoding_appends_after_earlier_messages() {
   first.encode(&mut out);
   second.encode(&mut out);
   let mut out = out;
-  let mut decoder = crate::codec::FixDecoder::with_dictionary(
-    super::Dictionaries::standard().unwrap(),
+  let mut decoder = babelfix_core::codec::FixDecoder::with_dictionary(
+    Dictionaries::standard().unwrap(),
     None,
     dict(),
   );
@@ -848,7 +866,7 @@ fn randomised_round_trips() {
           .push()
           .set(
             PartySubIDType,
-            crate::schema::codesets::PartySubIDType::Firm,
+            babelfix_schema::codesets::PartySubIDType::Firm,
           )
           .set(PartySubID, format!("s{s}").as_str());
       }
