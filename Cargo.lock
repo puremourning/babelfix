@@ -139,7 +139,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "babelfix-repo",
- "babelfix-repogen",
  "bytes",
  "chrono",
  "decimix",
@@ -161,14 +160,6 @@ dependencies = [
  "quote",
  "syn 3.0.3",
  "thiserror 2.0.19",
-]
-
-[[package]]
-name = "babelfix-repogen"
-version = "0.1.0"
-dependencies = [
- "babelfix-repo",
- "quote",
 ]
 
 [[package]]

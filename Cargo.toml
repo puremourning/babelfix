@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
   "crates/babelfix-repo",
-  "crates/babelfix-repogen",
   "crates/babelfix-core",
   "crates/babelfix-tokio",
   "crates/babelfix",
@@ -17,11 +16,11 @@ license = "MIT"
 authors = ["Ben Jackson <puremourning@gmail.com>"]
 repository = "https://github.com/puremourning/babelfix"
 
-# `cargo release` configuration. All five crates share one version and are
+# `cargo release` configuration. All four crates share one version and are
 # published together in dependency order:
 #
-#   babelfix-repo -> babelfix-repogen -> babelfix-core -> babelfix-tokio
-#                                                      -> babelfix
+#   babelfix-repo -> babelfix-core -> babelfix-tokio
+#                                  -> babelfix
 #
 # The internal `version = "..."` pins in [workspace.dependencies] are rewritten
 # automatically on each bump. Only the umbrella crate is tagged, so a release
@@ -41,7 +40,6 @@ babelfix = { path = "crates/babelfix", version = "0.1.0" }
 babelfix-core = { path = "crates/babelfix-core", version = "0.1.0" }
 babelfix-tokio = { path = "crates/babelfix-tokio", version = "0.1.0" }
 babelfix-repo = { path = "crates/babelfix-repo", version = "0.1.0" }
-babelfix-repogen = { path = "crates/babelfix-repogen", version = "0.1.0" }
 tracing = "0.1"
 bytes = "1.0"
 tokio-util = { version = "0.7", features = ["codec"] }

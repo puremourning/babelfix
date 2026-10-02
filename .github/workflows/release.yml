@@ -60,10 +60,11 @@ jobs:
           cargo build --workspace --all-targets
           cargo test --workspace
 
-      # One command handles the whole workspace: bump all three crates to
+      # One command handles the whole workspace: bump all four crates to
       # $VERSION (shared-version), rewrite the internal path-dep version pins,
       # create a single "Release v$VERSION" commit and `v$VERSION` tag, publish
-      # babelfix-repo -> babelfix-repogen -> babelfix in dependency order, and
+      # babelfix-repo -> babelfix-core -> babelfix-tokio -> babelfix in
+      # dependency order, and
       # push the commit and tag.
       - name: Release (bump, tag, publish, push)
         env:

@@ -31,13 +31,9 @@ pub use babelfix_repo as repository;
 /// - [`tags`](schema::tags): the same as plain `u32` tag numbers.
 /// - [`msg_type`](schema::msg_type): `MsgType(35)` values by message name.
 /// - [`codesets`](schema::codesets): an enum per codeset.
-///
-/// The per-version `FIX_4_2::Fields`, `FIX_4_4::Fields` and `FIX_Latest::Fields`
-/// tag-number modules are re-exported from `babelfix-repogen` too.
 #[allow(non_upper_case_globals, non_snake_case, non_camel_case_types)]
 #[allow(clippy::all)]
 pub mod schema {
-  pub use babelfix_repogen::*;
   include!(concat!(env!("OUT_DIR"), "/schema.rs"));
 }
 

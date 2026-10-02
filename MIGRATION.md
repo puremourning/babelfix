@@ -12,28 +12,28 @@ cover the API itself, and `message_proposal.md` explains the design.
 
 ## At a glance
 
-| Before | After |
-|---|---|
-| `repository::orchestrate()` → `Arc<FixRepository>` passed to endpoints | `message::Dictionaries::standard()?` → `Arc<Dictionaries>` |
-| `Arc<FixVersion>` in `Session`, builders | `Arc<Dictionary>`: `dicts.get("FIX.4.4")`, `dicts.for_begin_string(b"FIX.4.4")` |
-| `Session { fix_version, .. }` | `Session { dict, .. }`, or `Session::new(dict)` |
-| `FixMessage`, `builder::Message` | `Message` |
-| `schema::FIX_Latest::Fields::X` (`u32`) | `schema::tags::X` (`u32`), or `schema::fields::X` (typed) |
-| `msg.get_type()` / `msg.fix_message.msg_type` | `msg.msg_type()` → `&str` |
-| `msg.is_admin_message()` | `msg.is_admin()` |
-| `builder::Message::new(fix, "D")?` | `Message::new(&dict, "D")` (or `msg_type::NewOrderSingle`) |
-| `msg.body.tag(t)` → `Option<&TypedValue>` | `msg.body().get(field)?` → `Option<T>`, or `msg.body().raw(t)` → `Option<&[u8]>` |
-| `msg.body.set_tag(t, v)` | `msg.body_mut().set(field, v)`, or `.set_raw(t, bytes)` |
-| `msg.body.remove_tag(t)` | `msg.body_mut().remove(t)` |
-| `msg.body.group_mut(n).push(block)` | `msg.body_mut().group_mut(n).push().set(..)` |
-| `FixMessage::from_bytes(fix, bytes)` → `(msg, consumed)` | `Message::parse(&dict, bytes)?` |
-| `FixMessage::from_bytes_delimited(fix, bytes, b'|')` | `Message::parse_delimited(&dict, &bytes, b'|')?`, or `parse_fragment` for hand-typed text |
-| `builder::Message::from_message(&m)` / `as_message()` / `into_message()` | (nothing: there is one type) |
-| `msg.write_to(&mut buf, SOH)` / `into_bytes()` | `msg.encode(&mut buf)` / `msg.to_bytes()` |
-| `msg.to_string_delimited(b'|')` | `msg.to_string()` (`Display` uses `\|`), or `encode_delimited(&mut buf, b'\|')` |
-| `builder.normalize()?` → new message | `msg.normalize()` (in place) |
-| `FixDecoder::new(repo, d)` / `with_version(repo, d, fix)` | `FixDecoder::new(dicts, d)` / `with_dictionary(dicts, d, dict)` |
-| `FixEncoder::new(d).with_precision(p)`, `encode_stamped`, `codec::stamp_sending_time` | `FixEncoder::new(d)`; stamping is `Unstamped::stamp` (below) |
+| Before                                                                                | After                                                                                      |
+|---------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------|
+| `repository::orchestrate()` → `Arc<FixRepository>` passed to endpoints                | `message::Dictionaries::standard()?` → `Arc<Dictionaries>`                                 |
+| `Arc<FixVersion>` in `Session`, builders                                              | `Arc<Dictionary>`: `dicts.get("FIX.4.4")`, `dicts.for_begin_string(b"FIX.4.4")`            |
+| `Session { fix_version, .. }`                                                         | `Session { dict, .. }`, or `Session::new(dict)`                                            |
+| `FixMessage`, `builder::Message`                                                      | `Message`                                                                                  |
+| `schema::FIX_Latest::Fields::X` (`u32`)                                               | `schema::tags::X` (`u32`), or `schema::fields::X` (typed)                                  |
+| `msg.get_type()` / `msg.fix_message.msg_type`                                         | `msg.msg_type()` → `&str`                                                                  |
+| `msg.is_admin_message()`                                                              | `msg.is_admin()`                                                                           |
+| `builder::Message::new(fix, "D")?`                                                    | `Message::new(&dict, "D")` (or `msg_type::NewOrderSingle`)                                 |
+| `msg.body.tag(t)` → `Option<&TypedValue>`                                             | `msg.body().get(field)?` → `Option<T>`, or `msg.body().raw(t)` → `Option<&[u8]>`           |
+| `msg.body.set_tag(t, v)`                                                              | `msg.body_mut().set(field, v)`, or `.set_raw(t, bytes)`                                    |
+| `msg.body.remove_tag(t)`                                                              | `msg.body_mut().remove(t)`                                                                 |
+| `msg.body.group_mut(n).push(block)`                                                   | `msg.body_mut().group_mut(n).push().set(..)`                                               |
+| `FixMessage::from_bytes(fix, bytes)` → `(msg, consumed)`                              | `Message::parse(&dict, bytes)?`                                                            |
+| `FixMessage::from_bytes_delimited(fix, bytes, b'\|')`                                 | `Message::parse_delimited(&dict, &bytes, b'\|')?`, or `parse_fragment` for hand-typed text |
+| `builder::Message::from_message(&m)` / `as_message()` / `into_message()`              | (nothing: there is one type)                                                               |
+| `msg.write_to(&mut buf, SOH)` / `into_bytes()`                                        | `msg.encode(&mut buf)` / `msg.to_bytes()`                                                  |
+| `msg.to_string_delimited(b'\|')`                                                      | `msg.to_string()` (`Display` uses `\|`), or `encode_delimited(&mut buf, b'\|')`            |
+| `builder.normalize()?` → new message                                                  | `msg.normalize()` (in place)                                                               |
+| `FixDecoder::new(repo, d)` / `with_version(repo, d, fix)`                             | `FixDecoder::new(dicts, d)` / `with_dictionary(dicts, d, dict)`                            |
+| `FixEncoder::new(d).with_precision(p)`, `encode_stamped`, `codec::stamp_sending_time` | `FixEncoder::new(d)`; stamping is `Unstamped::stamp` (below)                               |
 
 ## Setting up
 
@@ -60,7 +60,8 @@ is still `repository::FixVersion`, available from any dictionary as
 
 ## Field constants
 
-`schema::FIX_Latest::Fields` still exists, but there are now three modules,
+`schema::FIX_Latest::Fields`, the other per-version modules, and the
+`babelfix-repogen` crate behind them are gone. In their place are four modules,
 all generated from FIX.Latest (tag numbers are shared across versions):
 
 - **`schema::fields`**: typed constants. `Price: Field<datatypes::Price>`,

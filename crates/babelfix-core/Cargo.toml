@@ -27,7 +27,6 @@ decimix-finance = ["decimix", "dep:decimix-finance"]
 [dependencies]
 thiserror.workspace = true
 babelfix-repo.workspace = true
-babelfix-repogen.workspace = true
 tracing.workspace = true
 bytes.workspace = true
 serde = { workspace = true, optional = true }

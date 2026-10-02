@@ -129,11 +129,11 @@ Rust 1.85 (edition 2024).
 
 Licensed under the [MIT license](LICENSE).
 
-The `babelfix-repo`, `babelfix-repogen` and `babelfix-core` crates additionally
-bundle or derive from the
-[FIX Orchestra](https://www.fixtrading.org/standards/fix-orchestra/) reference
-data, which is licensed under Apache-2.0: `babelfix-repo` embeds it, and the
-other two generate code from it. Those crates are therefore distributed under
+The `babelfix-repo` and `babelfix-core` crates additionally bundle or derive
+from the [FIX Orchestra](https://www.fixtrading.org/standards/fix-orchestra/)
+reference data, which is licensed under Apache-2.0: `babelfix-repo` embeds it,
+and `babelfix-core` generates its schema from it. Those crates are therefore
+distributed under
 `MIT AND Apache-2.0`; the upstream licence and notice are retained under
 `crates/babelfix-repo/third-party/fix_orchestra/`.
 
