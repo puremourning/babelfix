@@ -111,12 +111,7 @@ impl From<FixTime> for String {
 
 /// Write `value` as exactly `width` zero-padded decimal digits at `buf[at..]`,
 /// returning the position just past them.
-fn write_digits(
-  buf: &mut [u8; MAX_LEN],
-  at: usize,
-  value: u32,
-  width: usize,
-) -> usize {
+fn write_digits(buf: &mut [u8], at: usize, value: u32, width: usize) -> usize {
   let mut v = value;
   for i in (0..width).rev() {
     buf[at + i] = b'0' + (v % 10) as u8;
@@ -129,9 +124,26 @@ fn write_digits(
 ///
 /// The formatting is done by hand rather than through `chrono`'s `format`
 /// machinery: the layout is fixed, this sits on the send path, and it lets the
-/// result live on the stack.
+/// result live on the stack. To format straight into a buffer of your own, see
+/// [`write_fix_time`].
 pub fn fix_time(when: DateTime<Utc>, precision: TimePrecision) -> FixTime {
   let mut buf = [0u8; MAX_LEN];
+  let len = write_fix_time(when, precision, &mut buf);
+  FixTime { buf, len }
+}
+
+/// Format `when` as a FIX UTC timestamp at the start of `buf`, returning the
+/// bytes written — always [`TimePrecision::width`].
+///
+/// # Panics
+///
+/// If `buf` is shorter than `precision.width()`.
+pub fn write_fix_time(
+  when: DateTime<Utc>,
+  precision: TimePrecision,
+  buf: &mut [u8],
+) -> usize {
+  let buf = &mut buf[..precision.width()];
   let date = when.date_naive();
   let time = when.time();
 
@@ -139,18 +151,18 @@ pub fn fix_time(when: DateTime<Utc>, precision: TimePrecision) -> FixTime {
   // Clamping keeps the field fixed-width; such a timestamp is nonsense anyway.
   let year = date.year().clamp(0, 9999) as u32;
 
-  let mut at = write_digits(&mut buf, 0, year, 4);
-  at = write_digits(&mut buf, at, date.month(), 2);
-  at = write_digits(&mut buf, at, date.day(), 2);
+  let mut at = write_digits(buf, 0, year, 4);
+  at = write_digits(buf, at, date.month(), 2);
+  at = write_digits(buf, at, date.day(), 2);
   buf[at] = b'-';
   at += 1;
-  at = write_digits(&mut buf, at, time.hour(), 2);
+  at = write_digits(buf, at, time.hour(), 2);
   buf[at] = b':';
   at += 1;
-  at = write_digits(&mut buf, at, time.minute(), 2);
+  at = write_digits(buf, at, time.minute(), 2);
   buf[at] = b':';
   at += 1;
-  at = write_digits(&mut buf, at, time.second(), 2);
+  at = write_digits(buf, at, time.second(), 2);
   buf[at] = b'.';
   at += 1;
 
@@ -160,17 +172,17 @@ pub fn fix_time(when: DateTime<Utc>, precision: TimePrecision) -> FixTime {
   let nanos = time.nanosecond().min(999_999_999);
 
   let at = match precision {
-    TimePrecision::Millis => write_digits(&mut buf, at, nanos / 1_000_000, 3),
-    TimePrecision::Micros => write_digits(&mut buf, at, nanos / 1_000, 6),
-    TimePrecision::Nanos => write_digits(&mut buf, at, nanos, 9),
+    TimePrecision::Millis => write_digits(buf, at, nanos / 1_000_000, 3),
+    TimePrecision::Micros => write_digits(buf, at, nanos / 1_000, 6),
+    TimePrecision::Nanos => write_digits(buf, at, nanos, 9),
     TimePrecision::Picos => {
-      let at = write_digits(&mut buf, at, nanos, 9);
-      write_digits(&mut buf, at, 0, 3)
+      let at = write_digits(buf, at, nanos, 9);
+      write_digits(buf, at, 0, 3)
     }
   };
 
   debug_assert_eq!(at, precision.width());
-  FixTime { buf, len: at }
+  at
 }
 
 #[cfg(test)]

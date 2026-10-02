@@ -52,7 +52,7 @@ pub use replay::Replay;
 pub use state::SessionState;
 
 use crate::message::{Dictionary, Message};
-use crate::time::{TimePrecision, fix_time};
+use crate::time::{TimePrecision, write_fix_time};
 
 /// Identifies a session by the triple FIX uses to route messages.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -131,9 +131,10 @@ impl<'a> Unstamped<'a> {
   /// Write `SendingTime` as `now`, at the session's precision, and hand back
   /// the message to encode.
   pub fn stamp(self, now: chrono::DateTime<chrono::Utc>) -> &'a Message {
-    self
-      .msg
-      .stamp_sending_time(fix_time(now, self.precision).as_bytes());
+    let precision = self.precision;
+    self.msg.stamp_sending_time(precision.width(), |out| {
+      write_fix_time(now, precision, out)
+    });
     self.msg
   }
 

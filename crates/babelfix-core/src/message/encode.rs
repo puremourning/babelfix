@@ -187,18 +187,11 @@ fn piece_len(p: &Piece<'_>) -> usize {
   }
 }
 
-fn put_uint(out: &mut BytesMut, mut v: u64) {
-  let mut digits = [0u8; 20];
-  let mut i = digits.len();
-  loop {
-    i -= 1;
-    digits[i] = b'0' + (v % 10) as u8;
-    v /= 10;
-    if v == 0 {
-      break;
-    }
-  }
-  out.put_slice(&digits[i..]);
+fn put_uint(out: &mut BytesMut, v: u64) {
+  let n = super::tape::digits(v);
+  let start = out.len();
+  out.resize(start + n, 0);
+  super::types::write_uint(&mut out[start..], v);
 }
 
 fn put_group(out: &mut BytesMut, tag: u32, count: u64, delimiter: u8) {

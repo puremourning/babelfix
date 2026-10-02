@@ -166,19 +166,33 @@ impl<'a> ValueWriter<'a> {
     self.buf.push(b);
   }
 
+  /// Let `write` format straight into the message's arena: it is given `max`
+  /// bytes of room and returns how many it used. For formatters with a known
+  /// maximum width — decimals, integers, timestamps — this avoids formatting
+  /// into a buffer of their own and copying.
+  ///
+  /// # Panics
+  ///
+  /// If `write` claims to have written more than `max` bytes.
+  pub fn put_with(
+    &mut self,
+    max: usize,
+    write: impl FnOnce(&mut [u8]) -> usize,
+  ) -> usize {
+    let start = self.buf.len();
+    // Zeroed rather than left uninitialised, so `write` gets a plain `&mut
+    // [u8]` with no `unsafe`; the arena keeps its capacity across messages, so
+    // this is normally a memset of `max` bytes and nothing more.
+    self.buf.resize(start + max, 0);
+    let n = write(&mut self.buf[start..]);
+    assert!(n <= max, "wrote {n} bytes into room for {max}");
+    self.buf.truncate(start + n);
+    n
+  }
+
   /// Append an unsigned integer in decimal.
-  pub fn put_uint(&mut self, mut v: u64) {
-    let mut digits = [0u8; 20];
-    let mut i = digits.len();
-    loop {
-      i -= 1;
-      digits[i] = b'0' + (v % 10) as u8;
-      v /= 10;
-      if v == 0 {
-        break;
-      }
-    }
-    self.put(&digits[i..]);
+  pub fn put_uint(&mut self, v: u64) {
+    self.put_with(MAX_UINT_DIGITS, |out| write_uint(out, v));
   }
 
   /// Append a signed integer in decimal.
@@ -205,6 +219,19 @@ impl<'a> ValueWriter<'a> {
     }
     Ok(())
   }
+}
+
+/// The most decimal digits a `u64` has.
+pub(crate) const MAX_UINT_DIGITS: usize = 20;
+
+/// Write `v` in decimal at the start of `out`; returns the digits written.
+pub(crate) fn write_uint(out: &mut [u8], mut v: u64) -> usize {
+  let n = super::tape::digits(v);
+  for b in out[..n].iter_mut().rev() {
+    *b = b'0' + (v % 10) as u8;
+    v /= 10;
+  }
+  n
 }
 
 /// The datatype markers. Each names a FIX datatype and is the `M` in a
@@ -610,16 +637,6 @@ mod decimix_impls {
 
   use super::*;
 
-  fn write_ascii(
-    w: &mut ValueWriter<'_>,
-    f: impl FnOnce(&mut [u8]) -> Result<usize, decimix::BufferTooSmall>,
-  ) -> Result<(), ValueError> {
-    let mut buf = [0u8; 64];
-    let n = f(&mut buf).map_err(|_| ValueError::OutOfRange)?;
-    w.put(&buf[..n]);
-    Ok(())
-  }
-
   fn parse_err(e: decimix::ParseError) -> ValueError {
     match e {
       decimix::ParseError::Invalid => ValueError::Malformed,
@@ -636,7 +653,10 @@ mod decimix_impls {
       }
       impl ToFix<$m> for Dec19 {
         fn to_fix(&self, w: &mut ValueWriter<'_>) -> Result<(), ValueError> {
-          write_ascii(w, |b| self.write_ascii(b))
+          w.put_with(Dec19::MAX_ASCII_LEN, |out| {
+            self.write_ascii(out).expect("MAX_ASCII_LEN always fits")
+          });
+          Ok(())
         }
       }
     )*};
@@ -656,7 +676,10 @@ mod decimix_impls {
   }
   impl ToFix<Qty> for UDec19 {
     fn to_fix(&self, w: &mut ValueWriter<'_>) -> Result<(), ValueError> {
-      write_ascii(w, |b| self.write_ascii(b))
+      w.put_with(UDec19::MAX_ASCII_LEN, |out| {
+        self.write_ascii(out).expect("MAX_ASCII_LEN always fits")
+      });
+      Ok(())
     }
   }
 }
@@ -774,7 +797,7 @@ mod chrono_impls {
   use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Timelike, Utc};
 
   use super::*;
-  use crate::time::{TimePrecision, fix_time};
+  use crate::time::{TimePrecision, write_fix_time};
 
   /// Exactly `n` ASCII digits.
   fn digits(raw: &[u8], n: usize) -> Result<u32, ValueError> {
@@ -835,7 +858,10 @@ mod chrono_impls {
   /// TimePrecision::Micros))`.
   impl ToFix<UtcTimestamp> for (DateTime<Utc>, TimePrecision) {
     fn to_fix(&self, w: &mut ValueWriter<'_>) -> Result<(), ValueError> {
-      w.put(fix_time(self.0, self.1).as_bytes());
+      let (when, precision) = *self;
+      w.put_with(precision.width(), |out| {
+        write_fix_time(when, precision, out)
+      });
       Ok(())
     }
   }
@@ -853,11 +879,12 @@ mod chrono_impls {
           if !(0..=9999).contains(&y) {
             return Err(ValueError::OutOfRange);
           }
-          let mut buf = [0u8; 8];
-          write_padded(&mut buf[0..4], y as u32);
-          write_padded(&mut buf[4..6], self.month());
-          write_padded(&mut buf[6..8], self.day());
-          w.put(&buf);
+          w.put_with(8, |out| {
+            write_padded(&mut out[0..4], y as u32);
+            write_padded(&mut out[4..6], self.month());
+            write_padded(&mut out[6..8], self.day());
+            8
+          });
           Ok(())
         }
       }
@@ -899,20 +926,26 @@ mod chrono_impls {
     t: &NaiveTime,
     precision: Option<TimePrecision>,
   ) -> Result<(), ValueError> {
-    let mut buf = [0u8; 8];
-    write_padded(&mut buf[0..2], t.hour());
-    buf[2] = b':';
-    write_padded(&mut buf[3..5], t.minute());
-    buf[5] = b':';
-    write_padded(&mut buf[6..8], t.second());
-    w.put(&buf);
-    if let Some(p) = precision {
-      let nanos = t.nanosecond().min(999_999_999);
-      let mut frac = [b'0'; 12];
-      write_padded(&mut frac[..9], nanos);
-      w.put_u8(b'.');
-      w.put(&frac[..p.digits()]);
-    }
+    // `HH:MM:SS`, then `.` and up to 12 fractional digits.
+    let digits = precision.map_or(0, TimePrecision::digits);
+    let width = if digits == 0 { 8 } else { 9 + digits };
+    w.put_with(width, |out| {
+      write_padded(&mut out[0..2], t.hour());
+      out[2] = b':';
+      write_padded(&mut out[3..5], t.minute());
+      out[5] = b':';
+      write_padded(&mut out[6..8], t.second());
+      if digits > 0 {
+        out[8] = b'.';
+        // Nanoseconds, then zeros for any picosecond digits.
+        let nanos = t.nanosecond().min(999_999_999);
+        let frac = &mut out[9..9 + digits];
+        frac.fill(b'0');
+        let shown = digits.min(9);
+        write_padded(&mut frac[..shown], nanos / 10u32.pow(9 - shown as u32));
+      }
+      width
+    });
     Ok(())
   }
 }
@@ -1059,6 +1092,44 @@ mod tests {
       ))),
       Ok(t)
     );
+  }
+
+  #[test]
+  fn put_with_writes_in_place() {
+    let mut buf = b"35=".to_vec();
+    let n = ValueWriter::new(&mut buf).put_with(10, |out| {
+      out[..3].copy_from_slice(b"abc");
+      3
+    });
+    assert_eq!(n, 3);
+    assert_eq!(buf, b"35=abc");
+    let mut buf = Vec::new();
+    ValueWriter::new(&mut buf).put_uint(u64::MAX);
+    assert_eq!(buf, u64::MAX.to_string().as_bytes());
+  }
+
+  #[test]
+  #[should_panic(expected = "wrote 4 bytes into room for 3")]
+  fn put_with_refuses_to_overrun() {
+    let mut buf = Vec::new();
+    ValueWriter::new(&mut buf).put_with(3, |_| 4);
+  }
+
+  #[test]
+  fn time_fractions_at_every_precision() {
+    use chrono::NaiveTime;
+
+    use crate::time::TimePrecision;
+
+    let t = NaiveTime::from_hms_nano_opt(9, 5, 3, 7_008_009).unwrap();
+    for (p, want) in [
+      (TimePrecision::Millis, &b"09:05:03.007"[..]),
+      (TimePrecision::Micros, b"09:05:03.007008"),
+      (TimePrecision::Nanos, b"09:05:03.007008009"),
+      (TimePrecision::Picos, b"09:05:03.007008009000"),
+    ] {
+      assert_eq!(write::<UtcTimeOnly>((t, p)).unwrap(), want, "{p:?}");
+    }
   }
 
   #[cfg(feature = "decimix")]

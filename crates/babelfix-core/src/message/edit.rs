@@ -94,20 +94,33 @@ impl Message {
     }
   }
 
-  /// Write `SendingTime(52)`, in place when the header already holds a slot of
-  /// the right width (the session reserves one), so stamping allocates nothing
-  /// and moves nothing.
-  pub(crate) fn stamp_sending_time(&mut self, value: &[u8]) {
+  /// Write `SendingTime(52)` — `width` bytes, formatted by `write` — straight
+  /// into the slot the session reserved in the header, so stamping allocates
+  /// nothing, moves nothing and copies nothing. Without such a slot, it is set
+  /// like any other field.
+  pub(crate) fn stamp_sending_time(
+    &mut self,
+    width: usize,
+    write: impl FnOnce(&mut [u8]) -> usize,
+  ) {
     let (start, end) = self.region_range(Region::Header);
     if let Some(i) = self.find_in(start, end, 0, 52, None) {
       let e = self.tape[i as usize];
-      if e.seg == Seg::Arena && e.len as usize == value.len() {
-        self.arena[e.value_range()].copy_from_slice(value);
+      if e.seg == Seg::Arena && e.len as usize == width {
+        let written = write(&mut self.arena[e.value_range()]);
+        debug_assert_eq!(written, width);
         self.clean = false;
         return;
       }
     }
-    self.header_mut().set_raw(52, value);
+    let result = self
+      .header_mut()
+      .put(52, |w| {
+        w.put_with(width, write);
+        Ok(())
+      })
+      .map(|_| ());
+    debug_assert!(result.is_ok());
   }
 
   // -------------------------------------------------------------------------
