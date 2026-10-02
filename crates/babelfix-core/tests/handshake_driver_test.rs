@@ -75,6 +75,7 @@ fn config() -> DriverConfig {
     delimiter: Some(DELIM),
     clock,
     logon_timeout: HEARTBEAT,
+    max_frame_len: fix::codec::DEFAULT_MAX_FRAME_LEN,
   }
 }
 

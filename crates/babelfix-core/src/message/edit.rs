@@ -18,6 +18,12 @@ use super::tape::{Entry, Kind, Message, Region, Seg};
 use super::types::{Field, FieldType, Tag, ToFix, ValueWriter};
 use super::view::{Block, Cursor};
 
+/// BeginString, BodyLength, CheckSum and MsgType: derived or fixed when the
+/// message is created, never edited as fields.
+fn is_framing(tag: u32) -> bool {
+  matches!(tag, 8 | 9 | 10 | 35)
+}
+
 /// Which block a mutable view edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Owner {
@@ -422,9 +428,7 @@ impl<'a> BlockMut<'a> {
     tag: u32,
     write: impl FnOnce(&mut ValueWriter<'_>) -> Result<(), ValueError>,
   ) -> Result<&mut Self, FieldError> {
-    if matches!(tag, 8 | 9 | 10 | 35)
-      || self.msg.is_group_tag(self.owner, tag).is_some()
-    {
+    if is_framing(tag) || self.msg.is_group_tag(self.owner, tag).is_some() {
       return Err(FieldError::derived(tag));
     }
     match self.msg.dict.kind(tag) {
@@ -472,8 +476,16 @@ impl<'a> BlockMut<'a> {
   }
 
   /// Remove a field (a data field and its Length together) or a whole group.
+  ///
+  /// BeginString, BodyLength, CheckSum and MsgType cannot be removed: like
+  /// setting them, trying is a bug (a `debug_assert!`), and in release builds
+  /// nothing happens.
   pub fn remove(&mut self, tag: impl Tag) -> &mut Self {
     let tag = tag.tag();
+    if is_framing(tag) {
+      debug_assert!(false, "tag {tag} is derived and cannot be removed");
+      return self;
+    }
     let Some(mut i) = self.find(tag) else {
       return self;
     };
@@ -499,8 +511,15 @@ impl<'a> BlockMut<'a> {
   /// Copy a field, a data field (with its Length), or a whole group from
   /// another message's block, replacing any here. Bytes are copied; nothing is
   /// decoded. Returns whether `src` had it.
+  ///
+  /// BeginString, BodyLength, CheckSum and MsgType are each message's own, and
+  /// are not copied (`false`, after a `debug_assert!`).
   pub fn copy(&mut self, src: &Block<'_>, tag: impl Tag) -> bool {
     let tag = tag.tag();
+    if is_framing(tag) {
+      debug_assert!(false, "tag {tag} is derived and cannot be copied");
+      return false;
+    }
     let Some(i) = src.msg.find_in(src.start, src.end, src.depth, tag, None)
     else {
       return false;
@@ -548,7 +567,7 @@ impl<'a> BlockMut<'a> {
     if e.kind != Kind::Field {
       return Err(FieldError::derived(from));
     }
-    if matches!(to, 8 | 9 | 10 | 35)
+    if is_framing(to)
       || self.msg.dict.kind(to) != FieldKind::Plain
       || self.msg.is_group_tag(self.owner, to).is_some()
     {

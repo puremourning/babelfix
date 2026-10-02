@@ -167,6 +167,7 @@ fn driver_config(
     delimiter,
     clock: wall_clock,
     logon_timeout: LOGON_TIMEOUT,
+    max_frame_len: babelfix_core::codec::DEFAULT_MAX_FRAME_LEN,
   }
 }
 

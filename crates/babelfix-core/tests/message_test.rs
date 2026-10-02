@@ -10,18 +10,17 @@ use babelfix_schema::codesets::{PartyRole, Side as SideCode};
 use babelfix_schema::fields::*;
 use babelfix_schema::{msg_type, tags};
 
+/// Every version, compiled once for the whole file.
+fn dicts() -> Arc<Dictionaries> {
+  static DICTS: OnceLock<Arc<Dictionaries>> = OnceLock::new();
+  DICTS
+    .get_or_init(|| Dictionaries::standard().unwrap())
+    .clone()
+}
+
 /// FIX 4.4.
 fn dict() -> Arc<Dictionary> {
-  static DICT: OnceLock<Arc<Dictionary>> = OnceLock::new();
-  DICT
-    .get_or_init(|| {
-      Dictionaries::standard()
-        .unwrap()
-        .get("FIX.4.4")
-        .unwrap()
-        .clone()
-    })
-    .clone()
+  dicts().get("FIX.4.4").unwrap().clone()
 }
 
 /// Frame `body` (`|`-delimited, starting at 35) as a complete SOH message with
@@ -804,11 +803,8 @@ fn encoding_appends_after_earlier_messages() {
   first.encode(&mut out);
   second.encode(&mut out);
   let mut out = out;
-  let mut decoder = babelfix_core::codec::FixDecoder::with_dictionary(
-    Dictionaries::standard().unwrap(),
-    None,
-    dict(),
-  );
+  let mut decoder =
+    babelfix_core::codec::FixDecoder::with_dictionary(dicts(), None, dict());
   assert_eq!(decoder.decode(&mut out).unwrap().unwrap(), first);
   assert_eq!(decoder.decode(&mut out).unwrap().unwrap(), second);
   assert!(out.is_empty());
@@ -962,4 +958,76 @@ fn admin_means_session_layer() {
   for t in ["j", "h", "Y", "V", "D", "8"] {
     assert!(!Message::new(&dict(), t).is_admin(), "{t}");
   }
+}
+
+/// Lengths from the wire are checked, not trusted: an absurd data length is
+/// garbled input, not an arithmetic overflow.
+#[test]
+fn huge_data_lengths_are_garbled_not_panics() {
+  let e = Message::parse_fragment(
+    &dict(),
+    b"35=A|98=0|108=30|95=18446744073709551615|96=x",
+    b'|',
+  )
+  .unwrap_err();
+  assert!(e.is_garbled(), "{e}");
+}
+
+#[test]
+fn the_decoder_bounds_frame_length() {
+  use babelfix_core::codec::FixDecoder;
+
+  let decoder = || FixDecoder::with_dictionary(dicts(), None, dict());
+  // A BodyLength that would overflow, and one that is merely enormous.
+  for len in ["18446744073709551615", "4000000000"] {
+    let mut buf =
+      BytesMut::from(format!("8=FIX.4.4\x019={len}\x0135=0\x01").as_str());
+    let e = decoder().decode(&mut buf).unwrap_err();
+    assert!(e.to_string().contains("byte limit"), "{e}");
+  }
+  // Bytes that never form a frame header are not buffered without bound.
+  let mut buf = BytesMut::from(&[b'x'; 64][..]);
+  let e = decoder()
+    .with_max_frame_len(32)
+    .decode(&mut buf)
+    .unwrap_err();
+  assert!(e.to_string().contains("byte limit"), "{e}");
+  // Within the limit, a frame decodes as usual.
+  let mut buf = BytesMut::from(&frame("35=0|49=S")[..]);
+  let mut d = decoder().with_max_frame_len(64);
+  assert!(d.decode(&mut buf).unwrap().is_some());
+  let mut buf = BytesMut::from(&frame("35=0|49=S")[..]);
+  assert!(decoder().with_max_frame_len(20).decode(&mut buf).is_err());
+}
+
+#[test]
+#[should_panic(expected = "derived and cannot be removed")]
+fn msg_type_cannot_be_removed() {
+  let mut m = Message::new(&dict(), "D");
+  m.header_mut().remove(tags::MsgType);
+}
+
+#[test]
+#[should_panic(expected = "derived and cannot be copied")]
+fn msg_type_cannot_be_copied() {
+  let src = parse("35=8|11=a");
+  let mut m = Message::new(&dict(), "D");
+  m.header_mut().copy(&src.header(), tags::MsgType);
+}
+
+#[test]
+fn fragments_move_late_header_data_fields_and_refuse_late_header_groups() {
+  let m =
+    Message::parse_fragment(&dict(), b"35=D|55=X|212=2|213=ab", b'|').unwrap();
+  assert_eq!(m.header().req(XmlData).unwrap(), b"ab");
+  assert!(!m.body().has(XmlData));
+  Message::parse(&dict(), m.to_bytes()).unwrap();
+
+  let e = Message::parse_fragment(&dict(), b"35=D|55=X|627=1|628=H", b'|')
+    .unwrap_err();
+  assert_eq!(
+    e.reject_reason,
+    Some(reject_reason::TAG_SPECIFIED_OUT_OF_REQUIRED_ORDER)
+  );
+  assert_eq!(e.tag, Some(627));
 }

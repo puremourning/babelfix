@@ -36,6 +36,9 @@ pub const SOH: u8 = crate::message::SOH;
 /// `10=nnn<SOH>`
 const CHECKSUM_FIELD_LEN: usize = 7;
 
+/// The largest frame a [`FixDecoder`] accepts unless told otherwise: 4 MiB.
+pub const DEFAULT_MAX_FRAME_LEN: usize = 4 << 20;
+
 /// Splits a byte stream into [`Message`]s.
 ///
 /// The decoder latches the FIX version named by the first message's
@@ -46,6 +49,7 @@ pub struct FixDecoder {
   dicts: Arc<Dictionaries>,
   delimiter: u8,
   dict: Option<Arc<Dictionary>>,
+  max_frame_len: usize,
 }
 
 impl FixDecoder {
@@ -59,6 +63,7 @@ impl FixDecoder {
       dicts,
       delimiter: delimiter.unwrap_or(SOH),
       dict: None,
+      max_frame_len: DEFAULT_MAX_FRAME_LEN,
     }
   }
 
@@ -73,7 +78,21 @@ impl FixDecoder {
       dicts,
       delimiter: delimiter.unwrap_or(SOH),
       dict: Some(dict),
+      max_frame_len: DEFAULT_MAX_FRAME_LEN,
     }
+  }
+
+  /// Refuse frames longer than `max` bytes, BeginString to CheckSum, rather
+  /// than buffering whatever a peer's `BodyLength(9)` claims. The default is
+  /// [`DEFAULT_MAX_FRAME_LEN`].
+  pub fn with_max_frame_len(mut self, max: usize) -> Self {
+    self.max_frame_len = max;
+    self
+  }
+
+  /// The largest frame this decoder accepts.
+  pub fn max_frame_len(&self) -> usize {
+    self.max_frame_len
   }
 
   /// The dictionary this decoder has latched onto, if it has seen a message.
@@ -91,7 +110,7 @@ impl FixDecoder {
   /// once more bytes have arrived. Consumed bytes are split off `data`;
   /// anything left is the start of the next frame.
   pub fn decode(&mut self, data: &mut BytesMut) -> Result<Option<Message>> {
-    let Some(frame) = frame(data, self.delimiter)? else {
+    let Some(frame) = frame(data, self.delimiter, self.max_frame_len)? else {
       return Ok(None);
     };
     if data.len() < frame.len {
@@ -136,10 +155,21 @@ struct Frame {
 }
 
 /// Find the first frame's extent from its `8=...|9=...|` prefix. `None` if
-/// the prefix has not fully arrived yet.
-fn frame(data: &[u8], delimiter: u8) -> Result<Option<Frame>> {
+/// the prefix has not fully arrived yet. A frame longer than `max` — or a
+/// buffer that has grown past `max` without a prefix — is an error, so a peer
+/// cannot make the caller buffer without bound.
+fn frame(data: &[u8], delimiter: u8, max: usize) -> Result<Option<Frame>> {
+  let too_long =
+    || Error::invalid_message(format!("frame exceeds the {max} byte limit"));
+  let incomplete = || {
+    if data.len() > max {
+      Err(too_long())
+    } else {
+      Ok(None)
+    }
+  };
   let Some(begin_end) = data.iter().position(|&c| c == delimiter) else {
-    return Ok(None);
+    return incomplete();
   };
   let begin_string = data[..begin_end]
     .strip_prefix(b"8=")
@@ -148,7 +178,7 @@ fn frame(data: &[u8], delimiter: u8) -> Result<Option<Frame>> {
 
   let rest = &data[begin_end + 1..];
   let Some(length_end) = rest.iter().position(|&c| c == delimiter) else {
-    return Ok(None);
+    return incomplete();
   };
   let body_length = rest[..length_end]
     .strip_prefix(b"9=")
@@ -159,10 +189,13 @@ fn frame(data: &[u8], delimiter: u8) -> Result<Option<Frame>> {
     .ok_or_else(|| Error::invalid_message("Invalid BodyLength(9)"))?;
 
   let header_len = begin_end + 1 + length_end + 1;
-  Ok(Some(Frame {
-    begin_string,
-    len: header_len + body_length + CHECKSUM_FIELD_LEN,
-  }))
+  // BodyLength comes off the wire: never trust it to stay in bounds.
+  let len = header_len
+    .checked_add(body_length)
+    .and_then(|l| l.checked_add(CHECKSUM_FIELD_LEN))
+    .filter(|&l| l <= max)
+    .ok_or_else(too_long)?;
+  Ok(Some(Frame { begin_string, len }))
 }
 
 /// Serialises [`Message`]s onto the wire, computing `BodyLength` and

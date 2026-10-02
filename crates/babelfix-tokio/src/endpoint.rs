@@ -92,6 +92,10 @@ pub struct EndpointConfig {
   /// last entry is the steady-state retry interval. Initiator only.
   pub backoff: Vec<Duration>,
 
+  /// The largest inbound frame accepted, BeginString to CheckSum. A peer
+  /// declaring a longer `BodyLength(9)` is disconnected rather than buffered.
+  pub max_frame_len: usize,
+
   /// Depth of the per-session command and event channels.
   ///
   /// This is the application's queue: it is how far the session may run ahead
@@ -110,6 +114,7 @@ impl Default for EndpointConfig {
         .map(Duration::from_millis)
         .collect(),
       channel_depth: 100,
+      max_frame_len: babelfix_core::codec::DEFAULT_MAX_FRAME_LEN,
     }
   }
 }
@@ -137,6 +142,11 @@ impl EndpointConfig {
 
   pub fn channel_depth(mut self, depth: usize) -> Self {
     self.channel_depth = depth;
+    self
+  }
+
+  pub fn max_frame_len(mut self, max: usize) -> Self {
+    self.max_frame_len = max;
     self
   }
 }
@@ -330,11 +340,14 @@ async fn initiate_connection(
   let (rx, tx) = stream.split();
   let mut rx = tokio_util::codec::FramedRead::new(
     rx,
-    FixDecoder(babelfix_core::codec::FixDecoder::with_dictionary(
-      dicts.clone(),
-      delimiter,
-      session.dict.clone(),
-    )),
+    FixDecoder(
+      babelfix_core::codec::FixDecoder::with_dictionary(
+        dicts.clone(),
+        delimiter,
+        session.dict.clone(),
+      )
+      .with_max_frame_len(config.max_frame_len),
+    ),
   );
 
   let span = tracing::info_span!(
@@ -440,10 +453,10 @@ async fn accept_connection(
   let (rx, tx) = stream.split();
   let mut rx = tokio_util::codec::FramedRead::new(
     rx,
-    FixDecoder(babelfix_core::codec::FixDecoder::new(
-      dicts.clone(),
-      delimiter,
-    )),
+    FixDecoder(
+      babelfix_core::codec::FixDecoder::new(dicts.clone(), delimiter)
+        .with_max_frame_len(config.max_frame_len),
+    ),
   );
 
   let (session_send, mut session_recv) =

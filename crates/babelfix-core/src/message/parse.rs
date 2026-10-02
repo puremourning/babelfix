@@ -104,7 +104,9 @@ impl Message {
   /// delimited by `delimiter`. `BeginString`, `BodyLength` and `CheckSum` are
   /// optional and not checked (they are recomputed when the message is
   /// encoded); `MsgType` is required. Header fields may appear anywhere, and
-  /// are moved into the header. Every other rule applies.
+  /// are moved into the header — except header groups (NoHops), which must
+  /// come before the body, since their instances would be indistinguishable
+  /// from body fields. Every other rule applies.
   pub fn parse_fragment(
     dict: &Arc<Dictionary>,
     bytes: &[u8],
@@ -191,8 +193,14 @@ impl<'d> Parser<'d> {
               format!("data field {data_tag} must follow its length field"),
             ));
           }
-          let end = val_start + n;
-          if end >= buf.len() || buf[end] != delim {
+          // `n` comes off the wire: never trust it to stay in bounds.
+          let Some(end) = val_start.checked_add(n).filter(|&e| e < buf.len())
+          else {
+            return Err(ParseError::garbled(format!(
+              "data field {tag} is not {n} bytes long"
+            )));
+          };
+          if buf[end] != delim {
             return Err(ParseError::garbled(format!(
               "data field {tag} is not {n} bytes long"
             )));
@@ -438,8 +446,25 @@ impl<'d> Parser<'d> {
         if self.framing == Framing::Fragment
           && self.region != Region::Header
           && self.dict.is_header(tag)
-          && entry.kind == Kind::Field
         {
+          // A late header group's instances would follow it into the body,
+          // where they cannot be told apart from body fields.
+          if entry.kind == Kind::Field
+            && self
+              .dict
+              .top_level_group(self.msg.msg_def, true, tag)
+              .is_some()
+          {
+            return Err(ParseError::reject(
+              TAG_SPECIFIED_OUT_OF_REQUIRED_ORDER,
+              tag,
+              format!(
+                "header group {tag} must come before the body, even in a fragment"
+              ),
+            ));
+          }
+          // A field, or a data field's Length and then the data field itself:
+          // each moves to the header in turn, so the pair stays together.
           return self.push_late_header(entry);
         }
         self.enter_region(tag)?;

@@ -289,7 +289,9 @@ you want them enforced.
 person typed:
 - 8, 9 and 10 are optional (missing 8 is supplied, 9 and 10 are recomputed);
 - 35 is required;
-- header fields anywhere are moved into the header.
+- header fields anywhere are moved into the header, except header groups
+  (NoHops), whose instances can't be told apart from body fields once the body
+  has begun: those must come before the body.
 
 **`|` checksums.** A `|`-delimited message's CheckSum is the checksum of its
 SOH form, which is what logs show. So `parse_delimited` accepts logged

@@ -96,6 +96,10 @@ pub struct DriverConfig {
   pub clock: Clock,
   /// How long the peer has to complete the logon exchange.
   pub logon_timeout: std::time::Duration,
+  /// The largest inbound frame accepted, so a peer's `BodyLength(9)` cannot
+  /// make the driver buffer without bound. See
+  /// [`DEFAULT_MAX_FRAME_LEN`](crate::codec::DEFAULT_MAX_FRAME_LEN).
+  pub max_frame_len: usize,
 }
 
 /// The codec, buffers and clock a driver needs, independent of any session.
@@ -168,7 +172,8 @@ impl InitiatorDriver {
       config.dicts.clone(),
       config.delimiter,
       session.dict.clone(),
-    );
+    )
+    .with_max_frame_len(config.max_frame_len);
     let mut plumbing = Plumbing::new(config, decoder);
 
     let logon_timeout = plumbing.config.logon_timeout;
@@ -236,7 +241,8 @@ impl InitiatorDriver {
       let config = self.plumbing.config.clone();
       let spare = Plumbing::new(
         config.clone(),
-        FixDecoder::new(config.dicts.clone(), config.delimiter),
+        FixDecoder::new(config.dicts.clone(), config.delimiter)
+          .with_max_frame_len(config.max_frame_len),
       );
       let plumbing = std::mem::replace(&mut self.plumbing, spare);
       return Ok(Some(EstablishedDriver {
@@ -290,7 +296,8 @@ pub struct AcceptorDriver {
 impl AcceptorDriver {
   /// Answer a connection. Nothing is sent until the peer identifies itself.
   pub fn new(config: DriverConfig, now: Instant) -> Self {
-    let decoder = FixDecoder::new(config.dicts.clone(), config.delimiter);
+    let decoder = FixDecoder::new(config.dicts.clone(), config.delimiter)
+      .with_max_frame_len(config.max_frame_len);
     let handshake = AcceptorHandshake::new(config.logon_timeout, now);
     Self {
       handshake,
