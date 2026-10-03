@@ -278,7 +278,10 @@ impl App {
       header.get(MsgSeqNum).ok().flatten().unwrap_or_default(),
     ));
     // The exact bytes received, or the message's encoding if it was built.
-    let payload = fix_message.to_bytes();
+    let payload = fix_message
+      .wire()
+      .cloned()
+      .unwrap_or_else(|| fix_message.to_bytes());
     self
       .producer
       .produce(ProduceMessage {
