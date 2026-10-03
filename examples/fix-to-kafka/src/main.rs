@@ -1,6 +1,5 @@
 use babelfix as fix;
 use futures::SinkExt;
-use samsa::prelude::BrokerAddress;
 use serde_with::DurationSeconds;
 use serde_with::serde_as;
 use std::sync::Arc;
@@ -28,7 +27,7 @@ async fn run_session(
   // Produces in the background, so this task never waits on Kafka — only,
   // if Kafka falls far enough behind, on room in the writer's queue.
   let kafka = kafka::Writer::spawn(
-    app.brokers.clone(),
+    app.kafka.clone(),
     topic(&session_handle.session_id),
     session_handle.tx.clone(),
   );
@@ -340,7 +339,7 @@ impl Config {
 struct App {
   dicts: Arc<fix::message::Dictionaries>,
   db: kv::Store,
-  brokers: Vec<BrokerAddress>,
+  kafka: Arc<rskafka::client::Client>,
 
   session_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -349,7 +348,7 @@ impl App {
   fn new(
     config: Config,
     dicts: Arc<fix::message::Dictionaries>,
-    brokers: Vec<BrokerAddress>,
+    kafka: Arc<rskafka::client::Client>,
   ) -> anyhow::Result<Self> {
     let db = kv::Store::new(kv::Config::new(config.db_path))?;
 
@@ -364,7 +363,7 @@ impl App {
     Ok(Self {
       dicts,
       db,
-      brokers,
+      kafka,
       session_tasks: std::sync::Mutex::new(Vec::new()),
     })
   }
@@ -382,10 +381,14 @@ async fn main() -> anyhow::Result<()> {
 
   let config = Config::load("config.json")?;
 
-  let brokers = vec![BrokerAddress {
-    host: config.broker.host.clone(),
-    port: config.broker.port,
-  }];
+  let kafka = Arc::new(
+    rskafka::client::ClientBuilder::new(vec![format!(
+      "{}:{}",
+      config.broker.host, config.broker.port
+    )])
+    .build()
+    .await?,
+  );
 
   let dicts = fix::message::Dictionaries::standard()?;
   let mut endpoint = fix::endpoint::serve(
@@ -395,7 +398,7 @@ async fn main() -> anyhow::Result<()> {
   )
   .await?;
 
-  let app = Arc::new(App::new(config, dicts, brokers)?);
+  let app = Arc::new(App::new(config, dicts, kafka)?);
 
   let token = tokio_util::sync::CancellationToken::new();
 
