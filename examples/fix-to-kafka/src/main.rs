@@ -1,18 +1,38 @@
 use babelfix as fix;
 use futures::SinkExt;
-use samsa::prelude::*;
+use samsa::prelude::BrokerAddress;
 use serde_with::DurationSeconds;
 use serde_with::serde_as;
 use std::sync::Arc;
 
+mod kafka;
+
 // fn assert_send<T: Send>() {}
 // fn assert_sync<T: Sync>() {}
+
+/// The Kafka topic a session's traffic goes to.
+fn topic(session_id: &fix::session::SessionIdentifier) -> String {
+  format!(
+    "fix-{}-{}-{}",
+    session_id.begin_string,
+    session_id.sender_comp_id,
+    session_id.target_comp_id
+  )
+}
 
 async fn run_session(
   mut session_handle: fix::session::SessionHandle,
   cancellation_token: tokio_util::sync::CancellationToken,
   app: Arc<App>,
 ) -> anyhow::Result<()> {
+  // Produces in the background, so this task never waits on Kafka — only,
+  // if Kafka falls far enough behind, on room in the writer's queue.
+  let kafka = kafka::Writer::spawn(
+    app.brokers.clone(),
+    topic(&session_handle.session_id),
+    session_handle.tx.clone(),
+  );
+
   loop {
     tokio::select! {
       _ = cancellation_token.cancelled() => {
@@ -27,16 +47,17 @@ async fn run_session(
             fix::session::SessionEvent::ConnectionEstablished => {},
             fix::session::SessionEvent::LoggedOn => {},
             fix::session::SessionEvent::RecoveryCompleted => {},
-            // Every message, either way, goes to Kafka. Nothing here needs to
-            // be durable before the session goes on: outbound messages reached
-            // the store before they were sent, and the inbound watermark is
-            // the store's too.
+            // Every message, either way, goes to Kafka.
             fix::session::SessionEvent::RawMessageReceived(fix_message)
             | fix::session::SessionEvent::RawMessageSent(fix_message) => {
-              app.produce(&session_handle, fix_message).await;
+              kafka.record(&fix_message).await;
             },
-            fix::session::SessionEvent::MessageReceived { .. } => {
-              // A real system might actually handle the messages
+            // An inbound message is handled once its record — queued just
+            // before this, as RawMessageReceived — is in Kafka. Until then the
+            // session's watermark stays behind it, so a crash means the peer
+            // resends it rather than it being lost.
+            fix::session::SessionEvent::MessageReceived { seq_num, .. } => {
+              kafka.handled_after_queued(seq_num).await;
             },
             fix::session::SessionEvent::ResendRequest {
               resend_request,
@@ -156,6 +177,10 @@ mod storage {
     config.heartbeat_interval = value.heartbeat_interval;
     Some(
       fix::session::SessionSetup::new(config)
+        // Inbound messages are handled once Kafka has them: see `kafka`.
+        .inbound(fix::session::InboundPolicy::Explicit(
+          fix::session::WatermarkMode::Contiguous,
+        ))
         .resume(fix::session::Resume {
           next_out_seq_num: value.next_out_seq_num,
           next_in_seq_num: value.next_in_seq_num,
@@ -315,7 +340,7 @@ impl Config {
 struct App {
   dicts: Arc<fix::message::Dictionaries>,
   db: kv::Store,
-  producer: Producer,
+  brokers: Vec<BrokerAddress>,
 
   session_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -324,7 +349,7 @@ impl App {
   fn new(
     config: Config,
     dicts: Arc<fix::message::Dictionaries>,
-    producer: Producer,
+    brokers: Vec<BrokerAddress>,
   ) -> anyhow::Result<Self> {
     let db = kv::Store::new(kv::Config::new(config.db_path))?;
 
@@ -339,45 +364,9 @@ impl App {
     Ok(Self {
       dicts,
       db,
-      producer,
+      brokers,
       session_tasks: std::sync::Mutex::new(Vec::new()),
     })
-  }
-
-  async fn produce(
-    &self,
-    session_handle: &fix::session::SessionHandle,
-    fix_message: fix::message::Message,
-  ) {
-    use fix::schema::fields::{MsgSeqNum, SenderCompID};
-
-    let topic = format!(
-      "fix-{}-{}-{}",
-      session_handle.session_id.begin_string,
-      session_handle.session_id.sender_comp_id,
-      session_handle.session_id.target_comp_id
-    );
-    let header = fix_message.header();
-    let key = bytes::Bytes::from(format!(
-      "{}-{}",
-      header.get(SenderCompID).ok().flatten().unwrap_or_default(),
-      header.get(MsgSeqNum).ok().flatten().unwrap_or_default(),
-    ));
-    // The exact bytes received, or the message's encoding if it was built.
-    let payload = fix_message
-      .wire()
-      .cloned()
-      .unwrap_or_else(|| fix_message.to_bytes());
-    self
-      .producer
-      .produce(ProduceMessage {
-        headers: vec![],
-        key: Some(key),
-        partition_id: 0,
-        topic,
-        value: Some(payload),
-      })
-      .await;
   }
 }
 
@@ -393,29 +382,10 @@ async fn main() -> anyhow::Result<()> {
 
   let config = Config::load("config.json")?;
 
-  let bootstrap_addrs = vec![BrokerAddress {
+  let brokers = vec![BrokerAddress {
     host: config.broker.host.clone(),
     port: config.broker.port,
   }];
-
-  let topics = config
-    .sessions
-    .iter()
-    .map(|s| {
-      format!(
-        "fix-{}-{}-{}",
-        s.session_id.begin_string,
-        s.session_id.sender_comp_id,
-        s.session_id.target_comp_id
-      )
-    })
-    .collect::<Vec<_>>();
-
-  let producer = ProducerBuilder::<TcpConnection>::new(bootstrap_addrs, topics)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create producer: {:?}", e))?
-    .build()
-    .await;
 
   let dicts = fix::message::Dictionaries::standard()?;
   let mut endpoint = fix::endpoint::serve(
@@ -425,7 +395,7 @@ async fn main() -> anyhow::Result<()> {
   )
   .await?;
 
-  let app = Arc::new(App::new(config, dicts, producer)?);
+  let app = Arc::new(App::new(config, dicts, brokers)?);
 
   let token = tokio_util::sync::CancellationToken::new();
 

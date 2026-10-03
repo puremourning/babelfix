@@ -37,13 +37,20 @@
 //! while let Some(event) = endpoint.events.next().await {
 //!     match event {
 //!         endpoint::EndpointEvent::NewSession { session_id, response } => {
-//!             // Answer with where this peer's session resumes, and the store
-//!             // its messages are persisted to.
+//!             // Answer with where this peer's session resumes, the store
+//!             // its messages are persisted to, and when an inbound message
+//!             // counts as handled: here, once the application says so with
+//!             // `SessionCommand::Handled`.
 //!             let setup = dicts
 //!                 .for_begin_string(session_id.begin_string.as_bytes())
-//!                 .map(|d| session::SessionSetup::new(
-//!                     session::SessionConfig::new(d.clone()),
-//!                 ))
+//!                 .map(|d| {
+//!                     session::SessionSetup::new(
+//!                         session::SessionConfig::new(d.clone()),
+//!                     )
+//!                     .inbound(session::InboundPolicy::Explicit(
+//!                         session::WatermarkMode::Contiguous,
+//!                     ))
+//!                 })
 //!                 .ok_or_else(|| babelfix_tokio::Error::unspecified(
 //!                     "unknown FIX version",
 //!                 ));
@@ -158,9 +165,11 @@ impl EndpointConfig {
 pub enum EndpointEvent {
   /// A peer has sent a valid Logon for `session_id`. Answer on `response`
   /// with the [`SessionSetup`](session::SessionSetup) to resume — the settings
-  /// and dictionary for its version, where you persisted it had got to, and
-  /// the store to persist to. An `Err`, or dropping `response`, refuses the
-  /// session: the connection is closed without a Logon reply.
+  /// and dictionary for its version, where you persisted it had got to, the
+  /// store to persist to, and when an inbound message counts as handled (its
+  /// [`InboundPolicy`](session::InboundPolicy)). An `Err`, or dropping
+  /// `response`, refuses the session: the connection is closed without a
+  /// Logon reply.
   NewSession {
     session_id: session::SessionIdentifier,
     response: oneshot::Sender<Result<session::SessionSetup>>,
@@ -641,7 +650,8 @@ async fn accept_connection(
 /// Accept FIX connections on `addr`, speaking any version in `dicts`.
 ///
 /// Answer each [`EndpointEvent::NewSession`] with the
-/// [`SessionSetup`](session::SessionSetup) for that peer, then take the
+/// [`SessionSetup`](session::SessionSetup) for that peer — which is where its
+/// store, resume point and inbound policy are chosen — then take the
 /// [`SessionHandle`](session::SessionHandle) from
 /// [`EndpointEvent::SessionConnected`].
 pub async fn serve(
