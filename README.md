@@ -13,9 +13,23 @@ with repeating groups, typed fields decoded on demand (prices as decimals, never
 `f64`), and edits that never copy the bytes they leave alone. Upgrading from the
 earlier `FixMessage`/`builder::Message` API? See [MIGRATION.md](MIGRATION.md).
 
-The library does not provide any persistence or storage of messages, sequence
-numbers or session state. It is the application's responsibility to persist them
-for recovery and session reconnection/replay.
+The application owns persistence, and outbound sequence numbers. Every
+outbound message carries the `MsgSeqNum` the application gave it, admin
+messages included: the session asks for each one it wants sent. Two ways to
+work with that:
+
+- **Message-centric (the default).** A `Sequencer` numbers each message, has
+  it persisted, and sends it only once the write has completed; the tokio
+  endpoint runs the writes against a `SessionStore` you supply. A crash at any
+  point is recoverable: nothing was sent that is not stored.
+- **Event-centric.** Your own event stream numbers the messages — a FIX
+  message's sequence number is its position in the stream — so sending one
+  costs no write beyond the one that recorded the event. Drive the core
+  directly.
+
+See
+[`docs/session_state_management_proposal.md`](https://github.com/puremourning/babelfix/blob/main/docs/session_state_management_proposal.md)
+for the design.
 
 ## Overview
 
@@ -33,10 +47,12 @@ It is a small stack of layers, each usable on its own:
 | Repository | `babelfix-repo` | Parsed Orchestra metadata: versions, messages, fields, components, groups |
 | Message | `babelfix-core::message` | Parse, read, build, edit and serialise messages |
 | Codec | `babelfix-core::codec` | Frame a byte stream into messages and back |
-| Session | `babelfix-core::session` | Sequence numbers, heartbeats, test requests, resend/replay |
+| Session | `babelfix-core::session` | Sequence checking, heartbeats, test requests, resend/replay |
 | Driver | `babelfix-core::driver` | The above assembled: feed bytes, drain bytes |
+| Sequencer | `babelfix-core::sequencer` | Message-centric numbering: persist each message, then send it |
 | Connection | `babelfix-tokio::connection` | A session driven inline, without channels |
 | Endpoint | `babelfix-tokio::endpoint` | TCP acceptor/initiator that spawns sessions |
+| Store | `babelfix-tokio::store` | Where a tokio session persists what it sends |
 
 Dictionaries are named by version: `FIX.4.2`, `FIX.4.4` and `FIX.Latest`.
 FIX.Latest's BeginString on the wire is `FIXT.1.1`, which

@@ -602,3 +602,49 @@ initiator and an async `sturdb` store. It maps onto Sequenced mode with
   reverse of `Send`. The "every payload is borrowed" comment on `Event`
   (`session/mod.rs`) is narrative, not a design rule, and is updated in
   step 1.
+
+## 11. Implementation notes
+
+Where the implementation (branch `session-app-owned-seqnums`) departs from the
+above:
+
+- **No `SequencedDriver` type.** The `Sequencer` works with every stage of a
+  session through a `CommandTarget` trait, implemented by `InitiatorDriver`,
+  `EstablishedDriver` and `SessionDriver`. A separate driver type would have
+  doubled the handshake types for nothing.
+  - `sequencer.sink(&mut app)` is the event sink to hand any driver.
+  - `sequencer.persisted(seq_num, now, &mut driver, &mut app)` releases
+    completed writes, in order.
+- **`Sequencer::new` takes the session identity and config.** It stamps the
+  CompIDs as well as `MsgSeqNum` and `SendingTime`, so the stored message is
+  byte-for-byte what is sent.
+- **`Sequencer::send` strips `PossDupFlag`/`OrigSendingTime`.** A new message
+  under a new number cannot be a possible duplicate. `send_raw` keeps
+  everything; the core's `Command::Send` keeps everything too.
+- **Messages persisted before logon.** These go out with the synchronisation
+  TestRequest that logging on always asks for, ahead of it.
+- **New `Event::LoggedOn`.** It marks both Logons having been exchanged, and
+  is what releases application messages in sequenced mode.
+- **Heartbeat timer.** It is still deferred only by application messages, as
+  before. An admin message the application sends back (a Heartbeat answering
+  a TestRequest, say) does not reset it.
+- **Tokio exposes a `SessionSetup`, not a `Sequencing` enum.**
+  - It holds `SessionConfig`, `Resume`, `InboundPolicy` and
+    `Arc<dyn SessionStore>`.
+  - `SessionStore` returns boxed `'static` futures, so it is object-safe and
+    several writes can be in flight without borrowing it.
+  - `VolatileStore` persists nothing and is the default.
+  - External (event-centric) mode is not exposed through tokio yet: use the
+    core directly.
+- **Writes and ordering.** Writes a store completes at once are fed back in
+  the same pass, so `VolatileStore` sends with no extra loop iteration.
+  Admin answers to a batch of inbound frames go out after the whole batch,
+  not between its frames.
+
+Done: steps 1–4 and 6, with fix-to-kafka ported to a kv-backed
+`SessionStore` (the rest of step 7). Not yet done:
+
+- the crash-injection harness (step 5);
+- the event-centric example (step 7);
+- porting fixation (step 8);
+- External mode in tokio.

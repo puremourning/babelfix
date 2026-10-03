@@ -30,6 +30,7 @@ pub use babelfix_repo as repository;
 pub mod codec;
 pub mod driver;
 pub mod message;
+pub mod sequencer;
 pub mod session;
 pub mod time;
 
@@ -65,6 +66,16 @@ pub enum Error {
   /// A connection could not be established, or was lost.
   #[error("Connection failed: {0}")]
   ConnectionFailed(std::borrow::Cow<'static, str>),
+
+  /// Too many outbound messages are waiting to be persisted; try again once
+  /// some have been. See [`sequencer::Sequencer`].
+  #[error("Too many messages awaiting persistence")]
+  Busy,
+
+  /// The application could not persist something a session depends on, so the
+  /// session cannot safely continue.
+  #[error("Persistence failed: {0}")]
+  Persistence(std::borrow::Cow<'static, str>),
 
   /// Any error that does not fit a more specific variant.
   #[error("Unspecified FIX error: {0}")]
@@ -109,6 +120,10 @@ impl Error {
     msg: S,
   ) -> Self {
     Error::ProtocolViolation(msg.into())
+  }
+
+  pub fn persistence<S: Into<std::borrow::Cow<'static, str>>>(msg: S) -> Self {
+    Error::Persistence(msg.into())
   }
 }
 

@@ -71,21 +71,23 @@ impl SessionOptions {
   fn into_session(
     self,
     fix_version: Arc<fix::message::Dictionary>,
-  ) -> fix::session::Session {
-    fix::session::Session {
+  ) -> fix::session::SessionSetup {
+    fix::session::SessionSetup::new(fix::session::SessionConfig {
       dict: fix_version,
-      next_in_seq_num: self.next_in_seq_num,
-      next_out_seq_num: self.next_out_seq_num,
       heartbeat_interval: self.heartbeat_interval,
       time_precision: self.time_precision,
-    }
+    })
+    .resume(fix::session::Resume {
+      next_out_seq_num: self.next_out_seq_num,
+      next_in_seq_num: self.next_in_seq_num,
+    })
   }
 }
 
 pub struct Session {
   pub handle: fix::session::SessionHandle,
   pub events: VecDeque<fix::session::SessionEvent>,
-  pub state: fix::session::Session,
+  pub state: fix::session::SessionSetup,
   cancellation_token: tokio_util::sync::CancellationToken,
 }
 
@@ -99,7 +101,12 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
-  /// Return the next event, discarding any that match one of `skipping`.
+  /// Return the next event, discarding any that match one of `skipping`, and
+  /// `LoggedOn`.
+  ///
+  /// `LoggedOn` marks a state change rather than traffic, and falls between
+  /// messages wherever the logon exchange completes; a test that wants it
+  /// waits for it with [`Session::next_event_matching`].
   ///
   /// Every event seen — skipped or not — is appended to `self.events`, so a
   /// test can inspect the full history afterwards.
@@ -126,6 +133,9 @@ impl Session {
             }
           };
           self.events.push_back(event.clone());
+          if matches!(event, fix::session::SessionEvent::LoggedOn) {
+            continue 'outer;
+          }
           for skip in skipping {
             if let MatcherResult::Match = skip.matches(&event)
             {
@@ -244,7 +254,7 @@ impl Session {
 pub struct Server {
   commands: futures::channel::mpsc::Sender<fix::endpoint::EndpointCommand>,
   configured_sessions:
-    Vec<(fix::session::SessionIdentifier, fix::session::Session)>,
+    Vec<(fix::session::SessionIdentifier, fix::session::SessionSetup)>,
   live_sessions: Vec<Session>,
   /// Peers rejected before a session could be identified, by peer address.
   invalid_sessions: Vec<String>,
@@ -256,7 +266,7 @@ impl Server {
   pub fn push_session(
     &mut self,
     session_id: fix::session::SessionIdentifier,
-    session: fix::session::Session,
+    session: fix::session::SessionSetup,
   ) {
     self.configured_sessions.push((session_id, session));
   }
@@ -384,7 +394,7 @@ impl Client {
   pub async fn new(
     port: u16,
     session_id: fix::session::SessionIdentifier,
-    state: fix::session::Session,
+    state: fix::session::SessionSetup,
   ) -> anyhow::Result<Self> {
     let cancellation_token = tokio_util::sync::CancellationToken::new();
 
@@ -541,12 +551,12 @@ pub async fn establish(
 /// expect_event!(server(session_id) << SessionEvent::ConnectionEstablished);
 /// expect_event!(server(session_id) ignoring_state << SessionEvent::RecoveryCompleted);
 /// expect_event!(client << SessionEvent::ConnectionEstablished);
-/// expect_event!(client skipping [ SessionEvent::SessionState(anything()) ]
+/// expect_event!(client skipping [ SessionEvent::LoggedOn ]
 ///               << SessionEvent::RecoveryCompleted);
 /// ```
 ///
-/// `ignoring_state` is shorthand for skipping `SessionState`, which the session
-/// emits on its own schedule and which is therefore almost never what a test
+/// `ignoring_state` is shorthand for skipping `LoggedOn`, which marks a state
+/// change rather than traffic, and which is therefore almost never what a test
 /// wants to synchronise on.
 macro_rules! expect_event {
   ( $server:ident ( $session_id:expr ) << $($event:tt)+ ) => {
@@ -577,7 +587,7 @@ macro_rules! expect_event {
 
   ( $server:ident ( $session_id:expr ) ignoring_state << $($event:tt)+ ) => {
     expect_event!($server($session_id)
-      skipping [ fix::session::SessionEvent::SessionState(anything()) ]
+      skipping [ fix::session::SessionEvent::LoggedOn ]
       << $($event)+);
   };
 
@@ -614,7 +624,7 @@ macro_rules! expect_event {
 
   ( $client:ident ignoring_state << $($event:tt)+ ) => {
     expect_event!($client
-      skipping [ fix::session::SessionEvent::SessionState(anything()) ]
+      skipping [ fix::session::SessionEvent::LoggedOn ]
       << $($event)+);
   };
 

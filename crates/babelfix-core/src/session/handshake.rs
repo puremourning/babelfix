@@ -3,13 +3,14 @@
 //! The two roles do not behave the same, and the difference is protocol rather
 //! than transport:
 //!
-//! * An **initiator** was told who it is talking to, and holds the sequence
-//!   numbers already. It opens with its own Logon and waits for the answer.
+//! * An **initiator** was told who it is talking to. It opens by asking the
+//!   application for its Logon, sends it, and waits for the answer.
 //! * An **acceptor** is multiplexing sessions over one listening port, so it
 //!   has no idea which session a connection belongs to until the peer's Logon
 //!   names one. Nothing session-scoped can be said before that: the identity
-//!   comes out of the Logon, the application is then asked for the sequence
-//!   numbers it persisted for that identity, and only then can a reply go out.
+//!   comes out of the Logon, the application is then asked for the settings
+//!   and inbound sequence number for that identity, and only then can it be
+//!   asked for a reply.
 //!
 //! That ordering is the same whether the bytes arrive from tokio, from `epoll`,
 //! or from a test, so it lives here rather than in a driver.
@@ -24,20 +25,21 @@
 //!
 //! ```no_run
 //! # use std::time::{Duration, Instant};
-//! # use babelfix_core::session::{AcceptorHandshake, SessionOutput, Session};
+//! # use babelfix_core::session::{AcceptorHandshake, SessionOutput, SessionConfig};
 //! # fn accept(
 //! #   out: &mut impl SessionOutput,
 //! #   frame: babelfix_core::message::Message,
-//! #   lookup: impl Fn(&babelfix_core::session::SessionIdentifier) -> Session,
+//! #   lookup: impl Fn(&babelfix_core::session::SessionIdentifier) -> (SessionConfig, u64),
 //! # ) -> babelfix_core::Result<()> {
 //! let mut hs = AcceptorHandshake::new(Duration::from_secs(30), Instant::now());
 //!
 //! // No output here: nothing can be said about a session that has no name yet.
 //! let session_id = hs.identify(frame)?;
-//! let session = lookup(session_id);          // however you persist them
+//! let (config, next_in) = lookup(session_id);   // however you persist them
 //!
-//! // From here there is a session, so there is somewhere to put events.
-//! let established = hs.accept(session, Instant::now(), out)?;
+//! // From here there is a session, so there is somewhere to put events — the
+//! // first of which asks for our Logon reply.
+//! let established = hs.accept(config, next_in, Instant::now(), out)?;
 //! let _ = established;
 //! # Ok(())
 //! # }
@@ -49,19 +51,25 @@ use tracing::debug;
 
 use super::fields::*;
 use super::{
-  Event, Progress, Session, SessionIdentifier, SessionOutput, SessionState,
+  Command, Event, Progress, SessionConfig, SessionIdentifier, SessionOutput,
+  SessionState,
 };
 use crate::message::Message;
 use crate::repository::FieldBlock;
 use crate::{Error, Result};
 
-/// A completed logon exchange: the session, and whether it survived it.
+/// A logon exchange the peer's side of which is complete: the session, and
+/// whether it survived it.
 ///
-/// `progress` is [`Progress::Close`] when the session ended during the exchange
-/// — a Logon whose sequence number is too low, say, which is answered with a
-/// Logout and terminated. The state comes back even then, because the
-/// application still has to be given its handle: the events explaining *why* it
-/// ended have already been emitted, and dropping the handle would strand them.
+/// For an acceptor our Logon reply has only been asked for, and goes out when
+/// the application sends it through the state; anything else the exchange
+/// asked for — a ResendRequest, the synchronisation TestRequest, or a Logout
+/// for a Logon whose sequence number is too low — follows it.
+///
+/// `progress` is [`Progress::Close`] when the session ended during the
+/// exchange. The state comes back even then, because the application still has
+/// to be given its handle: the events explaining *why* it ended have already
+/// been emitted, and dropping the handle would strand them.
 #[must_use]
 #[derive(Debug)]
 pub struct Established {
@@ -84,17 +92,22 @@ struct PendingLogon {
 /// The logon exchange from the side that opened the connection.
 #[derive(Debug)]
 pub struct InitiatorHandshake {
-  /// Exists from the start: the identity was never in doubt, and sending our
-  /// Logon consumed an outbound sequence number.
+  /// Exists from the start: the identity was never in doubt, and our Logon is
+  /// asked for straight away.
   state: Box<SessionState>,
   deadline: Instant,
 }
 
 impl InitiatorHandshake {
-  /// Announce the session and put our Logon on the wire.
+  /// Announce the session and ask the application for our Logon.
+  ///
+  /// The Logon goes out when the application sends it back, numbered, through
+  /// [`on_command`](Self::on_command). `next_in_seq_num` is the `MsgSeqNum`
+  /// expected on the peer's Logon.
   pub fn start(
     session_id: SessionIdentifier,
-    session: Session,
+    config: SessionConfig,
+    next_in_seq_num: u64,
     logon_timeout: Duration,
     now: Instant,
     out: &mut impl SessionOutput,
@@ -103,14 +116,18 @@ impl InitiatorHandshake {
     // be announced before anything is exchanged.
     out.event(Event::ConnectionEstablished)?;
 
-    let logon = logon_message(&session)?;
-    let mut state = SessionState::new(session_id, session, now);
-    state.send_logon(logon, out)?;
+    let mut state = SessionState::new(session_id, config, next_in_seq_num, now);
+    state.request_logon(out)?;
 
     Ok(Self {
       state: Box::new(state),
       deadline: now + logon_timeout,
     })
+  }
+
+  /// The session being established.
+  pub fn state(&self) -> &SessionState {
+    &self.state
   }
 
   /// When the peer's Logon must have arrived by.
@@ -123,6 +140,21 @@ impl InitiatorHandshake {
     expired(self.deadline, now)
   }
 
+  /// Feed an application command. Until the peer answers, the only one with
+  /// anything to do is the [`Command::Send`] of our Logon; a
+  /// [`Command::Disconnect`] simply ends the exchange.
+  pub fn on_command(
+    &mut self,
+    cmd: Command,
+    now: Instant,
+    out: &mut impl SessionOutput,
+  ) -> Result<Progress> {
+    match cmd {
+      Command::Disconnect => Ok(Progress::Close),
+      cmd => self.state.on_command(cmd, now, out),
+    }
+  }
+
   /// The peer's Logon completes the exchange.
   pub fn on_peer_logon(
     mut self,
@@ -131,8 +163,13 @@ impl InitiatorHandshake {
     out: &mut impl SessionOutput,
   ) -> Result<Established> {
     expect_logon(&logon)?;
+    if self.state.highest_sent() == 0 {
+      return Err(Error::protocol_violation(
+        "peer sent its Logon before ours went out",
+      ));
+    }
 
-    out.event(Event::RawMessageReceived(&logon, self.state.session()))?;
+    out.event(Event::RawMessageReceived(&logon))?;
     let progress = self.state.start(logon, now, out)?;
     Ok(Established {
       state: self.state,
@@ -213,10 +250,16 @@ impl AcceptorHandshake {
     self.pending.as_ref().map(|p| &p.logon)
   }
 
-  /// Supply the sequence numbers persisted for the identified session.
+  /// Supply the settings for the identified session, and the `MsgSeqNum`
+  /// expected on the peer's Logon.
+  ///
+  /// The application is asked for our Logon reply with
+  /// [`Event::AdminSendRequired`]; the session is logged on once it has been
+  /// sent, through the returned state.
   pub fn accept(
     self,
-    session: Session,
+    config: SessionConfig,
+    next_in_seq_num: u64,
     now: Instant,
     out: &mut impl SessionOutput,
   ) -> Result<Established> {
@@ -230,16 +273,17 @@ impl AcceptorHandshake {
     // Only now is there a session to attach anything to.
     out.event(Event::ConnectionEstablished)?;
 
-    let mut state = SessionState::new(session_id, session, now);
+    let mut state = SessionState::new(session_id, config, next_in_seq_num, now);
 
-    // The peer's Logon is reported before our reply goes out. An application
-    // persisting from these events must see what arrived before what it
-    // answered with, or a crash between the two leaves it believing it sent a
-    // Logon in response to nothing.
-    out.event(Event::RawMessageReceived(&logon, state.session()))?;
+    // The peer's Logon is reported before our reply is asked for. An
+    // application persisting from these events must see what arrived before
+    // what it answered with.
+    out.event(Event::RawMessageReceived(&logon))?;
 
-    let reply = logon_message(state.session())?;
-    state.send_logon(reply, out)?;
+    // Our reply is asked for before the peer's Logon is processed, so it is
+    // numbered ahead of anything processing it asks for: a ResendRequest for a
+    // gap, the synchronisation TestRequest, or a Logout.
+    state.request_logon(out)?;
 
     let progress = state.start(logon, now, out)?;
     Ok(Established {
@@ -263,7 +307,7 @@ fn expired(deadline: Instant, now: Instant) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Build a Logon carrying the session's negotiated settings.
-pub fn logon_message(session: &Session) -> Result<Message> {
+pub fn logon_message(session: &SessionConfig) -> Result<Message> {
   let fix = session.dict.version();
   let mut logon = Message::new(&session.dict, msg_type::Logon);
   let mut body = logon.body_mut();

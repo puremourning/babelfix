@@ -13,10 +13,12 @@
 //! | Repository | [`repository`] (`babelfix-repo`) | Parsed FIX Orchestra metadata: versions, messages, fields, components, groups |
 //! | Message | [`message`] (`babelfix-core`) | Parsing, reading, building, editing and serialising FIX messages |
 //! | Codec | [`codec`] (`babelfix-core`) | Framing a byte stream into messages and back |
-//! | Session | [`session`] (`babelfix-core`) | Sequence numbers, heartbeats, test requests, resend/replay |
+//! | Session | [`session`] (`babelfix-core`) | Sequence checking, heartbeats, test requests, resend/replay |
 //! | Driver | [`driver`] (`babelfix-core`) | The above assembled: feed bytes, drain bytes, no I/O |
+//! | Sequencer | [`sequencer`] (`babelfix-core`) | Message-centric numbering: persist each message, then send it |
 //! | Connection | `connection` (`babelfix-tokio`) | The same session driven inline, without channels |
 //! | Endpoint | `endpoint` (`babelfix-tokio`) | TCP acceptor/initiator that spawns sessions |
+//! | Store | `store` (`babelfix-tokio`) | Where a tokio session persists what it sends |
 //!
 //! ## Which crate do I want?
 //!
@@ -111,7 +113,7 @@
 //! data, and are therefore released under `MIT AND Apache-2.0`.
 
 pub use babelfix_core::{
-  Error, Result, codec, driver, message, repository, time,
+  Error, Result, codec, driver, message, repository, sequencer, time,
 };
 
 /// Typed FIX field constants, message types and codeset enums, generated from
@@ -134,4 +136,4 @@ pub use babelfix_tokio::session;
 pub use babelfix_core::session;
 
 #[cfg(feature = "tokio")]
-pub use babelfix_tokio::{connection, endpoint, util};
+pub use babelfix_tokio::{connection, endpoint, store, util};

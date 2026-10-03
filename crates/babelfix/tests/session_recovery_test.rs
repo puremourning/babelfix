@@ -337,7 +337,7 @@ async fn inbound_gap_fill_advances_the_expected_sequence_number()
   expect_events! {
     { server(server_session_id) awaiting
       << fix::session::SessionEvent::RawMessageReceived(
-          message::tag(Fields::MsgType, eq("4")), anything()) };
+          message::tag(Fields::MsgType, eq("4"))) };
   };
 
   // With the gap closed, a message at 6 is accepted and delivered.
@@ -353,9 +353,8 @@ async fn inbound_gap_fill_advances_the_expected_sequence_number()
 
   expect_events! {
     { server(server_session_id) awaiting
-      << fix::session::SessionEvent::MessageReceived(
-          block::body(block::tag(
-            Fields::ClOrdID, value::string(eq("after-gap"))))) };
+      << fix::session::SessionEvent::MessageReceived { msg: block::body(block::tag(
+            Fields::ClOrdID, value::string(eq("after-gap")))), .. } };
   };
 
   Ok(())
@@ -653,9 +652,8 @@ async fn out_of_sequence_gap_fill_does_not_skip_messages() -> anyhow::Result<()>
 
   expect_events! {
     { server(server_session_id) awaiting
-      << fix::session::SessionEvent::MessageReceived(
-          block::body(block::tag(
-            Fields::ClOrdID, value::string(eq("after-gap"))))) };
+      << fix::session::SessionEvent::MessageReceived { msg: block::body(block::tag(
+            Fields::ClOrdID, value::string(eq("after-gap")))), .. } };
   };
 
   Ok(())
@@ -768,9 +766,7 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
           message::tag(Fields::MsgSeqNum, eq("5")),
           message::tag(Fields::SenderCompID, eq("CLIENT")),
           message::tag(Fields::TargetCompID, eq("SERVER")),
-        ),
-        anything()
-      )
+        ))
     };
     { server(server_session_id) <<
       fix::session::SessionEvent::RawMessageSent(
@@ -779,13 +775,11 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
           message::tag(Fields::MsgSeqNum, eq("1")),
           message::tag(Fields::SenderCompID, eq("SERVER")),
           message::tag(Fields::TargetCompID, eq("CLIENT")),
-        ),
-        anything()
-      ),
+        )),
     };
     // The Logon acknowledgement precedes the ResendRequest: the connection is
     // accepted first, then recovery is requested.
-    { server(server_session_id) <<
+    { server(server_session_id) ignoring_state <<
       fix::session::SessionEvent::RawMessageSent(
         all!(
           message::tag(Fields::MsgType, eq("2")),
@@ -794,9 +788,7 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
           message::tag(Fields::TargetCompID, eq("CLIENT")),
           message::tag(Fields::BeginSeqNo, eq("1")),
           message::tag(Fields::EndSeqNo, eq("0"))
-        ),
-        anything()
-      ),
+        )),
     };
 
     { server(server_session_id) ignoring_state
@@ -804,18 +796,14 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
           all!(
             message::tag(Fields::MsgType, eq("1")),
             message::tag(Fields::MsgSeqNum, eq("3")),
-          ),
-          anything()
-        )
+          ))
     };
     { server(server_session_id) ignoring_state
       << fix::session::SessionEvent::RawMessageReceived(
           all!(
             message::tag(Fields::MsgType, eq("1")),
             message::tag(Fields::MsgSeqNum, eq("6"))
-          ),
-          anything()
-        )
+          ))
     };
 
     // The acceptor drops that TestRequest: its sequence number is beyond the
@@ -830,27 +818,21 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
           message::tag(Fields::MsgSeqNum, eq("5")),
           message::tag(Fields::SenderCompID, eq("CLIENT")),
           message::tag(Fields::TargetCompID, eq("SERVER")),
-        ),
-        anything()
-      )
+        ))
     };
     { client <<
       fix::session::SessionEvent::RawMessageReceived(
         all!(
           message::tag(Fields::MsgType, eq("A")),
           message::tag(Fields::MsgSeqNum, eq("1")),
-        ),
-        anything()
-      )
+        ))
     };
     { client ignoring_state
       << fix::session::SessionEvent::RawMessageSent(
           all!(
             message::tag(Fields::MsgType, eq("1")),
             message::tag(Fields::MsgSeqNum, eq("6")),
-          ),
-          anything()
-        )
+          ))
     };
     { client ignoring_state
       <<
@@ -862,9 +844,7 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
           message::tag(Fields::TargetCompID, eq("CLIENT")),
           message::tag(Fields::BeginSeqNo, eq("1")),
           message::tag(Fields::EndSeqNo, eq("0"))
-        ),
-        anything()
-      ),
+        )),
     };
     // The open-ended request is resolved to a concrete end sequence number
     // before it reaches the application.
@@ -881,9 +861,7 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
           all!(
             message::tag(Fields::MsgType, eq("1")),
             message::tag(Fields::MsgSeqNum, eq("3")),
-          ),
-          anything()
-        )
+          ))
     };
   };
 
@@ -908,9 +886,7 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
           message::tag(Fields::MsgType, eq("4")),
           message::tag(Fields::MsgSeqNum, eq("1")),
           message::tag(Fields::NewSeqNo, eq("7")),
-        ),
-        anything()
-      )
+        ))
     };
     { server(server_session_id) ignoring_state
       <<
@@ -919,9 +895,7 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
           message::tag(Fields::MsgType, eq("0")),
           message::tag(Fields::MsgSeqNum, eq("7")),
           message::tag(Fields::TestReqID, starts_with("HELO-")),
-        ),
-        anything()
-      )
+        ))
     };
     { server(server_session_id) ignoring_state
       <<
@@ -934,9 +908,7 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
           message::tag(Fields::MsgType, eq("1")),
           message::tag(Fields::MsgSeqNum, eq("8")),
           message::tag(Fields::TestReqID, starts_with("HELO-")),
-        ),
-        anything()
-      )
+        ))
     };
     { server(server_session_id) ignoring_state
       <<
@@ -944,9 +916,7 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
         all!(
           message::tag(Fields::MsgType, eq("0")),
           message::tag(Fields::TestReqID, starts_with("HELO-")),
-        ),
-        anything()
-      )
+        ))
     };
   }
 
@@ -954,26 +924,22 @@ async fn server_recovers_client_messages() -> anyhow::Result<()> {
     { client ignoring_state
       <<
       fix::session::SessionEvent::RawMessageSent(
-        message::tag(Fields::MsgType, eq("4")), anything()
-      )
+        message::tag(Fields::MsgType, eq("4")))
     };
     { client ignoring_state
       <<
       fix::session::SessionEvent::RawMessageSent(
-        message::tag(Fields::MsgType, eq("0")), anything()
-      )
+        message::tag(Fields::MsgType, eq("0")))
     };
     { client ignoring_state
       <<
       fix::session::SessionEvent::RawMessageSent(
-        message::tag(Fields::MsgType, eq("1")), anything()
-      )
+        message::tag(Fields::MsgType, eq("1")))
     };
     { client ignoring_state
       <<
       fix::session::SessionEvent::RawMessageReceived(
-        message::tag(Fields::MsgType, eq("0")), anything()
-      )
+        message::tag(Fields::MsgType, eq("0")))
     };
     { client ignoring_state
       <<

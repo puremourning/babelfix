@@ -80,10 +80,11 @@ use std::time::{Duration, Instant};
 use babelfix::driver::SessionDriver;
 use babelfix::endpoint;
 use babelfix::message::{Dictionaries, Dictionary, Message};
+use babelfix::schema::fields::MsgSeqNum;
 use babelfix::schema::tags;
 use babelfix::session::{
-  Command, Event, Session, SessionCommand, SessionEvent, SessionHandle,
-  SessionIdentifier, SessionState,
+  Command, Event, SessionCommand, SessionConfig, SessionEvent, SessionHandle,
+  SessionIdentifier, SessionSetup, SessionState,
 };
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use futures::channel::mpsc;
@@ -208,14 +209,18 @@ fn bench_workload<W: Workload>(
 // Fixtures
 // ---------------------------------------------------------------------------
 
-fn bench_session(fix: &Arc<Dictionary>) -> Session {
-  Session {
-    next_out_seq_num: 1,
-    next_in_seq_num: 1,
+fn bench_config(fix: &Arc<Dictionary>) -> SessionConfig {
+  SessionConfig {
     heartbeat_interval: NO_HEARTBEATS,
     dict: fix.clone(),
     time_precision: Default::default(),
   }
+}
+
+/// A fresh session that persists nothing: the store completes every write at
+/// once, so this measures delivery rather than storage.
+fn bench_session(fix: &Arc<Dictionary>) -> SessionSetup {
+  SessionSetup::new(bench_config(fix))
 }
 
 /// A small NewOrderSingle — deliberately modest, so the measurement is
@@ -276,7 +281,7 @@ fn spawn_echo_app(
 ) {
   tokio::spawn(async move {
     while let Some(event) = events.next().await {
-      if let SessionEvent::MessageReceived(msg) = event {
+      if let SessionEvent::MessageReceived { msg, .. } = event {
         black_box(&msg);
         if commands
           .send(SessionCommand::Send(reply.clone()))
@@ -316,13 +321,11 @@ impl ChannelPair {
     let inbound = new_order(fix);
     let filler = match events_per_message {
       1 => Vec::new(),
-      4 => {
-        let session = bench_session(fix);
+      3 => {
         let wire = inbound.clone();
         vec![
-          SessionEvent::RawMessageSent(wire.clone(), session.clone()),
-          SessionEvent::SessionState(session.clone()),
-          SessionEvent::RawMessageReceived(wire, session),
+          SessionEvent::RawMessageSent(wire.clone()),
+          SessionEvent::RawMessageReceived(wire),
         ]
       }
       n => panic!("unsupported event fan-out: {n}"),
@@ -343,7 +346,10 @@ impl ChannelPair {
     }
     self
       .events
-      .send(SessionEvent::MessageReceived(self.inbound.clone()))
+      .send(SessionEvent::MessageReceived {
+        seq_num: 1,
+        msg: self.inbound.clone(),
+      })
       .await
       .unwrap();
   }
@@ -366,7 +372,10 @@ impl ChannelPair {
     for _ in 0..PIPELINE_DEPTH {
       self
         .events
-        .send(SessionEvent::MessageReceived(self.inbound.clone()))
+        .send(SessionEvent::MessageReceived {
+          seq_num: 1,
+          msg: self.inbound.clone(),
+        })
         .await
         .unwrap();
     }
@@ -485,7 +494,7 @@ fn bench_channel_roundtrip(c: &mut Criterion) {
   }
 
   for executor in EXECUTORS {
-    for events_per_message in [1usize, 4] {
+    for events_per_message in [1usize, 3] {
       let rt = executor.build();
       let mut pair =
         Some(rt.block_on(async { ChannelPair::new(&fix, events_per_message) }));
@@ -510,7 +519,7 @@ fn bench_channel_concurrent(c: &mut Criterion) {
     for executor in EXECUTORS {
       let rt = executor.build();
       let mut fanout =
-        Some(rt.block_on(async { ChannelFanOut::new(&fix, sessions, 4) }));
+        Some(rt.block_on(async { ChannelFanOut::new(&fix, sessions, 3) }));
 
       group.bench_function(
         format!("{sessions}_sessions/{}", executor.name()),
@@ -672,7 +681,7 @@ impl Loopback {
     for client in self.clients.iter_mut() {
       loop {
         match client.events.next().await.expect("session ended") {
-          SessionEvent::MessageReceived(msg) => {
+          SessionEvent::MessageReceived { msg, .. } => {
             black_box(msg);
             break;
           }
@@ -834,48 +843,100 @@ fn bench_session_roundtrip(c: &mut Criterion) {
 struct SansIo {
   initiator: SessionDriver,
   acceptor: SessionDriver,
+  /// Each side's next outbound sequence number. The sessions number nothing
+  /// themselves: this is an application whose event stream numbers them, so
+  /// nothing is persisted on the measured path.
+  initiator_out: u64,
+  acceptor_out: u64,
   order: Message,
   reply: Message,
   wire: Vec<u8>,
 }
 
+/// Collects the admin messages a session asks for.
+#[derive(Default)]
+struct Asked(Vec<Message>);
+
+impl babelfix::session::EventSink for Asked {
+  fn event(&mut self, event: Event<'_>) -> babelfix::Result<()> {
+    if let Event::AdminSendRequired(msg) = event {
+      self.0.push(msg);
+    }
+    Ok(())
+  }
+}
+
+/// Number `msg` from `next_out`.
+fn numbered(mut msg: Message, next_out: &mut u64) -> Message {
+  msg.header_mut().set(MsgSeqNum, *next_out);
+  *next_out += 1;
+  msg
+}
+
 impl SansIo {
+  /// Run `f` against `driver`, then number and send every admin message it
+  /// asked for.
+  fn with_admin(
+    driver: &mut SessionDriver,
+    next_out: &mut u64,
+    now: Instant,
+    f: impl FnOnce(&mut SessionDriver, &mut Asked),
+  ) {
+    let mut asked = Asked::default();
+    f(driver, &mut asked);
+    for msg in asked.0 {
+      let _ = driver
+        .on_command(now, Command::Send(numbered(msg, next_out)), &mut ())
+        .unwrap();
+    }
+  }
+
   fn establish(fix: &Arc<Dictionary>) -> Self {
     let mut initiator = Self::driver(fix, "CLIENT", "SERVER");
     let mut acceptor = Self::driver(fix, "SERVER", "CLIENT");
+    let (mut initiator_out, mut acceptor_out) = (1, 1);
     let now = Instant::now();
-    let mut ignore = ();
 
     // Logon exchange. The acceptor reads the first frame to learn who is
     // calling, which is the part of the handshake that still lives outside the
     // state machine.
-    initiator.send_logon(Self::logon(fix), &mut ignore).unwrap();
+    Self::with_admin(&mut initiator, &mut initiator_out, now, |d, sink| {
+      d.request_logon(sink).unwrap();
+    });
     let wire = Self::take(&mut initiator);
     let (logon_from_client, rest) = Self::split_one(fix, &wire);
     assert!(rest.is_empty());
 
-    acceptor.send_logon(Self::logon(fix), &mut ignore).unwrap();
-    let _ = acceptor.start(logon_from_client, now, &mut ignore).unwrap();
+    Self::with_admin(&mut acceptor, &mut acceptor_out, now, |d, sink| {
+      d.request_logon(sink).unwrap();
+      let _ = d.start(logon_from_client, now, sink).unwrap();
+    });
 
     let wire = Self::take(&mut acceptor);
     let (logon_from_server, rest) = Self::split_one(fix, &wire);
-    let _ = initiator
-      .start(logon_from_server, now, &mut ignore)
-      .unwrap();
-    let _ = initiator.on_bytes(now, &rest, &mut ignore).unwrap();
+    Self::with_admin(&mut initiator, &mut initiator_out, now, |d, sink| {
+      let _ = d.start(logon_from_server, now, sink).unwrap();
+      let _ = d.on_bytes(now, &rest, sink).unwrap();
+    });
 
     // Settle the synchronisation TestRequests both sides send after logon, so
     // the measured loop is pure application traffic.
     for _ in 0..2 {
       let wire = Self::take(&mut initiator);
-      let _ = acceptor.on_bytes(now, &wire, &mut ignore).unwrap();
+      Self::with_admin(&mut acceptor, &mut acceptor_out, now, |d, sink| {
+        let _ = d.on_bytes(now, &wire, sink).unwrap();
+      });
       let wire = Self::take(&mut acceptor);
-      let _ = initiator.on_bytes(now, &wire, &mut ignore).unwrap();
+      Self::with_admin(&mut initiator, &mut initiator_out, now, |d, sink| {
+        let _ = d.on_bytes(now, &wire, sink).unwrap();
+      });
     }
 
     Self {
       initiator,
       acceptor,
+      initiator_out,
+      acceptor_out,
       order: new_order(fix),
       reply: exec_report(fix),
       wire: Vec::with_capacity(1024),
@@ -889,17 +950,8 @@ impl SansIo {
       target_comp_id: them.to_string(),
     };
     let state =
-      SessionState::new(session_id, bench_session(fix), Instant::now());
+      SessionState::new(session_id, bench_config(fix), 1, Instant::now());
     SessionDriver::new(state, load_repo(), None, chrono::Utc::now)
-  }
-
-  fn logon(fix: &Arc<Dictionary>) -> Message {
-    let mut msg = Message::new(fix, "A");
-    msg
-      .body_mut()
-      .set_raw(tags::HeartBtInt, b"3600")
-      .set_raw(tags::EncryptMethod, b"0");
-    msg
   }
 
   fn take(d: &mut SessionDriver) -> Vec<u8> {
@@ -925,9 +977,10 @@ impl SansIo {
     let now = Instant::now();
 
     // Initiator sends; the bytes go straight into its buffer.
+    let order = numbered(self.order.clone(), &mut self.initiator_out);
     let _ = self
       .initiator
-      .on_command(now, Command::Send(self.order.clone()), &mut ())
+      .on_command(now, Command::Send(order), &mut ())
       .unwrap();
     self.wire.clear();
     self.wire.extend_from_slice(self.initiator.pending_writes());
@@ -939,16 +992,17 @@ impl SansIo {
     let mut answered = None;
     {
       let mut sink = |event: Event<'_>| {
-        if matches!(event, Event::MessageReceived(_)) {
+        if matches!(event, Event::MessageReceived { .. }) {
           answered = Some(reply.clone());
         }
         Ok(())
       };
       let _ = self.acceptor.on_bytes(now, &self.wire, &mut sink).unwrap();
     }
+    let reply = numbered(answered.unwrap(), &mut self.acceptor_out);
     let _ = self
       .acceptor
-      .on_command(now, Command::Send(answered.unwrap()), &mut ())
+      .on_command(now, Command::Send(reply), &mut ())
       .unwrap();
 
     self.wire.clear();
@@ -958,7 +1012,7 @@ impl SansIo {
     let mut received = false;
     {
       let mut sink = |event: Event<'_>| {
-        if matches!(event, Event::MessageReceived(_)) {
+        if matches!(event, Event::MessageReceived { .. }) {
           received = true;
         }
         Ok(())

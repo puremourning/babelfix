@@ -1,314 +1,139 @@
 //! Two FIX sessions talking to each other with no socket, no runtime and no
-//! real time — just byte slices handed between two [`SessionDriver`]s.
+//! real time — just byte slices handed between two [`SessionDriver`]s, each
+//! numbered by a [`Sequencer`] whose store completes writes at once.
 //!
 //! This is the shape a latency-sensitive application uses: it owns the file
 //! descriptor, feeds whatever `read()` returned, and writes whatever the driver
 //! leaves in its buffer. If this works, so does an `epoll` loop.
+//!
+//! [`SessionDriver`]: babelfix_core::driver::SessionDriver
+//! [`Sequencer`]: babelfix_core::sequencer::Sequencer
 
-use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+mod support;
 
-use babelfix_core as fix;
-use babelfix_schema::codesets::{EncryptMethod, Side};
-use babelfix_schema::fields::{
-  ClOrdID, EncryptMethod, HeartBtInt, OrderQty, Side, Symbol,
-};
-use babelfix_schema::tags;
-use fix::codec::FixDecoder;
-use fix::driver::SessionDriver;
-use fix::message::{Dictionaries, Dictionary, Message};
-use fix::session::{
-  Command, Event, Progress, Session, SessionIdentifier, SessionState,
-};
+use std::time::Duration;
 
-static DICTS: LazyLock<Arc<Dictionaries>> =
-  LazyLock::new(|| Dictionaries::standard().unwrap());
-
-fn fix44() -> Arc<Dictionary> {
-  DICTS.get("FIX.4.4").unwrap().clone()
-}
-
-const DELIM: u8 = b'|';
-const HEARTBEAT: Duration = Duration::from_secs(30);
-
-/// A fixed clock. Real drivers pass `Utc::now`; a test wants determinism, and
-/// the core cannot read a clock itself in any case.
-fn clock() -> chrono::DateTime<chrono::Utc> {
-  chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap()
-}
-
-/// Collects the message types delivered to the application.
-#[derive(Default)]
-struct Seen {
-  app_messages: Vec<String>,
-  recovery_completed: bool,
-  resend_requested: Option<(u64, u64)>,
-}
-
-impl Seen {
-  /// A sink closure that records into `self`.
-  fn sink(&mut self) -> impl FnMut(Event<'_>) -> fix::Result<()> + '_ {
-    move |event: Event<'_>| {
-      match event {
-        Event::MessageReceived(msg) => {
-          self.app_messages.push(
-            String::from_utf8_lossy(
-              msg.body().raw(tags::ClOrdID).unwrap_or_default(),
-            )
-            .into_owned(),
-          );
-        }
-        Event::RecoveryCompleted => self.recovery_completed = true,
-        Event::ResendRequest {
-          begin_seq_no,
-          end_seq_no,
-          ..
-        } => self.resend_requested = Some((begin_seq_no, end_seq_no)),
-        _ => {}
-      }
-      Ok(())
-    }
-  }
-}
-
-fn logon_message() -> Message {
-  let mut msg = Message::new(&fix44(), "A");
-  msg
-    .body_mut()
-    .set(HeartBtInt, 30u64)
-    .set(EncryptMethod, EncryptMethod::None);
-  msg
-}
-
-fn order(cl_ord_id: &str) -> Message {
-  let mut msg = Message::new(&fix44(), "D");
-  msg
-    .body_mut()
-    .set(ClOrdID, cl_ord_id)
-    .set(Symbol, "AAPL")
-    .set(Side, Side::Buy)
-    .set(OrderQty, 100u64);
-  msg
-}
-
-fn driver(us: &str, them: &str) -> SessionDriver {
-  let session_id = SessionIdentifier {
-    begin_string: "FIX.4.4".into(),
-    sender_comp_id: us.into(),
-    target_comp_id: them.into(),
-  };
-  let mut session = Session::new(fix44());
-  session.heartbeat_interval = HEARTBEAT;
-  let state = SessionState::new(session_id, session, Instant::now());
-  SessionDriver::new(state, DICTS.clone(), Some(DELIM), clock)
-}
-
-/// Take everything a driver has queued for the wire.
-fn take_wire(d: &mut SessionDriver) -> Vec<u8> {
-  let buf = d.pending_writes();
-  let bytes = buf.to_vec();
-  buf.clear();
-  bytes
-}
-
-/// Decode exactly one message off the front of `bytes`, returning it and the
-/// remainder. Stands in for the part of the handshake that still lives outside
-/// the state machine: reading the first frame to learn who the peer is.
-fn split_one(bytes: &[u8]) -> (Message, Vec<u8>) {
-  let mut decoder = FixDecoder::new(DICTS.clone(), Some(DELIM));
-  let mut buf = bytes::BytesMut::from(bytes);
-  let msg = decoder
-    .decode(&mut buf)
-    .expect("decodes")
-    .expect("a complete message");
-  (msg, buf.to_vec())
-}
-
-/// Two logged-on drivers, plus the instant they started.
-fn established() -> (SessionDriver, SessionDriver, Instant) {
-  let now = Instant::now();
-  let mut initiator = driver("CLIENT", "SERVER");
-  let mut acceptor = driver("SERVER", "CLIENT");
-  let mut ignore = ();
-
-  // Initiator opens with a Logon.
-  initiator.send_logon(logon_message(), &mut ignore).unwrap();
-  let wire = take_wire(&mut initiator);
-
-  // The acceptor reads that first frame to learn who is calling, answers with
-  // its own Logon, then hands the peer's Logon to the session.
-  let (logon_from_client, rest) = split_one(&wire);
-  assert!(rest.is_empty());
-  acceptor.send_logon(logon_message(), &mut ignore).unwrap();
-  let progress = acceptor.start(logon_from_client, now, &mut ignore).unwrap();
-  assert_eq!(progress, Progress::Continue);
-
-  // The initiator does the mirror image: the acceptor's Logon starts its
-  // session, and everything after it is ordinary traffic.
-  let wire = take_wire(&mut acceptor);
-  let (logon_from_server, rest) = split_one(&wire);
-  let progress = initiator
-    .start(logon_from_server, now, &mut ignore)
-    .unwrap();
-  assert_eq!(progress, Progress::Continue);
-  let _ = initiator.on_bytes(now, &rest, &mut ignore).unwrap();
-
-  (initiator, acceptor, now)
-}
-
-/// Hand everything `from` has queued to `to`, and return what `to` says.
-fn pump(
-  from: &mut SessionDriver,
-  to: &mut SessionDriver,
-  now: Instant,
-  seen: &mut Seen,
-) {
-  let wire = take_wire(from);
-  let mut sink = seen.sink();
-  let _ = to.on_bytes(now, &wire, &mut sink).unwrap();
-}
+use support::*;
 
 #[test]
 fn two_drivers_complete_a_logon_exchange() {
   let (mut initiator, mut acceptor, now) = established();
-  let mut seen = Seen::default();
 
   // Each side answers the other's synchronisation TestRequest, which is what
   // marks recovery complete.
-  pump(&mut initiator, &mut acceptor, now, &mut seen);
-  pump(&mut acceptor, &mut initiator, now, &mut seen);
+  let _ = pump(&mut initiator, &mut acceptor, now);
+  let _ = pump(&mut acceptor, &mut initiator, now);
+  let _ = pump(&mut initiator, &mut acceptor, now);
 
   assert!(
-    seen.recovery_completed,
-    "neither side reported recovery complete"
+    initiator.app.recovery_completed && acceptor.app.recovery_completed,
+    "a side did not report recovery complete"
   );
   // Both ends have consumed the same stream, so their views must agree, and
   // both must be past the Logon and the synchronisation TestRequest.
   assert_eq!(
-    initiator.session().next_in_seq_num,
-    acceptor.session().next_in_seq_num,
+    initiator.driver.state().next_in_seq_num(),
+    acceptor.driver.state().next_in_seq_num(),
     "the two sides disagree about how far the conversation got"
   );
-  assert!(initiator.session().next_in_seq_num > 2);
+  assert!(initiator.driver.state().next_in_seq_num() > 2);
+}
+
+/// Everything sent was persisted first, under the number it went out with.
+#[test]
+fn every_message_sent_was_persisted_first() {
+  let (mut initiator, mut acceptor, now) = synchronised();
+  initiator.send(order("order-1"), now);
+  let _ = pump(&mut initiator, &mut acceptor, now);
+
+  let persisted: Vec<(u64, &str)> = initiator
+    .app
+    .persisted
+    .iter()
+    .map(|(n, t)| (*n, t.as_str()))
+    .collect();
+  // Logon, synchronisation TestRequest, the Heartbeat answering the peer's,
+  // then the order.
+  assert_eq!(persisted, [(1, "A"), (2, "1"), (3, "0"), (4, "D")]);
+  assert_eq!(acceptor.app.received_seq_nums, [4]);
 }
 
 #[test]
 fn an_application_message_crosses_with_no_socket_involved() {
-  let (mut initiator, mut acceptor, now) = established();
-  let mut seen = Seen::default();
-  pump(&mut initiator, &mut acceptor, now, &mut seen);
-  pump(&mut acceptor, &mut initiator, now, &mut seen);
-  take_wire(&mut initiator);
-  take_wire(&mut acceptor);
-  seen.app_messages.clear();
+  let (mut initiator, mut acceptor, now) = synchronised();
 
-  let mut sink = seen.sink();
-  let _ = initiator
-    .on_command(now, Command::Send(order("order-1")), &mut sink)
-    .unwrap();
-  drop(sink);
-
+  initiator.send(order("order-1"), now);
   assert!(
-    initiator.has_pending_writes(),
+    initiator.driver.has_pending_writes(),
     "the order was not queued for the wire"
   );
-  pump(&mut initiator, &mut acceptor, now, &mut seen);
+  let _ = pump(&mut initiator, &mut acceptor, now);
 
-  assert_eq!(seen.app_messages, vec!["order-1"]);
+  assert_eq!(acceptor.app.app_messages, vec!["order-1"]);
 }
 
 /// Bytes arriving split across reads must frame correctly — the driver holds a
 /// partial message until the rest turns up. A real socket does this constantly.
 #[test]
 fn a_message_split_across_reads_is_reassembled() {
-  let (mut initiator, mut acceptor, now) = established();
-  let mut seen = Seen::default();
-  pump(&mut initiator, &mut acceptor, now, &mut seen);
-  pump(&mut acceptor, &mut initiator, now, &mut seen);
-  take_wire(&mut initiator);
-  take_wire(&mut acceptor);
-  seen.app_messages.clear();
+  let (mut initiator, mut acceptor, now) = synchronised();
 
-  let mut sink = seen.sink();
-  let _ = initiator
-    .on_command(now, Command::Send(order("order-1")), &mut sink)
-    .unwrap();
-  drop(sink);
-  let wire = take_wire(&mut initiator);
+  initiator.send(order("order-1"), now);
+  let wire = initiator.take_wire();
 
   // Deliver it a byte at a time.
   for byte in &wire {
-    let mut sink = seen.sink();
-    let _ = acceptor
-      .on_bytes(now, std::slice::from_ref(byte), &mut sink)
-      .unwrap();
+    let _ = acceptor.on_bytes(now, std::slice::from_ref(byte));
   }
 
-  assert_eq!(seen.app_messages, vec!["order-1"]);
+  assert_eq!(acceptor.app.app_messages, vec!["order-1"]);
 }
 
 /// Several messages arriving in one read are all delivered, in order.
 #[test]
 fn a_batched_read_delivers_every_message() {
-  let (mut initiator, mut acceptor, now) = established();
-  let mut seen = Seen::default();
-  pump(&mut initiator, &mut acceptor, now, &mut seen);
-  pump(&mut acceptor, &mut initiator, now, &mut seen);
-  take_wire(&mut initiator);
-  take_wire(&mut acceptor);
-  seen.app_messages.clear();
+  let (mut initiator, mut acceptor, now) = synchronised();
 
   for i in 1..=3 {
-    let mut sink = seen.sink();
-    let _ = initiator
-      .on_command(now, Command::Send(order(&format!("order-{i}"))), &mut sink)
-      .unwrap();
+    initiator.send(order(&format!("order-{i}")), now);
   }
 
   // One write, one read, three messages.
-  pump(&mut initiator, &mut acceptor, now, &mut seen);
-  assert_eq!(seen.app_messages, vec!["order-1", "order-2", "order-3"]);
+  let _ = pump(&mut initiator, &mut acceptor, now);
+  assert_eq!(
+    acceptor.app.app_messages,
+    vec!["order-1", "order-2", "order-3"]
+  );
 }
 
 /// A gap provokes a ResendRequest that the peer actually sees.
 #[test]
 fn a_dropped_message_is_detected_across_the_pair() {
-  let (mut initiator, mut acceptor, now) = established();
-  let mut seen = Seen::default();
-  pump(&mut initiator, &mut acceptor, now, &mut seen);
-  pump(&mut acceptor, &mut initiator, now, &mut seen);
-  take_wire(&mut initiator);
-  take_wire(&mut acceptor);
+  let (mut initiator, mut acceptor, now) = synchronised();
 
   // Send two orders but deliver only the second, so one sequence number is
   // missing from the acceptor's point of view.
-  let mut sink = seen.sink();
-  let _ = initiator
-    .on_command(now, Command::Send(order("order-1")), &mut sink)
-    .unwrap();
-  drop(sink);
-  let _dropped = take_wire(&mut initiator);
-
-  let mut sink = seen.sink();
-  let _ = initiator
-    .on_command(now, Command::Send(order("order-2")), &mut sink)
-    .unwrap();
-  drop(sink);
+  initiator.send(order("order-1"), now);
+  let _dropped = initiator.take_wire();
+  initiator.send(order("order-2"), now);
 
   // Whatever the acceptor expects next is what it should ask to have resent.
-  let expected_begin = acceptor.session().next_in_seq_num;
-  pump(&mut initiator, &mut acceptor, now, &mut seen);
+  let expected_begin = acceptor.driver.state().next_in_seq_num();
+  let _ = pump(&mut initiator, &mut acceptor, now);
 
   // The acceptor discards the out-of-sequence message and asks for the gap.
-  assert!(seen.app_messages.is_empty());
+  assert!(acceptor.app.app_messages.is_empty());
   assert!(
-    acceptor.has_pending_writes(),
+    acceptor.driver.has_pending_writes(),
     "no ResendRequest was queued for the gap"
   );
 
   // And the initiator recognises it as a resend request.
-  pump(&mut acceptor, &mut initiator, now, &mut seen);
-  let (begin, end) = seen.resend_requested.expect("no ResendRequest event");
+  let _ = pump(&mut acceptor, &mut initiator, now);
+  let (begin, end) = initiator
+    .app
+    .resend_requested
+    .expect("no ResendRequest event");
   assert_eq!(
     begin, expected_begin,
     "resend began at the wrong sequence number"
@@ -320,41 +145,34 @@ fn a_dropped_message_is_detected_across_the_pair() {
 /// when that moment arrives — with no timer anywhere in sight.
 #[test]
 fn heartbeats_come_from_on_tick_alone() {
-  let (mut initiator, mut acceptor, now) = established();
-  let mut seen = Seen::default();
-  pump(&mut initiator, &mut acceptor, now, &mut seen);
-  pump(&mut acceptor, &mut initiator, now, &mut seen);
-  take_wire(&mut initiator);
+  let (mut initiator, mut acceptor, now) = synchronised();
 
-  let deadline = initiator.next_deadline().expect("a live session has one");
+  let deadline = initiator
+    .driver
+    .next_deadline()
+    .expect("a live session has one");
   assert!(deadline > now, "a deadline already in the past");
 
   // Nothing fires early, however often you ask.
-  let mut sink = seen.sink();
-  let _ = initiator
-    .on_tick(deadline - Duration::from_millis(1), &mut sink)
-    .unwrap();
-  drop(sink);
+  let _ = initiator.tick(deadline - Duration::from_millis(1));
   assert!(
-    !initiator.has_pending_writes(),
+    !initiator.driver.has_pending_writes(),
     "something fired before its deadline"
   );
 
   // Past a full interval the outbound heartbeat is certainly due. The exact
   // deadline above may belong to the *inbound* timer, which only counts a
   // missed beat and sends nothing.
-  let mut sink = seen.sink();
-  let _ = initiator.on_tick(now + HEARTBEAT * 2, &mut sink).unwrap();
-  drop(sink);
+  let _ = initiator.tick(now + HEARTBEAT * 2);
   assert!(
-    initiator.has_pending_writes(),
+    initiator.driver.has_pending_writes(),
     "no heartbeat after two intervals of silence"
   );
 
   // And the peer accepts it as an ordinary in-sequence message.
-  pump(&mut initiator, &mut acceptor, now, &mut seen);
+  let _ = pump(&mut initiator, &mut acceptor, now);
   assert!(
-    seen.app_messages.is_empty(),
+    acceptor.app.app_messages.is_empty(),
     "a heartbeat reached the application"
   );
 }

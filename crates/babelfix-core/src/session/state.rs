@@ -8,16 +8,17 @@ use tracing::{debug, error, info};
 use super::fields::*;
 use super::replay::{Replay, ReplayStep};
 use super::{
-  Command, Event, Progress, Session, SessionIdentifier, SessionOutput,
+  Command, Event, Progress, SessionConfig, SessionIdentifier, SessionOutput,
   Unstamped,
 };
 use crate::message::Message;
 use crate::time::MAX_LEN;
 use crate::{Error, Result};
 
-/// `SendingTime` is stamped by the [`SessionOutput`], as late as it can be. The
-/// state machine reserves the field — a placeholder of exactly the stamp's
-/// width — so the stamp is an in-place write.
+/// A `SendingTime` the application did not supply is stamped by the
+/// [`SessionOutput`], as late as it can be. The state machine reserves the
+/// field — a placeholder of exactly the stamp's width — so the stamp is an
+/// in-place write.
 const SENDING_TIME_PLACEHOLDER: &[u8; MAX_LEN] =
   b"00000000-00:00:00.000000000000";
 
@@ -60,12 +61,42 @@ impl Timers {
   }
 }
 
-/// The FIX session state machine: sequence numbers, heartbeats, recovery.
+/// The FIX session state machine: sequence checking, heartbeats, recovery.
+///
+/// It allocates no outbound sequence numbers. Every message it wants sent —
+/// the Logon, heartbeats, TestRequests, ResendRequests, Logouts — it hands to
+/// the application as an [`Event::AdminSendRequired`], and the application
+/// sends it back numbered with [`Command::Send`]. The only exceptions are gap
+/// fills and retransmissions, which reuse numbers already sent.
 ///
 /// See the [module docs](super) for how a driver is expected to call this.
 pub struct SessionState {
   session_id: SessionIdentifier,
-  session: Session,
+  config: SessionConfig,
+
+  /// The `MsgSeqNum` expected on the next message from the peer. Held only in
+  /// memory: what the application persists, and resumes from, is its own
+  /// business.
+  next_in_seq_num: u64,
+  /// The highest `MsgSeqNum` put on the wire, or 0 before anything has been.
+  /// Gap fills and retransmissions sit below it.
+  highest_sent: u64,
+  /// The highest `MsgSeqNum` accepted for sending, which includes messages
+  /// queued behind a replay. A new message must be beyond it.
+  highest_accepted: u64,
+
+  /// Our Logon has gone out.
+  logon_sent: bool,
+  /// The peer's Logon has been processed.
+  peer_logon_received: bool,
+
+  /// A heartbeat has been asked for and not yet sent, so the timer does not ask
+  /// again while the application is persisting it.
+  heartbeat_requested: bool,
+  /// A Logout has been asked for: the session is ending. Inbound traffic is
+  /// ignored, and if the Logout has not been sent by this instant the session
+  /// closes without it.
+  closing: Option<Instant>,
 
   /// Set while we are waiting for the peer to close a gap: holds the sequence
   /// number after which recovery is complete.
@@ -88,7 +119,13 @@ impl std::fmt::Debug for SessionState {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("SessionState")
       .field("session_id", &self.session_id)
-      .field("session", &self.session)
+      .field("config", &self.config)
+      .field("next_in_seq_num", &self.next_in_seq_num)
+      .field("highest_sent", &self.highest_sent)
+      .field("highest_accepted", &self.highest_accepted)
+      .field("logon_sent", &self.logon_sent)
+      .field("peer_logon_received", &self.peer_logon_received)
+      .field("closing", &self.closing)
       .field("rerequest_in_progress", &self.rerequest_in_progress)
       .field("recovery_tr_id", &self.recovery_tr_id)
       .field("replay", &self.replay)
@@ -99,20 +136,32 @@ impl std::fmt::Debug for SessionState {
 }
 
 impl SessionState {
-  /// Build a state machine for a session whose logon exchange has completed.
+  /// Build a state machine for a session about to exchange Logons.
   ///
-  /// `now` starts the heartbeat clocks. Feed the peer's Logon to [`start`] next.
+  /// `next_in_seq_num` is the `MsgSeqNum` expected on the peer's next message,
+  /// which is its Logon. `now` starts the heartbeat clocks.
   ///
-  /// [`start`]: SessionState::start
+  /// The [`AcceptorHandshake`](super::AcceptorHandshake) and
+  /// [`InitiatorHandshake`](super::InitiatorHandshake) drive the logon
+  /// exchange; a hand-rolled one calls [`request_logon`](Self::request_logon)
+  /// and [`start`](Self::start).
   pub fn new(
     session_id: SessionIdentifier,
-    session: Session,
+    config: SessionConfig,
+    next_in_seq_num: u64,
     now: Instant,
   ) -> Self {
-    let timers = Timers::new(session.heartbeat_interval, now);
+    let timers = Timers::new(config.heartbeat_interval, now);
     Self {
       session_id,
-      session,
+      config,
+      next_in_seq_num,
+      highest_sent: 0,
+      highest_accepted: 0,
+      logon_sent: false,
+      peer_logon_received: false,
+      heartbeat_requested: false,
+      closing: None,
       rerequest_in_progress: None,
       recovery_tr_id: None,
       replay: None,
@@ -122,14 +171,28 @@ impl SessionState {
     }
   }
 
-  /// The current sequence numbers and settings. Reading them puts nothing on
-  /// the wire and does not touch the heartbeat timers.
-  pub fn session(&self) -> &Session {
-    &self.session
+  /// The negotiated settings.
+  pub fn config(&self) -> &SessionConfig {
+    &self.config
   }
 
   pub fn session_id(&self) -> &SessionIdentifier {
     &self.session_id
+  }
+
+  /// The `MsgSeqNum` expected on the peer's next message.
+  pub fn next_in_seq_num(&self) -> u64 {
+    self.next_in_seq_num
+  }
+
+  /// The highest `MsgSeqNum` sent so far, or 0.
+  pub fn highest_sent(&self) -> u64 {
+    self.highest_sent
+  }
+
+  /// Whether both Logons have been exchanged.
+  pub fn is_logged_on(&self) -> bool {
+    self.logon_sent && self.peer_logon_received
   }
 
   /// Whether a replay is currently in progress.
@@ -144,24 +207,18 @@ impl SessionState {
   /// deadline. It is an `Option` so a driver can hold a closed session without
   /// arming a timer.
   pub fn next_deadline(&self) -> Option<Instant> {
-    Some(self.timers.next_out.min(self.timers.next_in))
+    let heartbeat = self.timers.next_out.min(self.timers.next_in);
+    Some(self.closing.map_or(heartbeat, |c| c.min(heartbeat)))
   }
 
-  /// Transmit a message belonging to the logon exchange, with the session's
-  /// sequence number and header fields applied.
-  ///
-  /// The [`AcceptorHandshake`](super::AcceptorHandshake) and
-  /// [`InitiatorHandshake`](super::InitiatorHandshake) use this to send their
-  /// Logon; a hand-rolled handshake can too.
-  pub fn send_logon(
-    &mut self,
-    msg: Message,
-    out: &mut impl SessionOutput,
-  ) -> Result<()> {
-    self.transmit(msg, out)
+  /// Ask the application to send our Logon, carrying the session's negotiated
+  /// settings.
+  pub fn request_logon(&mut self, out: &mut impl SessionOutput) -> Result<()> {
+    let logon = super::logon_message(&self.config)?;
+    self.request(logon, out)
   }
 
-  /// Process the peer's Logon and send the synchronisation TestRequest that
+  /// Process the peer's Logon and ask for the synchronisation TestRequest that
   /// establishes whether either side has missed anything.
   pub fn start(
     &mut self,
@@ -172,13 +229,15 @@ impl SessionState {
     if self.handle_session_message(logon, now, out)?.is_close() {
       return Ok(Progress::Close);
     }
+    self.peer_logon_received = true;
+    if self.closing.is_some() {
+      return Ok(Progress::Continue);
+    }
+    if self.logon_sent {
+      out.event(Event::LoggedOn)?;
+    }
 
-    let tr_id = self.next_test_request_id("HELO-");
-    let mut test_request = self.message(msg_type::TestRequest);
-    test_request.body_mut().set(TestReqID, tr_id.as_str());
-    self.transmit(test_request, out)?;
-    self.recovery_tr_id = Some(tr_id);
-
+    self.request_sync_test_request(out)?;
     Ok(Progress::Continue)
   }
 
@@ -194,7 +253,11 @@ impl SessionState {
     // proves the peer is there.
     self.timers.reset_in(now);
 
-    out.event(Event::RawMessageReceived(&msg, &self.session))?;
+    out.event(Event::RawMessageReceived(&msg))?;
+    if self.closing.is_some() {
+      debug!("Ignoring {} while closing", msg.msg_type());
+      return Ok(Progress::Continue);
+    }
     self.handle_session_message(msg, now, out)
   }
 
@@ -205,36 +268,23 @@ impl SessionState {
     now: Instant,
     out: &mut impl SessionOutput,
   ) -> Result<Progress> {
-    // Each of these puts a message on the wire, and that message is itself
-    // evidence of liveness, so the outbound heartbeat is deferred. Note this
-    // happens *only* here: heartbeats answering a TestRequest, ResendRequests
-    // raised on gap detection, gap fills, replay traffic and Logouts all leave
-    // the timer alone, exactly as they did before.
-    self.timers.reset_out(now);
-
     match cmd {
-      Command::Send(msg) => {
-        self.send(msg, out)?;
-        Ok(Progress::Continue)
-      }
+      Command::Send(msg) => self.send(msg, now, out),
       Command::Replay(msg) => {
+        self.timers.reset_out(now);
         self.replay_message(msg, out)?;
         Ok(Progress::Continue)
       }
       Command::ReplayComplete => {
-        self.complete_replay(out)?;
-        Ok(Progress::Continue)
+        self.timers.reset_out(now);
+        self.complete_replay(out)
       }
       Command::Disconnect => {
         info!("Session disconnect requested");
         // Always announce the intent to disconnect, so the peer can tell an
         // orderly shutdown from a network failure.
-        let mut logout = self.message(msg_type::Logout);
-        logout
-          .body_mut()
-          .set(Text, "Disconnect requested by application");
-        self.send(logout, out)?;
-        Ok(Progress::Close)
+        self.request_logout("Disconnect requested by application", now, out)?;
+        Ok(Progress::Continue)
       }
     }
   }
@@ -245,10 +295,23 @@ impl SessionState {
     now: Instant,
     out: &mut impl SessionOutput,
   ) -> Result<Progress> {
+    if let Some(deadline) = self.closing {
+      if now >= deadline {
+        error!("Logout was not sent in time; closing without it");
+        return Ok(Progress::Close);
+      }
+      return Ok(Progress::Continue);
+    }
+
     if now >= self.timers.next_out {
       self.timers.reset_out(now);
-      let heartbeat = self.message(msg_type::Heartbeat);
-      self.send(heartbeat, out)?;
+      // A heartbeat already asked for is still on its way: asking again would
+      // only queue a second one behind it.
+      if !self.heartbeat_requested {
+        self.heartbeat_requested = true;
+        let heartbeat = self.message(msg_type::Heartbeat);
+        self.request(heartbeat, out)?;
+      }
     }
 
     if now >= self.timers.next_in {
@@ -263,14 +326,11 @@ impl SessionState {
           let tr_id = self.next_test_request_id("HB");
           let mut test_request = self.message(msg_type::TestRequest);
           test_request.body_mut().set(TestReqID, tr_id.as_str());
-          self.send(test_request, out)?;
+          self.request(test_request, out)?;
         }
         MISSED_HEARTBEATS_BEFORE_LOGOUT.. => {
           error!("Missed third heartbeat, logging out");
-          let mut logout = self.message(msg_type::Logout);
-          logout.body_mut().set(Text, "Heartbeat timeout");
-          self.send(logout, out)?;
-          return Ok(Progress::Close);
+          self.request_logout("Heartbeat timeout", now, out)?;
         }
         _ => unreachable!(),
       }
@@ -291,7 +351,7 @@ impl SessionState {
 
   /// An empty message of the session's version.
   fn message(&self, msg_type: crate::message::MsgType) -> Message {
-    Message::new(&self.session.dict, msg_type)
+    Message::new(&self.config.dict, msg_type)
   }
 
   /// A `TestReqID` unique within the session, without consulting a clock.
@@ -301,55 +361,193 @@ impl SessionState {
   }
 
   // ---------------------------------------------------------------------
+  // Admin requests
+  // ---------------------------------------------------------------------
+
+  /// Hand an admin message to the application to number and send.
+  fn request(
+    &mut self,
+    msg: Message,
+    out: &mut impl SessionOutput,
+  ) -> Result<()> {
+    debug!("Requesting {} from the application", msg.msg_type());
+    out.event(Event::AdminSendRequired(msg))
+  }
+
+  /// Ask for the TestRequest whose answer tells us the peer has caught up.
+  fn request_sync_test_request(
+    &mut self,
+    out: &mut impl SessionOutput,
+  ) -> Result<()> {
+    let tr_id = self.next_test_request_id("HELO-");
+    let mut test_request = self.message(msg_type::TestRequest);
+    test_request.body_mut().set(TestReqID, tr_id.as_str());
+    self.recovery_tr_id = Some(tr_id);
+    self.request(test_request, out)
+  }
+
+  /// Ask for a Logout carrying a diagnostic reason, and start closing.
+  ///
+  /// The session ends when the Logout is sent. Until then inbound traffic is
+  /// ignored; if the application has not sent it within a heartbeat interval —
+  /// a dead store, say — the session closes without it.
+  fn request_logout(
+    &mut self,
+    text: &str,
+    now: Instant,
+    out: &mut impl SessionOutput,
+  ) -> Result<()> {
+    if self.closing.is_some() {
+      return Ok(());
+    }
+    self.closing = Some(now + self.config.heartbeat_interval);
+    let mut logout = self.message(msg_type::Logout);
+    logout.body_mut().set(Text, text);
+    self.request(logout, out)
+  }
+
+  // ---------------------------------------------------------------------
   // Transmission
   // ---------------------------------------------------------------------
 
-  /// Stamp the session header fields onto `msg` and hand it to `out`.
+  /// Accept a message the application numbered, and send it unless a replay
+  /// is running.
+  fn send(
+    &mut self,
+    msg: Message,
+    now: Instant,
+    out: &mut impl SessionOutput,
+  ) -> Result<Progress> {
+    let msg_seq_num = msg.header().get(MsgSeqNum)?.ok_or_else(|| {
+      Error::protocol_violation("Outbound message has no MsgSeqNum")
+    })?;
+    if msg_seq_num == 0 {
+      return Err(Error::protocol_violation("MsgSeqNum must be at least 1"));
+    }
+
+    let is_logon = msg.msg_type() == "A";
+    if is_logon {
+      if self.logon_sent {
+        return Err(Error::protocol_violation(
+          "Logon sent outside the logon exchange",
+        ));
+      }
+      self.check_logon(&msg)?;
+    } else if !self.logon_sent {
+      return Err(Error::protocol_violation(format!(
+        "The first message must be a Logon, not {}",
+        msg.msg_type()
+      )));
+    } else if !self.peer_logon_received {
+      return Err(Error::protocol_violation(format!(
+        "Cannot send {} before the peer has logged on",
+        msg.msg_type()
+      )));
+    }
+
+    if msg_seq_num <= self.highest_accepted {
+      return Err(Error::protocol_violation(format!(
+        "MsgSeqNum {msg_seq_num} is not beyond {}, already sent",
+        self.highest_accepted
+      )));
+    }
+    if msg_seq_num > self.highest_accepted + 1 {
+      debug!(
+        "MsgSeqNum jumps from {} to {msg_seq_num}; the peer will ask for the gap",
+        self.highest_accepted
+      );
+    }
+    self.highest_accepted = msg_seq_num;
+    // An application message is evidence of liveness on the wire, so it defers
+    // the next heartbeat. The session's own traffic does not: a heartbeat
+    // answering the peer's TestRequest is not us asserting liveness on our own
+    // schedule, and letting it reset the timer would let a peer polling us
+    // suppress our heartbeats. The scheduled heartbeat reset the timer when it
+    // was asked for.
+    if !msg.is_admin() {
+      self.timers.reset_out(now);
+    }
+
+    if let Some(replay) = self.replay.as_mut() {
+      replay.defer(msg);
+      return Ok(Progress::Continue);
+    }
+    self.dispatch_outbound(msg, out)
+  }
+
+  /// The application's Logon must still describe the session that was
+  /// configured: it may add to it, but not contradict it.
+  fn check_logon(&self, logon: &Message) -> Result<()> {
+    let heartbeat = logon.body().get(HeartBtInt)?;
+    let expected = self.config.heartbeat_interval.as_secs();
+    if heartbeat.and_then(|h| u64::try_from(h).ok()) != Some(expected) {
+      return Err(Error::protocol_violation(format!(
+        "Logon HeartBtInt {heartbeat:?} does not match the configured {expected}"
+      )));
+    }
+    if logon.begin_string() != self.session_id.begin_string {
+      return Err(Error::protocol_violation(format!(
+        "Logon BeginString {} does not match the session's {}",
+        logon.begin_string(),
+        self.session_id.begin_string
+      )));
+    }
+    Ok(())
+  }
+
+  /// Put a newly sent message on the wire, and note what sending it means.
+  fn dispatch_outbound(
+    &mut self,
+    msg: Message,
+    out: &mut impl SessionOutput,
+  ) -> Result<Progress> {
+    let msg = self.transmit(msg, out)?;
+    match msg.msg_type() {
+      "A" => {
+        self.logon_sent = true;
+        if self.peer_logon_received {
+          out.event(Event::LoggedOn)?;
+        }
+      }
+      "0" => self.heartbeat_requested = false,
+      "5" => return Ok(Progress::Close),
+      _ => {}
+    }
+    Ok(Progress::Continue)
+  }
+
+  /// Put the session header fields onto `msg` and hand it to `out`.
   ///
-  /// The `SendingTime` is deliberately left for the output to fill: one clock
-  /// read per message, taken as close to the wire as the sans-io boundary
-  /// allows.
+  /// A `SendingTime` the message already carries is kept. Otherwise a slot is
+  /// reserved for the output to fill: one clock read per message, taken as
+  /// close to the wire as the sans-io boundary allows.
   fn transmit(
     &mut self,
     mut msg: Message,
     out: &mut impl SessionOutput,
-  ) -> Result<()> {
-    let precision = self.session.time_precision;
+  ) -> Result<Message> {
+    let msg_seq_num = msg.header().req(MsgSeqNum)?;
+    let precision = if msg.header().has(SendingTime) {
+      None
+    } else {
+      Some(self.config.time_precision)
+    };
     {
       let mut header = msg.header_mut();
-      // A gap fill and a replayed message carry their own sequence number.
-      if !header.as_block().has(MsgSeqNum) {
-        header.set(MsgSeqNum, self.session.next_out_seq_num);
-        self.session.next_out_seq_num += 1;
-      }
       header
         .set(SenderCompID, self.session_id.sender_comp_id.as_str())
-        .set(TargetCompID, self.session_id.target_comp_id.as_str())
-        .set_raw(SendingTime, &SENDING_TIME_PLACEHOLDER[..precision.width()]);
+        .set(TargetCompID, self.session_id.target_comp_id.as_str());
+      if let Some(precision) = precision {
+        header
+          .set_raw(SendingTime, &SENDING_TIME_PLACEHOLDER[..precision.width()]);
+      }
     }
+    self.highest_sent = self.highest_sent.max(msg_seq_num);
 
-    // The snapshot handed out alongside the message is taken here, after this
-    // message's sequence number has been consumed and before the next one is.
-    // A single call can emit several messages; labelling them from the state at
-    // the end would give them all the last sequence number.
-    out.transmit(Unstamped::new(&mut msg, precision), &self.session)?;
+    out.transmit(Unstamped::new(&mut msg, precision))?;
     debug!("Sent message: {msg}");
-    out.event(Event::RawMessageSent(&msg, &self.session))
-  }
-
-  /// Send an application or admin message, deferring it if a replay is running.
-  fn send(
-    &mut self,
-    mut msg: Message,
-    out: &mut impl SessionOutput,
-  ) -> Result<()> {
-    if let Some(replay) = self.replay.as_mut() {
-      replay.defer(msg);
-      return Ok(());
-    }
-
-    msg.header_mut().remove(MsgSeqNum).remove(PossDupFlag);
-    self.transmit(msg, out)
+    out.event(Event::RawMessageSent(&msg))?;
+    Ok(msg)
   }
 
   /// Skip over `begin_seq_no..=end_seq_no` with a single SequenceReset-GapFill.
@@ -370,18 +568,7 @@ impl SessionState {
       .body_mut()
       .set(GapFillFlag, true)
       .set(NewSeqNo, end_seq_no + 1);
-    self.transmit(gap_fill, out)
-  }
-
-  /// Send a Logout(35=5) carrying a diagnostic reason.
-  fn send_logout(
-    &mut self,
-    text: &str,
-    out: &mut impl SessionOutput,
-  ) -> Result<()> {
-    let mut logout = self.message(msg_type::Logout);
-    logout.body_mut().set(Text, text);
-    self.transmit(logout, out)
+    self.transmit(gap_fill, out).map(|_| ())
   }
 
   // ---------------------------------------------------------------------
@@ -407,23 +594,32 @@ impl SessionState {
     match replay.offer(msg_seq_num, gap_filled) {
       ReplayStep::Skip | ReplayStep::Absorb => Ok(()),
       ReplayStep::Retransmit { gap_fill } => {
+        // The peer needs to know when the message was *originally* sent. An
+        // OrigSendingTime the application supplied wins; otherwise it is the
+        // stored SendingTime. A fresh SendingTime is then stamped.
+        let mut header = message.header_mut();
+        if !header.as_block().has(OrigSendingTime) {
+          header.copy_value(SendingTime, OrigSendingTime).map_err(|_| {
+            Error::protocol_violation(format!(
+              "Replayed message {msg_seq_num} has neither OrigSendingTime nor \
+               SendingTime"
+            ))
+          })?;
+        }
+        header.remove(SendingTime).set(PossDupFlag, true);
+
         if let Some((begin, end)) = gap_fill {
           self.send_gap_fill(begin, end, out)?;
         }
-
-        // The peer needs to know when the message was *originally* sent, so the
-        // stored SendingTime is preserved as OrigSendingTime before the output
-        // stamps a fresh one.
-        message
-          .header_mut()
-          .copy_value(SendingTime, OrigSendingTime)?
-          .set(PossDupFlag, true);
-        self.transmit(message, out)
+        self.transmit(message, out).map(|_| ())
       }
     }
   }
 
-  fn complete_replay(&mut self, out: &mut impl SessionOutput) -> Result<()> {
+  fn complete_replay(
+    &mut self,
+    out: &mut impl SessionOutput,
+  ) -> Result<Progress> {
     let replay = self
       .replay
       .as_mut()
@@ -438,17 +634,16 @@ impl SessionState {
     self.replay = None;
 
     for msg in queue {
-      self.send(msg, out)?;
+      if self.dispatch_outbound(msg, out)?.is_close() {
+        return Ok(Progress::Close);
+      }
     }
 
     // Re-synchronise: the peer's answer to this tells us the replay landed.
-    let tr_id = self.next_test_request_id("HELO-");
-    let mut test_request = self.message(msg_type::TestRequest);
-    test_request.body_mut().set(TestReqID, tr_id.as_str());
-    self.transmit(test_request, out)?;
-    self.recovery_tr_id = Some(tr_id);
-
-    Ok(())
+    if self.closing.is_none() {
+      self.request_sync_test_request(out)?;
+    }
+    Ok(Progress::Continue)
   }
 
   // ---------------------------------------------------------------------
@@ -488,7 +683,7 @@ impl SessionState {
       None
     };
 
-    match msg_seq_num.cmp(&self.session.next_in_seq_num) {
+    match msg_seq_num.cmp(&self.next_in_seq_num) {
       std::cmp::Ordering::Equal => {
         if let Some(new_seq_num) = gap_fill_new_seq_num {
           if new_seq_num <= msg_seq_num {
@@ -501,9 +696,9 @@ impl SessionState {
             "GapFill received, advancing next_in_seq_num to {}",
             new_seq_num
           );
-          self.session.next_in_seq_num = new_seq_num;
+          self.next_in_seq_num = new_seq_num;
         } else {
-          self.session.next_in_seq_num += 1;
+          self.next_in_seq_num += 1;
         }
       }
       std::cmp::Ordering::Greater => {
@@ -516,10 +711,10 @@ impl SessionState {
         if self.rerequest_in_progress.is_none() {
           let mut rr = self.message(msg_type::ResendRequest);
           rr.body_mut()
-            .set(BeginSeqNo, self.session.next_in_seq_num)
+            .set(BeginSeqNo, self.next_in_seq_num)
             .set(EndSeqNo, 0u64);
           self.rerequest_in_progress = Some(msg_seq_num);
-          self.transmit(rr, out)?;
+          self.request(rr, out)?;
         }
 
         // ResendRequest and Logout are the exceptions to discarding. Neither
@@ -529,8 +724,8 @@ impl SessionState {
         // that eventually covers it will.
         return match msg.msg_type() {
           // Service the retransmission the peer asked for. Our own request for
-          // the messages we are missing has already gone out above.
-          "2" => self.dispatch_message(msg, now, out),
+          // the messages we are missing has already been asked for above.
+          "2" => self.dispatch_message(msg, false, now, out),
           // The messages still missing precede the Logout, so acknowledging it
           // now would abandon them. Recover first, acknowledge afterwards.
           "5" => {
@@ -544,48 +739,52 @@ impl SessionState {
       std::cmp::Ordering::Less => {
         // One of the two peers has lost session state and the connection is no
         // longer recoverable.
-        self.send_logout(
+        self.request_logout(
           &format!(
             "Invalid MsgSeqNum; too low. Expected {} but got {}.",
-            self.session.next_in_seq_num, msg_seq_num
+            self.next_in_seq_num, msg_seq_num
           ),
+          now,
           out,
         )?;
-        return Ok(Progress::Close);
+        return Ok(Progress::Continue);
       }
     }
 
     if self
       .rerequest_in_progress
-      .is_some_and(|replay_seq| self.session.next_in_seq_num >= replay_seq)
+      .is_some_and(|replay_seq| self.next_in_seq_num >= replay_seq)
     {
       self.rerequest_in_progress = None;
     }
 
     // TODO: Validate message matches session_id
-    // The dispatch result decides whether the session continues: an inbound
-    // Logout ends it once acknowledged.
-    if self.dispatch_message(msg, now, out)?.is_close() {
+    // The dispatch result decides whether the session continues.
+    if self.dispatch_message(msg, true, now, out)?.is_close() {
       return Ok(Progress::Close);
     }
 
     // The gap that deferred a Logout acknowledgement has now closed.
     if self.peer_logout_pending && self.rerequest_in_progress.is_none() {
-      self.send_logout("Logout message received. Closing session.", out)?;
-      return Ok(Progress::Close);
+      self.request_logout(
+        "Logout message received. Closing session.",
+        now,
+        out,
+      )?;
     }
 
     Ok(Progress::Continue)
   }
 
+  /// Act on a message. `in_sequence` is false for the ResendRequest serviced
+  /// from inside a gap, which does not consume its sequence number.
   fn dispatch_message(
     &mut self,
     msg: Message,
-    _now: Instant,
+    in_sequence: bool,
+    now: Instant,
     out: &mut impl SessionOutput,
   ) -> Result<Progress> {
-    out.event(Event::SessionState(&self.session))?;
-
     match msg.msg_type() {
       "A" => {
         // we already mostly handled this
@@ -609,7 +808,7 @@ impl SessionState {
         heartbeat
           .body_mut()
           .set(TestReqID, msg.body().req(TestReqID)?);
-        self.send(heartbeat, out)?;
+        self.request(heartbeat, out)?;
       }
       // ResendRequest
       "2" => {
@@ -620,13 +819,12 @@ impl SessionState {
             "ResendRequest while a resend is already in progress",
           ));
         }
-        let replay = Replay::start(
-          begin_seq_no,
-          end_seq_no,
-          self.session.next_out_seq_num,
-        )?;
+        let replay =
+          Replay::start(begin_seq_no, end_seq_no, self.highest_sent + 1)?;
         let (begin_seq_no, end_seq_no) =
           (replay.begin_seq_no, replay.end_seq_no);
+        // Nothing queued behind the replay may reuse a number inside it.
+        self.highest_accepted = self.highest_accepted.max(end_seq_no);
         self.replay = Some(replay);
         out.event(Event::ResendRequest {
           resend_request: &msg,
@@ -636,16 +834,36 @@ impl SessionState {
       }
       // Logout
       "5" => {
-        self.send_logout("Logout message received. Closing session.", out)?;
-        return Ok(Progress::Close);
+        self.request_logout(
+          "Logout message received. Closing session.",
+          now,
+          out,
+        )?;
+      }
+      // Reject: about a message of ours, so the application needs to see it.
+      "3" => {
+        out.event(Event::MessageReceived {
+          seq_num: msg.header().req(MsgSeqNum)?,
+          msg: &msg,
+        })?;
+        return Ok(Progress::Continue);
       }
       _ if msg.is_admin() => {
-        // Ignore other admin messages
-        // FIXME: Not Reject and BusinessMessageReject!
+        // Nothing to do for other admin messages.
       }
       &_ => {
-        out.event(Event::MessageReceived(&msg))?;
+        out.event(Event::MessageReceived {
+          seq_num: msg.header().req(MsgSeqNum)?,
+          msg: &msg,
+        })?;
+        return Ok(Progress::Continue);
       }
+    }
+
+    if in_sequence {
+      out.event(Event::InboundAdvanced {
+        next_in_seq_num: self.next_in_seq_num,
+      })?;
     }
     Ok(Progress::Continue)
   }

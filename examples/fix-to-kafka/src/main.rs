@@ -25,47 +25,47 @@ async fn run_session(
         }
         match event? {
             fix::session::SessionEvent::ConnectionEstablished => {},
+            fix::session::SessionEvent::LoggedOn => {},
             fix::session::SessionEvent::RecoveryCompleted => {},
-            fix::session::SessionEvent::SessionState(session) => {
-              storage::update_session(
-                &session_handle.session_id,
-                &session,
-                &app)?;
-            }
-            fix::session::SessionEvent::RawMessageReceived(
-              fix_message,
-              session
-            ) => {
-              storage::update_session(
-                &session_handle.session_id,
-                &session,
-                &app)?;
+            // Every message, either way, goes to Kafka. Nothing here needs to
+            // be durable before the session goes on: outbound messages reached
+            // the store before they were sent, and the inbound watermark is
+            // the store's too.
+            fix::session::SessionEvent::RawMessageReceived(fix_message)
+            | fix::session::SessionEvent::RawMessageSent(fix_message) => {
               app.produce(&session_handle, fix_message).await;
             },
-            fix::session::SessionEvent::RawMessageSent(
-              fix_message,
-              session) => {
-              storage::update_session(
-                &session_handle.session_id,
-                &session,
-                &app)?;
-              app.produce(&session_handle, fix_message).await;
-            },
-            fix::session::SessionEvent::MessageReceived(_message) => {
+            fix::session::SessionEvent::MessageReceived { .. } => {
               // A real system might actually handle the messages
             },
             fix::session::SessionEvent::ResendRequest {
-              resend_request: _,
-              begin_seq_no: _,
-              end_seq_no: _
+              resend_request,
+              begin_seq_no,
+              end_seq_no,
             } => {
-              // A real system would actually service this replay
-              session_handle.tx.send(
-                fix::session::SessionCommand::ReplayComplete
-              ).await.ok();
+              // Replay what the store holds; anything it does not hold, and
+              // every admin message, is gap-filled.
+              for wire in storage::outbound_range(
+                &session_handle.session_id,
+                begin_seq_no..=end_seq_no,
+                &app,
+              )? {
+                let msg = fix::message::Message::parse(
+                  resend_request.dict(),
+                  wire,
+                )?;
+                session_handle
+                  .tx
+                  .send(fix::session::SessionCommand::Replay(msg))
+                  .await?;
+              }
+              session_handle
+                .tx
+                .send(fix::session::SessionCommand::ReplayComplete)
+                .await?;
             },
             fix::session::SessionEvent::Disconnected => {},
-            _ => todo!(),
+            _ => {},
         }
       }
     }
@@ -75,11 +75,15 @@ async fn run_session(
 
 mod storage {
   use super::*;
+  use futures::FutureExt;
 
+  /// What is persisted per session: its settings, and where it resumes.
   #[derive(serde::Serialize, serde::Deserialize)]
   pub struct SessionConfiguration {
     heartbeat_interval: std::time::Duration,
+    /// One past the highest outbound message stored.
     next_out_seq_num: u64,
+    /// The inbound watermark.
     next_in_seq_num: u64,
   }
 
@@ -93,23 +97,39 @@ mod storage {
     }
   }
 
+  fn session_key(session_id: &fix::session::SessionIdentifier) -> kv::Raw {
+    use kv::Value;
+    kv::Bincode::<fix::session::SessionIdentifier>(session_id.clone())
+      .to_raw_value()
+      .unwrap()
+  }
+
+  /// Outbound messages are keyed by session, then sequence number, so a
+  /// session's messages sort together and in order.
+  fn message_key(session: &kv::Raw, seq_num: u64) -> kv::Raw {
+    let mut key = session.to_vec();
+    key.extend_from_slice(&seq_num.to_be_bytes());
+    kv::Raw::from(key)
+  }
+
+  fn sessions(
+    db: &kv::Store,
+  ) -> kv::Bucket<'_, kv::Raw, kv::Bincode<SessionConfiguration>> {
+    db.bucket(Some("sessions")).unwrap()
+  }
+
+  fn messages(db: &kv::Store) -> kv::Bucket<'_, kv::Raw, kv::Raw> {
+    db.bucket(Some("messages")).unwrap()
+  }
+
   pub fn init_session(
     session_id: &fix::session::SessionIdentifier,
     session_config: SessionConfiguration,
     db: &kv::Store,
   ) {
-    use kv::Value;
-    let key =
-      kv::Bincode::<fix::session::SessionIdentifier>(session_id.clone());
-    let key = key.to_raw_value().unwrap();
-
-    let bucket = db
-      .bucket::<kv::Raw, kv::Bincode<SessionConfiguration>>(Some("sessions"))
-      .unwrap();
-
+    let key = session_key(session_id);
     let value = kv::Bincode(session_config);
-
-    bucket
+    sessions(db)
       .transaction(|txn| {
         if txn.get(&key)?.is_none() {
           txn.set(&key, &value)?;
@@ -119,58 +139,124 @@ mod storage {
       .unwrap();
   }
 
+  /// The setup to resume `session_id` with: its settings, where it got to,
+  /// and this store to persist to.
   pub fn look_up_session(
     session_id: &fix::session::SessionIdentifier,
     app: &App,
-  ) -> Option<fix::session::Session> {
-    use kv::Value;
-    let key =
-      kv::Bincode::<fix::session::SessionIdentifier>(session_id.clone());
-    let key = key.to_raw_value().unwrap();
-
-    app
-      .db
-      .bucket::<kv::Raw, kv::Bincode<SessionConfiguration>>(Some("sessions"))
-      .ok()
-      .and_then(|bucket| bucket.get(&key).ok())
-      .and_then(|v| {
-        v.map(|v| v.0).map(|value| fix::session::Session {
-          heartbeat_interval: value.heartbeat_interval,
-          next_in_seq_num: value.next_in_seq_num,
+  ) -> Option<fix::session::SessionSetup> {
+    let key = session_key(session_id);
+    let value = sessions(&app.db).get(&key).ok()??.0;
+    let mut config = fix::session::SessionConfig::new(
+      app
+        .dicts
+        .for_begin_string(session_id.begin_string.as_bytes())?
+        .clone(),
+    );
+    config.heartbeat_interval = value.heartbeat_interval;
+    Some(
+      fix::session::SessionSetup::new(config)
+        .resume(fix::session::Resume {
           next_out_seq_num: value.next_out_seq_num,
-          dict: app
-            .dicts
-            .for_begin_string(session_id.begin_string.as_bytes())
-            .unwrap()
-            .clone(),
-          time_precision: Default::default(),
+          next_in_seq_num: value.next_in_seq_num,
         })
-      })
+        .store(Arc::new(KvStore {
+          db: app.db.clone(),
+          session: key,
+        })),
+    )
   }
 
-  pub fn update_session(
+  /// The stored outbound messages in `range`, in order.
+  pub fn outbound_range(
     session_id: &fix::session::SessionIdentifier,
-    session: &fix::session::Session,
+    range: std::ops::RangeInclusive<u64>,
     app: &App,
-  ) -> anyhow::Result<()> {
-    use kv::Value;
-    let key =
-      kv::Bincode::<fix::session::SessionIdentifier>(session_id.clone());
-    let key = key.to_raw_value().unwrap();
+  ) -> anyhow::Result<Vec<bytes::Bytes>> {
+    let session = session_key(session_id);
+    let bucket = messages(&app.db);
+    let mut out = Vec::new();
+    for item in bucket.iter_range(
+      &message_key(&session, *range.start()),
+      &message_key(&session, range.end().saturating_add(1)),
+    )? {
+      let value: kv::Raw = item?.value()?;
+      out.push(bytes::Bytes::copy_from_slice(&value));
+    }
+    Ok(out)
+  }
 
-    let bucket = app
-      .db
-      .bucket::<kv::Raw, kv::Bincode<SessionConfiguration>>(Some("sessions"))?;
+  /// Persists each outbound message, and where the session resumes, to the
+  /// application's kv store — durably, before the session goes on.
+  struct KvStore {
+    db: kv::Store,
+    session: kv::Raw,
+  }
 
-    bucket.transaction(|txn| {
-      let value = SessionConfiguration {
-        heartbeat_interval: session.heartbeat_interval,
-        next_in_seq_num: session.next_in_seq_num,
-        next_out_seq_num: session.next_out_seq_num,
-      };
-      txn.set(&key, &kv::Bincode(value))
-    })?;
-    Ok(())
+  impl KvStore {
+    /// Store `message`, if there is one, then apply `update` to this
+    /// session's record, and flush both.
+    fn write(
+      &self,
+      message: Option<(kv::Raw, kv::Raw)>,
+      update: impl Fn(&mut SessionConfiguration) + Send + 'static,
+    ) -> futures::future::BoxFuture<'static, fix::Result<()>> {
+      let (db, session) = (self.db.clone(), self.session.clone());
+      async move {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+          if let Some((key, value)) = message {
+            messages(&db).set(&key, &value)?;
+          }
+          // Several writes may be in flight at once, so the record is updated
+          // in a transaction: a read-modify-write racing another could
+          // otherwise move it backwards. The transaction may be retried, so
+          // `update` must be repeatable.
+          let bucket = sessions(&db);
+          bucket.transaction(|txn| {
+            let Some(kv::Bincode(mut record)) = txn.get(&session)? else {
+              return Err(kv::abort(kv::Error::Message(
+                "session is not configured".into(),
+              )));
+            };
+            update(&mut record);
+            txn.set(&session, &kv::Bincode(record))?;
+            Ok(())
+          })?;
+          messages(&db).flush()?;
+          bucket.flush()?;
+          Ok(())
+        })
+        .await
+        .map_err(|e| fix::Error::persistence(e.to_string()))?
+        .map_err(|e| fix::Error::persistence(e.to_string()))
+      }
+      .boxed()
+    }
+  }
+
+  impl fix::store::SessionStore for KvStore {
+    fn persist_outbound(
+      &self,
+      seq_num: u64,
+      wire: bytes::Bytes,
+    ) -> futures::future::BoxFuture<'static, fix::Result<()>> {
+      let message = (
+        message_key(&self.session, seq_num),
+        kv::Raw::from(wire.as_ref()),
+      );
+      self.write(Some(message), move |record| {
+        record.next_out_seq_num = record.next_out_seq_num.max(seq_num + 1);
+      })
+    }
+
+    fn persist_watermark(
+      &self,
+      next_in_seq_num: u64,
+    ) -> futures::future::BoxFuture<'static, fix::Result<()>> {
+      self.write(None, move |record| {
+        record.next_in_seq_num = record.next_in_seq_num.max(next_in_seq_num);
+      })
+    }
   }
 }
 
@@ -346,8 +432,8 @@ async fn main() -> anyhow::Result<()> {
   // Handle endpoint events.
   //
   // NewSession is called when a peer connects and sends a logon. It returns the
-  // session deatils including the next expected sequence numbers for the logon
-  // exchange, and the FIX protocol settings.
+  // session's setup: its FIX protocol settings, where it resumes, and the
+  // store its messages are persisted to before they are sent.
   //
   // SessionInvalid is called when a peer connects and sends garbage.
   //

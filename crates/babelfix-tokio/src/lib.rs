@@ -14,6 +14,8 @@
 //!   [`session::SessionHandle`] once a peer has logged on.
 //! * [`session`] is the driver, plus the owned command and event types the
 //!   handle carries.
+//! * [`store`] is where a session persists each outbound message before
+//!   sending it.
 //! * [`connection`] is the same session without the channels or the task, for
 //!   applications whose own loop is the hot loop.
 //!
@@ -22,12 +24,13 @@
 //! the tokio transport without the umbrella.
 
 pub use babelfix_core::{
-  Error, Result, codec, driver, message, repository, time,
+  Error, Result, codec, driver, message, repository, sequencer, time,
 };
 
 pub mod connection;
 pub mod endpoint;
 pub mod session;
+pub mod store;
 pub mod util;
 
 /// Map a channel failure onto [`Error::ConnectionFailed`].

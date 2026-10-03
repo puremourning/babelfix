@@ -19,7 +19,7 @@
 //! # async fn run<S>(mut conn: SessionConnection<S>) -> babelfix_tokio::Result<()>
 //! # where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
 //! let mut on_event = |event: Event<'_>| {
-//!   if let Event::MessageReceived(msg) = event {
+//!   if let Event::MessageReceived { msg, .. } = event {
 //!     let _ = msg; // business logic
 //!   }
 //!   Ok(())
@@ -49,6 +49,12 @@
 //! has 30 seconds to complete the logon exchange, and frames are limited to
 //! [`DEFAULT_MAX_FRAME_LEN`](babelfix_core::codec::DEFAULT_MAX_FRAME_LEN).
 //!
+//! Like the spawned session, it is sequenced: each outbound message is
+//! numbered, persisted to the [`SessionSetup`]'s store, and sent once the
+//! write completes. Writes run concurrently with everything else in
+//! [`step`]; [`send`](SessionConnection::send) waits only for writes that have
+//! already completed.
+//!
 //! [`run`]: SessionConnection::run
 //! [`step`]: SessionConnection::step
 //! [`AsyncRead`]: tokio::io::AsyncRead
@@ -65,10 +71,12 @@ use babelfix_core::driver::{
 };
 use babelfix_core::message::Message;
 use babelfix_core::session::{
-  Command, EventSink, Progress, Session, SessionIdentifier,
+  Command, EventSink, Progress, SessionConfig, SessionIdentifier,
 };
 
 use crate::message::Dictionaries;
+use crate::session::{SessionSetup, SessionStatus, wall_clock};
+use crate::store::Sequenced;
 use crate::{Error, Result};
 
 /// How long a peer has to complete the logon exchange.
@@ -81,11 +89,15 @@ const READ_CHUNK: usize = 8192;
 pub struct SessionConnection<S> {
   io: S,
   driver: Box<SessionDriver>,
+  sequenced: Sequenced,
   read_buf: BytesMut,
+  /// The session ended outside [`step`](Self::step) — a Logout released by a
+  /// completed write, say — and the next `step` reports it.
+  closed: bool,
 }
 
 /// An accepted connection whose peer has sent its Logon, but for which the
-/// application has not yet supplied the persisted sequence numbers.
+/// application has not yet supplied the session's setup.
 ///
 /// The identity comes *from* the Logon, so it cannot be known before the first
 /// frame arrives — which is why accepting is two steps rather than one.
@@ -111,17 +123,32 @@ impl<S> PendingSession<S> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> PendingSession<S> {
-  /// Supply the session state and complete the exchange.
+  /// Supply the session's setup and complete the exchange.
   pub async fn accept(
     self,
-    session: Session,
+    setup: SessionSetup,
     sink: &mut impl EventSink,
   ) -> Result<SessionConnection<S>> {
     let PendingSession {
-      mut io, handshake, ..
+      mut io,
+      handshake,
+      session_id,
     } = self;
+    let mut sequenced = setup.sequenced(&session_id);
 
-    let mut established = handshake.accept(session, Instant::now(), sink)?;
+    let mut established = handshake.accept(
+      setup.config,
+      setup.resume.next_in_seq_num,
+      Instant::now(),
+      &mut sequenced.sink(sink),
+    )?;
+
+    // Our Logon reply is persisted before it is sent, and anything the peer's
+    // Logon provoked follows it.
+    let mut progress = established.progress();
+    if !progress.is_close() {
+      progress = sequenced.settle(&mut established, sink).await?;
+    }
 
     // Establishing hands the codec and its buffers on, so the Logon reply is
     // now the established session's to flush, not the handshake's. It goes
@@ -129,7 +156,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PendingSession<S> {
     // its own carried message provokes.
     flush(&mut io, established.pending_writes()).await?;
 
-    if established.progress().is_close() {
+    if progress.is_close() || established.progress().is_close() {
       // Unlike the endpoint, the caller has already seen why: its own sink
       // received the events synchronously.
       return Err(Error::connection_failed(
@@ -140,26 +167,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PendingSession<S> {
     // Nothing has been delivered to the sink from the session yet. This is
     // where a message the peer sent alongside its Logon arrives, and where an
     // application with more to set up than this one would do it first.
-    let (mut driver, progress) = established.start(Instant::now(), sink)?;
-    flush(&mut io, driver.pending_writes()).await?;
-
-    if progress.is_close() {
-      return Err(Error::connection_failed(
-        "session closed on the message carried with the logon",
-      ));
-    }
-
-    Ok(SessionConnection {
-      io,
-      driver,
-      read_buf: BytesMut::with_capacity(READ_CHUNK),
-    })
+    let (driver, progress) =
+      established.start(Instant::now(), &mut sequenced.sink(sink))?;
+    SessionConnection::established(io, driver, sequenced, progress, sink).await
   }
-}
-
-/// The wall clock the tokio driver stamps `SendingTime` from.
-fn wall_clock() -> chrono::DateTime<chrono::Utc> {
-  chrono::Utc::now()
 }
 
 fn driver_config(
@@ -182,16 +193,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
     dicts: Arc<Dictionaries>,
     delimiter: Option<u8>,
     session_id: SessionIdentifier,
-    session: Session,
+    setup: SessionSetup,
     sink: &mut impl EventSink,
   ) -> Result<Self> {
+    let mut sequenced = setup.sequenced(&session_id);
     let mut handshake = InitiatorDriver::start(
       session_id,
-      session,
+      setup.config,
+      setup.resume.next_in_seq_num,
       driver_config(dicts, delimiter),
       Instant::now(),
-      sink,
+      &mut sequenced.sink(sink),
     )?;
+    // Our Logon is persisted, then sent. Nothing about sending it can end the
+    // session.
+    let _ = sequenced.settle(&mut handshake, sink).await?;
     flush(&mut io, handshake.pending_writes()).await?;
 
     let mut buf = BytesMut::with_capacity(READ_CHUNK);
@@ -202,10 +218,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
       buf = BytesMut::with_capacity(READ_CHUNK);
 
       if let Some(mut established) =
-        handshake.on_bytes(Instant::now(), &bytes, sink)?
+        handshake.on_bytes(Instant::now(), &bytes, &mut sequenced.sink(sink))?
       {
+        let mut progress = established.progress();
+        if !progress.is_close() {
+          progress = sequenced.settle(&mut established, sink).await?;
+        }
         flush(&mut io, established.pending_writes()).await?;
-        if established.progress().is_close() {
+        if progress.is_close() || established.progress().is_close() {
           return Err(Error::connection_failed(
             "session closed during the logon exchange",
           ));
@@ -213,25 +233,43 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
         // As on the accepting side: the session delivers nothing until it is
         // started, and this is where anything carried with the peer's Logon
         // reply reaches the sink.
-        let (mut driver, progress) = established.start(Instant::now(), sink)?;
-        flush(&mut io, driver.pending_writes()).await?;
-        if progress.is_close() {
-          return Err(Error::connection_failed(
-            "session closed on the message carried with the logon",
-          ));
-        }
-        return Ok(Self {
-          io,
-          driver,
-          read_buf: BytesMut::with_capacity(READ_CHUNK),
-        });
+        let (driver, progress) =
+          established.start(Instant::now(), &mut sequenced.sink(sink))?;
+        return Self::established(io, driver, sequenced, progress, sink).await;
       }
-      flush(&mut io, handshake.pending_writes()).await?;
     }
   }
 
+  /// Finish setting up a session the peer has logged on to.
+  async fn established(
+    mut io: S,
+    mut driver: Box<SessionDriver>,
+    mut sequenced: Sequenced,
+    progress: Progress,
+    sink: &mut impl EventSink,
+  ) -> Result<Self> {
+    let progress = if progress.is_close() {
+      progress
+    } else {
+      sequenced.complete_ready(&mut *driver, sink)?
+    };
+    flush(&mut io, driver.pending_writes()).await?;
+    if progress.is_close() {
+      return Err(Error::connection_failed(
+        "session closed on the message carried with the logon",
+      ));
+    }
+    Ok(Self {
+      io,
+      driver,
+      sequenced,
+      read_buf: BytesMut::with_capacity(READ_CHUNK),
+      closed: false,
+    })
+  }
+
   /// Accept a session: wait for the peer's Logon and report who it claims to
-  /// be, so the application can supply the persisted sequence numbers.
+  /// be, so the application can supply the session's setup.
   ///
   /// The identity comes out of the Logon, so it cannot be known before the
   /// first frame arrives — which is why accepting is two steps. Note there is
@@ -265,12 +303,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
     }
   }
 
-  pub fn session(&self) -> &Session {
-    self.driver.session()
+  pub fn config(&self) -> &SessionConfig {
+    self.driver.config()
   }
 
   pub fn session_id(&self) -> &SessionIdentifier {
     self.driver.state().session_id()
+  }
+
+  /// Where the session's sequence numbers stand.
+  pub fn status(&self) -> SessionStatus {
+    SessionStatus {
+      next_out_seq_num: self.sequenced.seq.next_out_seq_num(),
+      next_in_seq_num: self.driver.state().next_in_seq_num(),
+      watermark: self.sequenced.seq.watermark(),
+    }
   }
 
   /// When [`step`](Self::step) will next act on time alone.
@@ -278,55 +325,95 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
     self.driver.next_deadline()
   }
 
-  /// Send an application message.
+  /// Send an application message: number it, start its write, and send it if
+  /// the write has already completed — otherwise a later [`step`](Self::step)
+  /// sends it. Returns its sequence number.
+  ///
+  /// If the session ends as a result — a completed write releasing a Logout
+  /// — the next `step` reports it.
   pub async fn send(
     &mut self,
     msg: Message,
     sink: &mut impl EventSink,
-  ) -> Result<Progress> {
-    let progress =
-      self
-        .driver
-        .on_command(Instant::now(), Command::Send(msg), sink)?;
-    self.flush().await?;
-    Ok(progress)
+  ) -> Result<u64> {
+    let seq_num = self.sequenced.send(msg, sink)?;
+    let _ = self.settle_ready(sink).await?;
+    Ok(seq_num)
   }
 
-  /// Apply any [`Command`] — replay, disconnect, and so on.
+  /// Send a message under the `MsgSeqNum` it carries, header as built. See
+  /// [`SessionCommand::SendRaw`](crate::session::SessionCommand::SendRaw).
+  pub async fn send_raw(
+    &mut self,
+    msg: Message,
+    sink: &mut impl EventSink,
+  ) -> Result<u64> {
+    let seq_num = self.sequenced.send_raw(msg, sink)?;
+    let _ = self.settle_ready(sink).await?;
+    Ok(seq_num)
+  }
+
+  /// The application has finished with inbound `seq_num`, under
+  /// [`InboundPolicy::Explicit`](crate::session::InboundPolicy::Explicit).
+  pub async fn handled(
+    &mut self,
+    seq_num: u64,
+    sink: &mut impl EventSink,
+  ) -> Result<()> {
+    self.sequenced.handled(seq_num, sink)?;
+    let _ = self.settle_ready(sink).await?;
+    Ok(())
+  }
+
+  /// Apply any other [`Command`] — replay, disconnect, and so on.
   pub async fn command(
     &mut self,
     cmd: Command,
     sink: &mut impl EventSink,
   ) -> Result<Progress> {
-    let progress = self.driver.on_command(Instant::now(), cmd, sink)?;
-    self.flush().await?;
-    Ok(progress)
+    let progress = self.driver.on_command(
+      Instant::now(),
+      cmd,
+      &mut self.sequenced.sink(sink),
+    )?;
+    if progress.is_close() {
+      self.flush().await?;
+      return Ok(progress);
+    }
+    self.settle_ready(sink).await
   }
 
-  /// Wait for the socket or the next deadline, whichever comes first, and
-  /// process it.
+  /// Wait for the socket, a write completing, or the next deadline, whichever
+  /// comes first, and process it.
   pub async fn step(&mut self, sink: &mut impl EventSink) -> Result<Progress> {
+    if self.closed {
+      return Ok(Progress::Close);
+    }
     let deadline = self
       .deadline()
       .unwrap_or_else(|| Instant::now() + LOGON_TIMEOUT);
 
     let progress = tokio::select! {
       _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-        self.driver.on_tick(Instant::now(), sink)?
+        self.driver.on_tick(Instant::now(), &mut self.sequenced.sink(sink))?
+      }
+      done = self.sequenced.writes.next() => {
+        self.sequenced.complete(done, &mut *self.driver, sink)?
       }
       read = self.io.read_buf(&mut self.read_buf) => {
         match read {
-          Ok(0) => self.driver.on_peer_closed(sink)?,
+          Ok(0) => self.driver.on_peer_closed(&mut self.sequenced.sink(sink))?,
           Ok(_) => self.drain_read_buf(sink)?,
           Err(e) => return Err(Error::Io(e)),
         }
       }
     };
 
-    // Everything the pass produced reaches the peer before the next input is
-    // read, which is what keeps backpressure connected.
-    self.flush().await?;
-    Ok(progress)
+    if progress.is_close() {
+      self.flush().await?;
+      return Ok(progress);
+    }
+    self.settle_ready(sink).await
   }
 
   /// Drive the session until it ends.
@@ -338,10 +425,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SessionConnection<S> {
   /// Feed whatever is in the read buffer to the state machine.
   fn drain_read_buf(&mut self, sink: &mut impl EventSink) -> Result<Progress> {
     let bytes = std::mem::take(&mut self.read_buf);
-    let progress = self.driver.on_bytes(Instant::now(), &bytes, sink)?;
+    let progress = self.driver.on_bytes(
+      Instant::now(),
+      &bytes,
+      &mut self.sequenced.sink(sink),
+    )?;
     // `on_bytes` keeps any partial frame itself, so the buffer starts empty
     // again; reuse the allocation.
     self.read_buf = BytesMut::with_capacity(READ_CHUNK);
+    Ok(progress)
+  }
+
+  /// Feed back the writes that have already completed, then write out what
+  /// they released. Everything a pass produced reaches the peer before the
+  /// next input is read, which is what keeps backpressure connected.
+  async fn settle_ready(
+    &mut self,
+    sink: &mut impl EventSink,
+  ) -> Result<Progress> {
+    let progress = self.sequenced.complete_ready(&mut *self.driver, sink)?;
+    self.flush().await?;
+    self.closed |= progress.is_close();
     Ok(progress)
   }
 

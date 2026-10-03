@@ -234,10 +234,10 @@ async fn logout_terminates_the_session_on_both_sides() -> anyhow::Result<()> {
   expect_events! {
     { client awaiting
       << fix::session::SessionEvent::RawMessageSent(
-          message::tag(Fields::MsgType, eq("5")), anything()) };
+          message::tag(Fields::MsgType, eq("5"))) };
     { server(server_session_id) awaiting
       << fix::session::SessionEvent::RawMessageReceived(
-          message::tag(Fields::MsgType, eq("5")), anything()) };
+          message::tag(Fields::MsgType, eq("5"))) };
     { server(server_session_id) awaiting
       << fix::session::SessionEvent::Disconnected };
     { client awaiting
