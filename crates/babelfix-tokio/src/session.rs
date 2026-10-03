@@ -222,8 +222,14 @@ pub enum SessionEvent {
   /// this: rather use the [`SessionEvent::MessageReceived`] event, which is
   /// emitted for valid, well-sequenced messages.
   ///
-  /// FIXME: Should include the socket receive time
-  RawMessageReceived(crate::message::Message),
+  /// The time is when the message's bytes were read from the socket. It is
+  /// read before anything the message provokes is numbered or persisted, so
+  /// a journal of both directions can order by it: a message received is
+  /// never later than a reply to it. (The time the event happens to be
+  /// handled is no use for that: an outbound message reaches the
+  /// [`SessionStore`] from the session task, before the application has seen
+  /// the event that provoked it.)
+  RawMessageReceived(crate::message::Message, chrono::DateTime<chrono::Utc>),
 
   /// Emitted when any FIX message was sent to the remote, including admin
   /// messages, as it went on the wire. Useful for auditing, logging and
@@ -295,13 +301,16 @@ impl SessionEvent {
   /// hands out borrows, and turning them into owned events for delivery over a
   /// channel means cloning. A driver that implements
   /// [`SessionOutput`] directly pays none of it.
-  fn from_core(event: Event<'_>) -> Option<Self> {
+  fn from_core(
+    event: Event<'_>,
+    received_at: chrono::DateTime<chrono::Utc>,
+  ) -> Option<Self> {
     Some(match event {
       Event::ConnectionEstablished => SessionEvent::ConnectionEstablished,
       Event::LoggedOn => SessionEvent::LoggedOn,
       Event::RecoveryCompleted => SessionEvent::RecoveryCompleted,
       Event::RawMessageReceived(m) => {
-        SessionEvent::RawMessageReceived(m.clone())
+        SessionEvent::RawMessageReceived(m.clone(), received_at)
       }
       Event::RawMessageSent(m) => SessionEvent::RawMessageSent(m.clone()),
       Event::MessageReceived { seq_num, msg } => {
@@ -347,6 +356,8 @@ pub(crate) struct Delivery {
   /// Events the application could not take yet.
   events: VecDeque<SessionEvent>,
   event_sender: mpsc::Sender<SessionEvent>,
+  /// When the bytes being processed were read from the socket.
+  pub(crate) received_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Delivery {
@@ -354,13 +365,19 @@ impl Delivery {
     Self {
       events: VecDeque::new(),
       event_sender,
+      received_at: wall_clock(),
     }
+  }
+
+  /// Bytes have just been read from the socket.
+  pub(crate) fn mark_received(&mut self) {
+    self.received_at = wall_clock();
   }
 }
 
 impl EventSink for Delivery {
   fn event(&mut self, event: Event<'_>) -> crate::Result<()> {
-    let Some(event) = SessionEvent::from_core(event) else {
+    let Some(event) = SessionEvent::from_core(event, self.received_at) else {
       return Ok(());
     };
 
@@ -427,6 +444,7 @@ impl<W: AsyncWrite + Unpin> SessionRunner<W> {
     if n == 0 {
       return Ok(None);
     }
+    self.delivery.mark_received();
     let bytes = std::mem::take(&mut self.read_buf);
     self.read_buf = BytesMut::with_capacity(READ_CHUNK);
     Ok(Some(bytes))
@@ -503,6 +521,7 @@ impl<W: AsyncWrite + Unpin> SessionRunner<W> {
           match read {
             Ok(0) => driver.on_peer_closed(&mut self.sequenced.sink(&mut self.delivery))?,
             Ok(_) => {
+              self.delivery.mark_received();
               let bytes = std::mem::take(&mut self.read_buf);
               let progress = driver.on_bytes(
                 Instant::now(),

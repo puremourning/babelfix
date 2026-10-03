@@ -325,7 +325,7 @@ impl ChannelPair {
         let wire = inbound.clone();
         vec![
           SessionEvent::RawMessageSent(wire.clone()),
-          SessionEvent::RawMessageReceived(wire),
+          SessionEvent::RawMessageReceived(wire, chrono::Utc::now()),
         ]
       }
       n => panic!("unsupported event fan-out: {n}"),

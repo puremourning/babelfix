@@ -513,6 +513,7 @@ async fn accept_connection(
   // identity from it.
   let deadline = tokio::time::Instant::from_std(handshake.deadline());
   let mut read_buf = bytes::BytesMut::with_capacity(4096);
+  let mut logon_received_at = session::wall_clock();
   let session_id = loop {
     let read = tokio::select! {
       _ = tokio::time::sleep_until(deadline) => {
@@ -527,6 +528,7 @@ async fn accept_connection(
         "Connection closed before first message",
       )),
       Ok(_) => {
+        logon_received_at = session::wall_clock();
         let bytes = std::mem::take(&mut read_buf);
         handshake.on_bytes(&bytes).map(|id| id.cloned())
       }
@@ -575,6 +577,8 @@ async fn accept_connection(
       setup.sequenced(&session_id),
       session::Delivery::new(session_event_sender.clone()),
     );
+    // The peer's Logon is reported by `accept`, below.
+    runner.delivery.received_at = logon_received_at;
 
     // The handle is published *before* the first flush. Until the application
     // holds the receiver, nothing is draining the event channel, so a session

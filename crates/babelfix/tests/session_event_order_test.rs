@@ -37,7 +37,7 @@ fn label(event: &fix::session::SessionEvent) -> String {
     E::ConnectionEstablished => "ConnectionEstablished".into(),
     E::RecoveryCompleted => "RecoveryCompleted".into(),
     E::LoggedOn => "LoggedOn".into(),
-    E::RawMessageReceived(m) => {
+    E::RawMessageReceived(m, _) => {
       format!("RawMessageReceived({})", m.msg_type())
     }
     E::RawMessageSent(m) => format!("RawMessageSent({})", m.msg_type()),

@@ -47,7 +47,7 @@ async fn run_session(
             fix::session::SessionEvent::LoggedOn => {},
             fix::session::SessionEvent::RecoveryCompleted => {},
             // Every message, either way, goes to Kafka.
-            fix::session::SessionEvent::RawMessageReceived(fix_message)
+            fix::session::SessionEvent::RawMessageReceived(fix_message, _)
             | fix::session::SessionEvent::RawMessageSent(fix_message) => {
               kafka.record(&fix_message).await;
             },

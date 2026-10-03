@@ -54,7 +54,7 @@ async fn simple_logon() -> anyhow::Result<()> {
           message::tag(Fields::EncryptMethod, eq("0")),
           message::tag(Fields::SenderCompID, eq("CLIENT")),
           message::tag(Fields::TargetCompID, eq("SERVER")),
-        ))
+        ), anything())
     };
     { server(server_session_id) <<
       fix::session::SessionEvent::RawMessageSent(
@@ -76,7 +76,7 @@ async fn simple_logon() -> anyhow::Result<()> {
           )) };
     { server(server_session_id) ignoring_state
       << fix::session::SessionEvent::RawMessageReceived(
-          message::tag(Fields::MsgType, eq("1"))) };
+          message::tag(Fields::MsgType, eq("1")), anything()) };
     // Each side's answer to the other's TestRequest, and the other's answer
     // to its own, in either order: an answer is persisted before it is sent,
     // so one arriving in the same read as the TestRequest it follows is seen
@@ -105,7 +105,7 @@ async fn simple_logon() -> anyhow::Result<()> {
           message::tag(Fields::HeartBtInt, eq("30")),
           message::tag(Fields::SenderCompID, eq("SERVER")),
           message::tag(Fields::TargetCompID, eq("CLIENT")),
-        ))
+        ), anything())
     };
     { client ignoring_state
       << fix::session::SessionEvent::RawMessageSent(
@@ -116,7 +116,7 @@ async fn simple_logon() -> anyhow::Result<()> {
           )) };
     { client ignoring_state
       << fix::session::SessionEvent::RawMessageReceived(
-          message::tag(Fields::MsgType, eq("1"))) };
+          message::tag(Fields::MsgType, eq("1")), anything()) };
     // Each side's answer to the other's TestRequest, and the other's answer
     // to its own, in either order: an answer is persisted before it is sent,
     // so one arriving in the same read as the TestRequest it follows is seen
@@ -171,7 +171,7 @@ async fn acceptor_identifies_session_by_swapping_comp_ids() -> anyhow::Result<()
       fix::session::SessionEvent::ConnectionEstablished };
     { server(server_session_id) <<
       fix::session::SessionEvent::RawMessageReceived(
-        message::tag(Fields::MsgType, eq("A"))) };
+        message::tag(Fields::MsgType, eq("A")), anything()) };
   };
 
   let ack = peer.recv().await?;
@@ -300,7 +300,7 @@ async fn logon_with_sequence_number_too_low_is_logged_out() -> anyhow::Result<()
         all!(
           message::tag(Fields::MsgType, eq("A")),
           message::tag(Fields::MsgSeqNum, eq("1")),
-        )) };
+        ), anything()) };
     { server(server_session_id) <<
       fix::session::SessionEvent::RawMessageSent(
         message::tag(Fields::MsgType, eq("A"))) };
@@ -322,7 +322,7 @@ async fn logon_with_sequence_number_too_low_is_logged_out() -> anyhow::Result<()
     .session
     .next_event_matching(&matches_pattern!(
       &fix::session::SessionEvent::RawMessageReceived(
-        ref message::tag(Fields::MsgType, eq("5")))
+        ref message::tag(Fields::MsgType, eq("5")), ref anything())
     ))
     .await?;
   client

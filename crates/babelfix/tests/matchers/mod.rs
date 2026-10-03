@@ -495,13 +495,17 @@ fn matcher_smoke() {
   verify_that!(&built, message::tag(9999, anything())).unwrap_err();
 
   // Composition with matches_pattern! on a SessionEvent (the intended usage).
-  let ev = fix::session::SessionEvent::RawMessageReceived(built.clone());
+  let ev = fix::session::SessionEvent::RawMessageReceived(
+    built.clone(),
+    chrono::Utc::now(),
+  );
   verify_that!(
     &ev,
     // NB: `ref` is required because the fields are not Copy, so
     // matches_pattern! must match them by reference.
     matches_pattern!(&fix::session::SessionEvent::RawMessageReceived(
       ref message::tag(35, eq("A")),
+      ref anything(),
     ))
   )
   .unwrap();

@@ -21,7 +21,7 @@ Most applications use the tokio endpoint, where the change is small: supply a
 | `EndpointEvent::NewSession` answered with `Session` | answered with `SessionSetup` |
 | `SessionEvent::SessionState(Session)` — persist it | gone: outbound messages go to your `SessionStore::persist_outbound`, the inbound watermark to `persist_watermark` |
 | `SessionEvent::RawMessageSent(msg, session)` — persist it to replay later | `RawMessageSent(msg)`: audit and display only. Replay from what `persist_outbound` stored |
-| `SessionEvent::RawMessageReceived(msg, session)` | `RawMessageReceived(msg)` |
+| `SessionEvent::RawMessageReceived(msg, session)` | `RawMessageReceived(msg, received_at)`: when its bytes were read from the socket. Order a journal of both directions by this, not by when you record it |
 | `SessionEvent::MessageReceived(msg)` | `MessageReceived { seq_num, msg }` |
 | — | `SessionEvent::LoggedOn`, once both Logons have been exchanged |
 | Session-level Reject (35=3) swallowed | delivered as `MessageReceived` |
