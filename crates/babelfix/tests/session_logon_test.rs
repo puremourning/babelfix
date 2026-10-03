@@ -54,9 +54,7 @@ async fn simple_logon() -> anyhow::Result<()> {
           message::tag(Fields::EncryptMethod, eq("0")),
           message::tag(Fields::SenderCompID, eq("CLIENT")),
           message::tag(Fields::TargetCompID, eq("SERVER")),
-        ),
-        anything()
-      )
+        ), anything())
     };
     { server(server_session_id) <<
       fix::session::SessionEvent::RawMessageSent(
@@ -67,9 +65,7 @@ async fn simple_logon() -> anyhow::Result<()> {
           message::tag(Fields::EncryptMethod, eq("0")),
           message::tag(Fields::SenderCompID, eq("SERVER")),
           message::tag(Fields::TargetCompID, eq("CLIENT")),
-        ),
-        anything()
-      ),
+        )),
     };
     { server(server_session_id) ignoring_state
       << fix::session::SessionEvent::RawMessageSent(
@@ -77,17 +73,15 @@ async fn simple_logon() -> anyhow::Result<()> {
             message::tag(Fields::MsgType, eq("1")),
             message::tag(Fields::MsgSeqNum, eq("2")),
             message::tag(Fields::TestReqID, starts_with("HELO-")),
-          ), anything()) };
+          )) };
     { server(server_session_id) ignoring_state
       << fix::session::SessionEvent::RawMessageReceived(
           message::tag(Fields::MsgType, eq("1")), anything()) };
-    { server(server_session_id) ignoring_state
-      << fix::session::SessionEvent::RawMessageSent(
-          message::tag(Fields::MsgType, eq("0")), anything()) };
-    { server(server_session_id) ignoring_state
-      << fix::session::SessionEvent::RawMessageReceived(
-          message::tag(Fields::MsgType, eq("0")), anything()) };
-    { server(server_session_id) ignoring_state
+    // Each side's answer to the other's TestRequest, and the other's answer
+    // to its own, in either order: an answer is persisted before it is sent,
+    // so one arriving in the same read as the TestRequest it follows is seen
+    // first.
+    { server(server_session_id) awaiting
       << fix::session::SessionEvent::RecoveryCompleted };
 
     { client <<
@@ -101,9 +95,7 @@ async fn simple_logon() -> anyhow::Result<()> {
           message::tag(Fields::EncryptMethod, eq("0")),
           message::tag(Fields::SenderCompID, eq("CLIENT")),
           message::tag(Fields::TargetCompID, eq("SERVER")),
-        ),
-        anything()
-      )
+        ))
     };
     { client <<
       fix::session::SessionEvent::RawMessageReceived(
@@ -113,9 +105,7 @@ async fn simple_logon() -> anyhow::Result<()> {
           message::tag(Fields::HeartBtInt, eq("30")),
           message::tag(Fields::SenderCompID, eq("SERVER")),
           message::tag(Fields::TargetCompID, eq("CLIENT")),
-        ),
-        anything()
-      )
+        ), anything())
     };
     { client ignoring_state
       << fix::session::SessionEvent::RawMessageSent(
@@ -123,19 +113,40 @@ async fn simple_logon() -> anyhow::Result<()> {
             message::tag(Fields::MsgType, eq("1")),
             message::tag(Fields::MsgSeqNum, eq("2")),
             message::tag(Fields::TestReqID, starts_with("HELO-")),
-          ), anything()) };
+          )) };
     { client ignoring_state
       << fix::session::SessionEvent::RawMessageReceived(
           message::tag(Fields::MsgType, eq("1")), anything()) };
-    { client ignoring_state
-      << fix::session::SessionEvent::RawMessageSent(
-          message::tag(Fields::MsgType, eq("0")), anything()) };
-    { client ignoring_state
-      << fix::session::SessionEvent::RawMessageReceived(
-          message::tag(Fields::MsgType, eq("0")), anything()) };
-    { client ignoring_state
+    // Each side's answer to the other's TestRequest, and the other's answer
+    // to its own, in either order: an answer is persisted before it is sent,
+    // so one arriving in the same read as the TestRequest it follows is seen
+    // first.
+    { client awaiting
       << fix::session::SessionEvent::RecoveryCompleted };
   };
+
+  // Both sides answered with a Heartbeat — possibly after recovery completed,
+  // if the answer was still being persisted when the peer's arrived.
+  let answered = |events: &std::collections::VecDeque<_>| {
+    events.iter().any(|e| {
+      matches!(e, fix::session::SessionEvent::RawMessageSent(m)
+        if m.msg_type() == "0")
+    })
+  };
+  let server_answered = {
+    let mut guard = server.lock().await;
+    answered(&guard.session(&server_session_id).unwrap().events)
+  };
+  if !server_answered {
+    expect_event!(server(server_session_id) awaiting
+      << fix::session::SessionEvent::RawMessageSent(
+          message::tag(Fields::MsgType, eq("0"))));
+  }
+  if !answered(&client.session.events) {
+    expect_event!(client awaiting
+      << fix::session::SessionEvent::RawMessageSent(
+          message::tag(Fields::MsgType, eq("0"))));
+  }
 
   Ok(())
 }
@@ -292,7 +303,7 @@ async fn logon_with_sequence_number_too_low_is_logged_out() -> anyhow::Result<()
         ), anything()) };
     { server(server_session_id) <<
       fix::session::SessionEvent::RawMessageSent(
-        message::tag(Fields::MsgType, eq("A")), anything()) };
+        message::tag(Fields::MsgType, eq("A"))) };
     { server(server_session_id) ignoring_state <<
       fix::session::SessionEvent::RawMessageSent(
         all!(
@@ -300,7 +311,7 @@ async fn logon_with_sequence_number_too_low_is_logged_out() -> anyhow::Result<()
           message::tag(Fields::Text, contains_substring("too low")),
           message::tag(Fields::Text, contains_substring("Expected 5")),
           message::tag(Fields::Text, contains_substring("got 1")),
-        ), anything()) };
+        )) };
     { server(server_session_id) ignoring_state <<
       fix::session::SessionEvent::Disconnected };
   };
@@ -311,9 +322,7 @@ async fn logon_with_sequence_number_too_low_is_logged_out() -> anyhow::Result<()
     .session
     .next_event_matching(&matches_pattern!(
       &fix::session::SessionEvent::RawMessageReceived(
-        ref message::tag(Fields::MsgType, eq("5")),
-        ref anything()
-      )
+        ref message::tag(Fields::MsgType, eq("5")), ref anything())
     ))
     .await?;
   client

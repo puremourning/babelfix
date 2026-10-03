@@ -75,7 +75,9 @@ async fn shutting_down_an_initiator_stops_it_reconnecting() -> anyhow::Result<()
       sender_comp_id: "CLIENT".into(),
       target_comp_id: "SERVER".into(),
     },
-    fix::session::Session::new(DICTS.get("FIX.4.4").unwrap().clone()),
+    fix::session::SessionSetup::new(fix::session::SessionConfig::new(
+      DICTS.get("FIX.4.4").unwrap().clone(),
+    )),
     EndpointConfig::default()
       .connect_timeout(Duration::from_millis(50))
       .backoff([Duration::from_millis(10)]),
@@ -119,7 +121,9 @@ async fn connecting_to_nothing_is_an_error() {
       sender_comp_id: "CLIENT".into(),
       target_comp_id: "SERVER".into(),
     },
-    fix::session::Session::new(DICTS.get("FIX.4.4").unwrap().clone()),
+    fix::session::SessionSetup::new(fix::session::SessionConfig::new(
+      DICTS.get("FIX.4.4").unwrap().clone(),
+    )),
     EndpointConfig::default(),
   );
   assert!(result.is_err());

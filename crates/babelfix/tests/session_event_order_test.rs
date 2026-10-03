@@ -8,8 +8,9 @@
 //!
 //! Nothing else exercises it, because every other test leaves the channel at
 //! its default depth of 100 and never comes close to filling it. Here the depth
-//! is 1, so a single inbound message — which produces `RawMessageReceived`,
-//! `SessionState` and `MessageReceived` — is guaranteed to cross the boundary.
+//! is 1, so the logon exchange and a single inbound message — which produce
+//! `RawMessageReceived`, `RawMessageSent`, `LoggedOn` and `MessageReceived` —
+//! are guaranteed to cross the boundary.
 
 #![allow(dead_code, unused_imports, unused_macros, unused_variables)]
 use std::sync::{Arc, LazyLock};
@@ -35,12 +36,12 @@ fn label(event: &fix::session::SessionEvent) -> String {
   match event {
     E::ConnectionEstablished => "ConnectionEstablished".into(),
     E::RecoveryCompleted => "RecoveryCompleted".into(),
-    E::SessionState(_) => "SessionState".into(),
+    E::LoggedOn => "LoggedOn".into(),
     E::RawMessageReceived(m, _) => {
       format!("RawMessageReceived({})", m.msg_type())
     }
-    E::RawMessageSent(m, _) => format!("RawMessageSent({})", m.msg_type()),
-    E::MessageReceived(m) => {
+    E::RawMessageSent(m) => format!("RawMessageSent({})", m.msg_type()),
+    E::MessageReceived { msg: m, .. } => {
       format!("MessageReceived({})", m.msg_type())
     }
     E::Disconnected => "Disconnected".into(),
@@ -76,7 +77,9 @@ async fn events_stay_in_order_when_the_channel_fills() -> anyhow::Result<()> {
     while let Some(event) = events.next().await {
       match event {
         fix::endpoint::EndpointEvent::NewSession { response, .. } => {
-          let _ = response.send(Ok(fix::session::Session::new(fix44())));
+          let _ = response.send(Ok(fix::session::SessionSetup::new(
+            fix::session::SessionConfig::new(fix44()),
+          )));
         }
         fix::endpoint::EndpointEvent::SessionConnected(h) => {
           handle = Some(h);
@@ -139,11 +142,15 @@ async fn events_stay_in_order_when_the_channel_fills() -> anyhow::Result<()> {
     "the raw message must be reported before the parsed one: {seen:?}"
   );
 
-  // And every SessionState between them is still in sequence — no event
-  // overtook one that was waiting.
+  // And the session logged on between the two — no event overtook one that
+  // was waiting.
+  let logged_on_idx = seen
+    .iter()
+    .position(|e| e == "LoggedOn")
+    .unwrap_or_else(|| panic!("LoggedOn was never delivered: {seen:?}"));
   assert!(
-    seen.iter().any(|e| e == "SessionState"),
-    "no SessionState was delivered at all: {seen:?}"
+    logon_idx < logged_on_idx && logged_on_idx < order_idx,
+    "LoggedOn out of order: {seen:?}"
   );
 
   Ok(())

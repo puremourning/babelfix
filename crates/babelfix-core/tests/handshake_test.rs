@@ -16,8 +16,8 @@ use babelfix_schema::fields::{
 use babelfix_schema::tags;
 use fix::message::{Dictionaries, Dictionary, Message};
 use fix::session::{
-  AcceptorHandshake, Event, InitiatorHandshake, Progress, Session,
-  SessionIdentifier, SessionOutput,
+  AcceptorHandshake, Command, Event, InitiatorHandshake, Progress,
+  SessionConfig, SessionIdentifier, SessionOutput, SessionState,
 };
 
 static DICTS: LazyLock<Arc<Dictionaries>> =
@@ -33,33 +33,70 @@ const LOGON_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Default)]
 struct Trace {
   events: Vec<String>,
+  /// Admin messages asked for and not yet numbered.
+  requested: Vec<Message>,
+  /// The next outbound sequence number the "application" will give.
+  next_out: u64,
   clock: u32,
 }
 
-impl SessionOutput for Trace {
-  fn transmit(
+impl Trace {
+  fn new() -> Self {
+    Self {
+      next_out: 1,
+      ..Default::default()
+    }
+  }
+
+  /// Number and send everything asked for, through `send`.
+  fn pump(
     &mut self,
-    msg: fix::session::Unstamped<'_>,
-    _session: &Session,
-  ) -> fix::Result<()> {
-    self.clock += 1;
-    let when = chrono::DateTime::from_timestamp(1_700_000_000, self.clock)
-      .expect("valid timestamp");
-    msg.stamp(when);
+    mut send: impl FnMut(Command, &mut Self) -> fix::Result<Progress>,
+  ) -> Progress {
+    for mut msg in std::mem::take(&mut self.requested) {
+      msg.header_mut().set(MsgSeqNum, self.next_out);
+      self.next_out += 1;
+      if send(Command::Send(msg), self).unwrap().is_close() {
+        return Progress::Close;
+      }
+    }
+    Progress::Continue
+  }
+
+  /// Number and send everything asked for, through the state machine.
+  fn pump_state(&mut self, state: &mut SessionState) -> Progress {
+    self.pump(|cmd, out| state.on_command(cmd, Instant::now(), out))
+  }
+}
+
+impl SessionOutput for Trace {
+  fn transmit(&mut self, msg: fix::session::Unstamped<'_>) -> fix::Result<()> {
+    let clock = &mut self.clock;
+    msg.stamp(|| {
+      *clock += 1;
+      chrono::DateTime::from_timestamp(1_700_000_000, *clock)
+        .expect("valid timestamp")
+    });
     Ok(())
   }
 
   fn event(&mut self, event: Event<'_>) -> fix::Result<()> {
     self.events.push(match event {
       Event::ConnectionEstablished => "ConnectionEstablished".into(),
-      Event::RawMessageReceived(m, _) => {
+      Event::AdminSendRequired(m) => {
+        let seen = format!("AdminSendRequired({})", m.msg_type());
+        self.requested.push(m);
+        seen
+      }
+      Event::LoggedOn => "LoggedOn".into(),
+      Event::RawMessageReceived(m) => {
         format!("RawMessageReceived({})", m.msg_type())
       }
-      Event::RawMessageSent(m, _) => {
+      Event::RawMessageSent(m) => {
         format!("RawMessageSent({})", m.msg_type())
       }
-      Event::SessionState(_) => "SessionState".into(),
-      Event::MessageReceived(_) => "MessageReceived".into(),
+      Event::MessageReceived { .. } => "MessageReceived".into(),
+      Event::InboundAdvanced { .. } => "InboundAdvanced".into(),
       Event::RecoveryCompleted => "RecoveryCompleted".into(),
       Event::Disconnected => "Disconnected".into(),
       _ => "other".into(),
@@ -68,8 +105,8 @@ impl SessionOutput for Trace {
   }
 }
 
-fn session() -> Session {
-  let mut s = Session::new(fix44());
+fn session() -> SessionConfig {
+  let mut s = SessionConfig::new(fix44());
   s.heartbeat_interval = Duration::from_secs(30);
   s
 }
@@ -101,13 +138,15 @@ fn id(us: &str, them: &str) -> SessionIdentifier {
 }
 
 /// An initiator knows who it is talking to, so it announces the session and
-/// puts its Logon on the wire before anything arrives.
+/// asks for its Logon before anything arrives; the Logon goes out once the
+/// application has numbered it.
 #[test]
 fn an_initiator_opens_with_its_own_logon() {
-  let mut out = Trace::default();
-  let _hs = InitiatorHandshake::start(
+  let mut out = Trace::new();
+  let mut hs = InitiatorHandshake::start(
     id("CLIENT", "SERVER"),
     session(),
+    1,
     LOGON_TIMEOUT,
     Instant::now(),
     &mut out,
@@ -116,9 +155,44 @@ fn an_initiator_opens_with_its_own_logon() {
 
   assert_eq!(
     out.events,
-    vec!["ConnectionEstablished", "RawMessageSent(A)"],
-    "an initiator announces the session, then sends its Logon"
+    vec!["ConnectionEstablished", "AdminSendRequired(A)"],
+    "an initiator announces the session, then asks for its Logon"
   );
+
+  let _ = out.pump(|cmd, out| hs.on_command(cmd, Instant::now(), out));
+  assert_eq!(out.events[2..], ["RawMessageSent(A)"]);
+
+  // The peer's answer logs the session on.
+  let established = hs
+    .on_peer_logon(frame("A", 1, "SERVER", "CLIENT"), Instant::now(), &mut out)
+    .unwrap();
+  assert_eq!(established.progress, Progress::Continue);
+  assert!(established.state.is_logged_on());
+  assert!(
+    out.events.iter().any(|e| e == "LoggedOn"),
+    "{:?}",
+    out.events
+  );
+}
+
+/// The peer cannot answer a Logon we have not sent.
+#[test]
+fn an_initiator_refuses_a_peer_logon_before_its_own() {
+  let mut out = Trace::new();
+  let hs = InitiatorHandshake::start(
+    id("CLIENT", "SERVER"),
+    session(),
+    1,
+    LOGON_TIMEOUT,
+    Instant::now(),
+    &mut out,
+  )
+  .unwrap();
+
+  let err = hs
+    .on_peer_logon(frame("A", 1, "SERVER", "CLIENT"), Instant::now(), &mut out)
+    .unwrap_err();
+  assert!(err.to_string().contains("before ours"), "{err}");
 }
 
 /// An acceptor says nothing at all until the peer names a session. It cannot:
@@ -126,7 +200,7 @@ fn an_initiator_opens_with_its_own_logon() {
 /// attach an event to.
 #[test]
 fn an_acceptor_says_nothing_until_the_peer_identifies_itself() {
-  let out = Trace::default();
+  let out = Trace::new();
   let mut hs = AcceptorHandshake::new(LOGON_TIMEOUT, Instant::now());
   assert!(out.events.is_empty());
 
@@ -151,25 +225,40 @@ fn an_acceptor_says_nothing_until_the_peer_identifies_itself() {
 
 /// And once the application supplies the session, the ordering is fixed: the
 /// session is announced, the Logon that opened it is reported, and only then
-/// does the reply go out.
+/// is the reply asked for — ahead of anything else, so it is numbered first.
 #[test]
 fn an_acceptor_reports_the_logon_before_answering_it() {
-  let mut out = Trace::default();
+  let mut out = Trace::new();
   let mut hs = AcceptorHandshake::new(LOGON_TIMEOUT, Instant::now());
   hs.identify(frame("A", 1, "CLIENT", "SERVER")).unwrap();
 
-  let established = hs.accept(session(), Instant::now(), &mut out).unwrap();
+  let mut established =
+    hs.accept(session(), 1, Instant::now(), &mut out).unwrap();
   assert_eq!(established.progress, Progress::Continue);
 
   assert_eq!(
-    &out.events[..3],
+    &out.events[..4],
     &[
       "ConnectionEstablished",
       "RawMessageReceived(A)",
-      "RawMessageSent(A)",
+      "AdminSendRequired(A)",
+      "InboundAdvanced",
     ],
     "an application persisting from these must see what arrived before what \
      it answered with"
+  );
+  assert!(!established.state.is_logged_on());
+
+  // Sending the reply logs the session on; the synchronisation TestRequest
+  // follows it.
+  let _ = out.pump_state(&mut established.state);
+  assert!(established.state.is_logged_on());
+  let tail: Vec<&str> = out.events[5..].iter().map(String::as_str).collect();
+  assert_eq!(
+    tail,
+    ["RawMessageSent(A)", "LoggedOn", "RawMessageSent(1)"],
+    "{:?}",
+    out.events
   );
 }
 
@@ -203,15 +292,17 @@ fn a_first_frame_that_is_not_a_logon_is_refused_silently() {
   assert!(acceptor.peer_logon().is_none());
 
   // Initiator: the Logon it already sent is the only thing emitted.
-  let mut out = Trace::default();
-  let initiator = InitiatorHandshake::start(
+  let mut out = Trace::new();
+  let mut initiator = InitiatorHandshake::start(
     id("CLIENT", "SERVER"),
     session(),
+    1,
     LOGON_TIMEOUT,
     Instant::now(),
     &mut out,
   )
   .unwrap();
+  let _ = out.pump(|cmd, out| initiator.on_command(cmd, Instant::now(), out));
   let before = out.events.len();
 
   let err = initiator
@@ -226,25 +317,31 @@ fn a_first_frame_that_is_not_a_logon_is_refused_silently() {
 }
 
 /// A Logon whose sequence number is too low ends the session — but the state
-/// still comes back, because the application has to be given the Logout that
-/// explains why.
+/// still comes back, because the application has to send the Logon reply and
+/// the Logout that explains why.
 #[test]
 fn a_session_refused_during_logon_still_comes_back() {
-  let mut out = Trace::default();
+  let mut out = Trace::new();
   let mut hs = AcceptorHandshake::new(LOGON_TIMEOUT, Instant::now());
   hs.identify(frame("A", 1, "CLIENT", "SERVER")).unwrap();
 
   // Expecting inbound 5; the peer opened at 1, so one side has lost state.
-  let mut stale = session();
-  stale.next_in_seq_num = 5;
-
-  let established = hs.accept(stale, Instant::now(), &mut out).unwrap();
-  assert_eq!(established.progress, Progress::Close);
+  let mut established =
+    hs.accept(session(), 5, Instant::now(), &mut out).unwrap();
   assert!(
-    out.events.iter().any(|e| e == "RawMessageSent(5)"),
-    "no Logout explaining the refusal: {:?}",
+    out.events.ends_with(&["AdminSendRequired(5)".into()]),
+    "no Logout explaining the refusal asked for: {:?}",
     out.events
   );
+
+  // The Logon reply, then the Logout, which ends the session.
+  assert_eq!(out.pump_state(&mut established.state), Progress::Close);
+  let sent: Vec<&String> = out
+    .events
+    .iter()
+    .filter(|e| e.starts_with("RawMessageSent"))
+    .collect();
+  assert_eq!(sent, ["RawMessageSent(A)", "RawMessageSent(5)"]);
 }
 
 /// The exchange has a deadline of its own, independent of the heartbeats that

@@ -22,7 +22,9 @@ tracing.workspace = true
 bytes.workspace = true
 
 kv = { version = "0.24", features = [ "bincode-value" ] }
-samsa = "0.1.8"
+# Pure Rust, without the default compression features: lz4 and zstd are C.
+rskafka = { version = "0.6", default-features = false }
+chrono.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 serde_json = "1.0.151"

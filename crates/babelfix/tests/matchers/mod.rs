@@ -497,7 +497,7 @@ fn matcher_smoke() {
   // Composition with matches_pattern! on a SessionEvent (the intended usage).
   let ev = fix::session::SessionEvent::RawMessageReceived(
     built.clone(),
-    fix::session::Session::new(fix44),
+    chrono::Utc::now(),
   );
   verify_that!(
     &ev,
@@ -510,19 +510,23 @@ fn matcher_smoke() {
   )
   .unwrap();
 
-  let ev = fix::session::SessionEvent::MessageReceived(built);
+  let ev = fix::session::SessionEvent::MessageReceived {
+    seq_num: 1,
+    msg: built,
+  };
   verify_that!(
     &ev,
-    matches_pattern!(&fix::session::SessionEvent::MessageReceived(
-        ref all!(
+    matches_pattern!(&fix::session::SessionEvent::MessageReceived {
+        seq_num: eq(1),
+        msg: ref all!(
           block::header(not(block::has_tag(tags::TargetCompID))),
           block::header(block::tag(
             tags::SenderCompID,
             value::string(eq("CLIENT"))
           )),
           block::body(block::tag(tags::HeartBtInt, value::int(lt(100)))),
-        )
-    ))
+        ),
+    })
   )
   .unwrap();
 }

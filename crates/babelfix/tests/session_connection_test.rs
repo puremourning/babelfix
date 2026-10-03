@@ -12,7 +12,9 @@ use std::sync::{Arc, LazyLock};
 use babelfix as fix;
 use fix::connection::SessionConnection;
 use fix::schema::tags as Fields;
-use fix::session::{Command, Event, Progress, Session, SessionIdentifier};
+use fix::session::{
+  Command, Event, Progress, SessionConfig, SessionIdentifier, SessionSetup,
+};
 
 static DICTS: LazyLock<Arc<fix::message::Dictionaries>> =
   LazyLock::new(|| fix::message::Dictionaries::standard().unwrap());
@@ -51,7 +53,7 @@ struct Seen {
 impl Seen {
   fn sink(&mut self) -> impl FnMut(Event<'_>) -> fix::Result<()> + '_ {
     move |event: Event<'_>| {
-      if let Event::MessageReceived(msg) = event {
+      if let Event::MessageReceived { msg, .. } = event {
         self.orders.push(
           String::from_utf8_lossy(
             msg.body().raw(Fields::ClOrdID).unwrap_or_default(),
@@ -80,7 +82,9 @@ async fn a_message_crosses_a_duplex_pair() -> anyhow::Result<()> {
 
     let mut conn = {
       let mut sink = seen.sink();
-      pending.accept(Session::new(fix44()), &mut sink).await?
+      pending
+        .accept(SessionSetup::new(SessionConfig::new(fix44())), &mut sink)
+        .await?
     };
 
     // Step until the order arrives. The sink borrows `seen`, so it has to be
@@ -104,13 +108,16 @@ async fn a_message_crosses_a_duplex_pair() -> anyhow::Result<()> {
     DICTS.clone(),
     None,
     session_id("CLIENT", "SERVER"),
-    Session::new(fix44()),
+    SessionSetup::new(SessionConfig::new(fix44())),
     &mut sink,
   )
   .await?;
 
-  let progress = client.send(order("order-1"), &mut sink).await?;
-  assert_eq!(progress, Progress::Continue);
+  let seq_num = client.send(order("order-1"), &mut sink).await?;
+  // After at least the Logon and the synchronisation TestRequest; whether the
+  // answer to the peer's TestRequest came first depends on how its bytes
+  // arrived.
+  assert!(seq_num >= 3, "the order reused a session message's number");
   drop(sink);
 
   let orders =
@@ -148,7 +155,7 @@ async fn the_acceptor_sees_the_identity_before_committing() -> anyhow::Result<()
       DICTS.clone(),
       None,
       session_id("CLIENT", "SERVER"),
-      Session::new(fix44()),
+      SessionSetup::new(SessionConfig::new(fix44())),
       &mut sink,
     ),
   )

@@ -16,7 +16,7 @@
 //! # use babelfix_core::session::{Event, Progress};
 //! # fn run(driver: &mut SessionDriver, fd_bytes: &[u8]) -> babelfix_core::Result<()> {
 //! let mut on_event = |event: Event<'_>| {
-//!   if let Event::MessageReceived(msg) = event {
+//!   if let Event::MessageReceived { msg, .. } = event {
 //!     // business logic
 //!     let _ = msg;
 //!   }
@@ -53,7 +53,7 @@ use crate::codec::{FixDecoder, FixEncoder};
 use crate::message::{Dictionaries, Message};
 use crate::session::{
   AcceptorHandshake, Command, Event, EventSink, InitiatorHandshake, Progress,
-  Session, SessionIdentifier, SessionOutput, SessionState, Unstamped,
+  SessionConfig, SessionIdentifier, SessionOutput, SessionState, Unstamped,
 };
 use crate::{Error, Result};
 
@@ -74,9 +74,9 @@ struct DriverOutput<'a, E> {
 }
 
 impl<E: EventSink> SessionOutput for DriverOutput<'_, E> {
-  fn transmit(&mut self, msg: Unstamped<'_>, _session: &Session) -> Result<()> {
-    // One clock read per message, immediately before the bytes exist.
-    let msg = msg.stamp((self.clock)());
+  fn transmit(&mut self, msg: Unstamped<'_>) -> Result<()> {
+    // At most one clock read per message, immediately before the bytes exist.
+    let msg = msg.stamp(self.clock);
     self.encoder.encode(msg, self.bytes)
   }
 
@@ -92,7 +92,7 @@ pub struct DriverConfig {
   pub dicts: std::sync::Arc<Dictionaries>,
   /// Field separator; `None` means SOH.
   pub delimiter: Option<u8>,
-  /// Read once per outbound message, to stamp `SendingTime`.
+  /// Read once per outbound message that has no `SendingTime`, to stamp one.
   pub clock: Clock,
   /// How long the peer has to complete the logon exchange.
   pub logon_timeout: std::time::Duration,
@@ -151,18 +151,21 @@ impl Plumbing {
 /// The logon exchange with a codec and buffers attached, for the side that
 /// opened the connection.
 ///
-/// [`SessionDriver`] is the session proper and always has a [`Session`]; this
-/// is the phase before that. It yields a `SessionDriver` once the peer answers.
+/// [`SessionDriver`] is the session proper; this is the phase before that. It
+/// yields a `SessionDriver` once the peer answers.
 pub struct InitiatorDriver {
   handshake: Option<InitiatorHandshake>,
   plumbing: Plumbing,
 }
 
 impl InitiatorDriver {
-  /// Open a session, putting our Logon in the outbound buffer.
+  /// Open a session, asking the application for our Logon with
+  /// [`Event::AdminSendRequired`]. It reaches the outbound buffer when the
+  /// application sends it back through [`on_command`](Self::on_command).
   pub fn start(
     session_id: SessionIdentifier,
-    session: Session,
+    session: SessionConfig,
+    next_in_seq_num: u64,
     config: DriverConfig,
     now: Instant,
     sink: &mut impl EventSink,
@@ -182,6 +185,7 @@ impl InitiatorDriver {
       InitiatorHandshake::start(
         session_id,
         session,
+        next_in_seq_num,
         logon_timeout,
         now,
         &mut out,
@@ -203,6 +207,20 @@ impl InitiatorDriver {
       Some(h) => h.on_timeout(now),
       None => Ok(()),
     }
+  }
+
+  /// Apply an application command: in practice, the Logon it was asked for.
+  pub fn on_command(
+    &mut self,
+    now: Instant,
+    cmd: Command,
+    sink: &mut impl EventSink,
+  ) -> Result<Progress> {
+    let handshake = self.handshake.as_mut().ok_or_else(|| {
+      Error::protocol_violation("logon exchange is already complete")
+    })?;
+    let mut out = self.plumbing.output(sink);
+    handshake.on_command(cmd, now, &mut out)
   }
 
   pub fn pending_writes(&mut self) -> &mut BytesMut {
@@ -266,22 +284,43 @@ impl InitiatorDriver {
 /// ```no_run
 /// # use std::time::Instant;
 /// # use babelfix_core::driver::{AcceptorDriver, DriverConfig, SessionDriver};
-/// # use babelfix_core::session::Session;
+/// # use babelfix_core::sequencer::{Persist, SeqEvent, SeqSink, Sequencer};
+/// # use babelfix_core::session::SessionConfig;
 /// # fn accept(
 /// #   mut hs: AcceptorDriver,
 /// #   bytes: &[u8],
-/// #   lookup: impl Fn(&babelfix_core::session::SessionIdentifier) -> Session,
+/// #   lookup: impl Fn(&babelfix_core::session::SessionIdentifier)
+/// #     -> (SessionConfig, u64, Sequencer),
 /// # ) -> babelfix_core::Result<Option<Box<SessionDriver>>> {
-/// let mut sink = ();
+/// /// Starts a write for each message the sequencer numbers.
+/// struct Store(Vec<u64>);
+/// impl SeqSink for Store {
+///   fn event(&mut self, event: SeqEvent<'_>) -> babelfix_core::Result<()> {
+///     if let SeqEvent::Persist(Persist::Outbound { seq_num, .. }) = event {
+///       self.0.push(seq_num);
+///     }
+///     Ok(())
+///   }
+/// }
+///
+/// let mut store = Store(Vec::new());
 /// Ok(match hs.on_bytes(bytes)? {
 ///   Some(session_id) => {
-///     let session = lookup(session_id);
-///     let mut established = hs.accept(session, Instant::now(), &mut sink)?;
+///     let (config, next_in, mut seq) = lookup(session_id);
+///     let mut established =
+///       hs.accept(config, next_in, Instant::now(), &mut seq.sink(&mut store))?;
+///     // The Logon reply was asked for, numbered and handed to the store. As
+///     // each write completes, it goes out.
+///     while !store.0.is_empty() {
+///       let seq_num = store.0.remove(0);
+///       seq.persisted(seq_num, Instant::now(), &mut established, &mut store)?;
+///     }
 ///     // write(fd, established.pending_writes())... the Logon reply.
 ///     // Then start the session, which delivers anything the peer sent
 ///     // alongside its Logon — so build whatever that message might need
 ///     // to be answered on before this line, not after it.
-///     let (driver, _progress) = established.start(Instant::now(), &mut sink)?;
+///     let (driver, _progress) =
+///       established.start(Instant::now(), &mut seq.sink(&mut store))?;
 ///     Some(driver)
 ///   }
 ///   None => None,   // partial frame; read more
@@ -337,15 +376,17 @@ impl AcceptorDriver {
     }
   }
 
-  /// Supply the session named by the peer's Logon.
+  /// Supply the settings for the session named by the peer's Logon, and the
+  /// `MsgSeqNum` expected on it.
   ///
-  /// The sink here hears about the exchange itself — the Logon reply going
-  /// out, and anything the state machine has to say about it. Application
+  /// The sink here hears about the exchange itself — the request for our Logon
+  /// reply, and anything the state machine has to say about it. Application
   /// traffic that arrived alongside the Logon is not delivered until
   /// [`EstablishedDriver::start`].
   pub fn accept(
     self,
-    session: Session,
+    session: SessionConfig,
+    next_in_seq_num: u64,
     now: Instant,
     sink: &mut impl EventSink,
   ) -> Result<EstablishedDriver> {
@@ -356,7 +397,7 @@ impl AcceptorDriver {
 
     let established = {
       let mut out = plumbing.output(sink);
-      handshake.accept(session, now, &mut out)?
+      handshake.accept(session, next_in_seq_num, now, &mut out)?
     };
 
     Ok(EstablishedDriver {
@@ -390,7 +431,7 @@ impl SessionDriver {
     delimiter: Option<u8>,
     clock: Clock,
   ) -> Self {
-    let dict = state.session().dict.clone();
+    let dict = state.config().dict.clone();
     Self {
       state,
       decoder: FixDecoder::with_dictionary(dicts, delimiter, dict),
@@ -401,8 +442,8 @@ impl SessionDriver {
     }
   }
 
-  pub fn session(&self) -> &Session {
-    self.state.session()
+  pub fn config(&self) -> &SessionConfig {
+    self.state.config()
   }
 
   pub fn state(&self) -> &SessionState {
@@ -427,7 +468,7 @@ impl SessionDriver {
     !self.out_buf.is_empty()
   }
 
-  /// Complete the logon exchange: process the peer's Logon and emit the
+  /// Complete the logon exchange: process the peer's Logon and ask for the
   /// synchronisation TestRequest.
   pub fn start(
     &mut self,
@@ -444,20 +485,16 @@ impl SessionDriver {
     self.state.start(logon, now, &mut out)
   }
 
-  /// Transmit a message belonging to the logon exchange, which the caller still
-  /// owns. See [`SessionState::send_logon`].
-  pub fn send_logon(
-    &mut self,
-    msg: Message,
-    sink: &mut impl EventSink,
-  ) -> Result<()> {
+  /// Ask for our Logon, for a hand-rolled logon exchange. See
+  /// [`SessionState::request_logon`].
+  pub fn request_logon(&mut self, sink: &mut impl EventSink) -> Result<()> {
     let mut out = DriverOutput {
       encoder: &mut self.encoder,
       bytes: &mut self.out_buf,
       clock: self.clock,
       sink,
     };
-    self.state.send_logon(msg, &mut out)
+    self.state.request_logon(&mut out)
   }
 
   /// Feed bytes straight off the socket.
@@ -574,10 +611,14 @@ impl EstablishedDriver {
     self.state.session_id()
   }
 
-  /// The negotiated session, which is not the one that was supplied: the
-  /// exchange settles the heartbeat interval and the sequence numbers.
-  pub fn session(&self) -> &Session {
-    self.state.session()
+  /// The negotiated settings.
+  pub fn config(&self) -> &SessionConfig {
+    self.state.config()
+  }
+
+  /// The state machine, for its sequence numbers.
+  pub fn state(&self) -> &SessionState {
+    &self.state
   }
 
   /// What the exchange itself concluded, before anything carried is seen.
@@ -585,9 +626,25 @@ impl EstablishedDriver {
     self.progress
   }
 
-  /// The Logon reply, waiting for one write. Send it before
-  /// [`start`](Self::start): the peer is owed its answer ahead of anything
-  /// its own carried message provokes.
+  /// Apply an application command: in practice, the Logon reply it was asked
+  /// for, and whatever the exchange asked for after it.
+  pub fn on_command(
+    &mut self,
+    now: Instant,
+    cmd: Command,
+    sink: &mut impl EventSink,
+  ) -> Result<Progress> {
+    let mut out = self.plumbing.output(sink);
+    let progress = self.state.on_command(cmd, now, &mut out)?;
+    if progress.is_close() {
+      self.progress = progress;
+    }
+    Ok(progress)
+  }
+
+  /// The Logon reply, once it has been sent, waiting for one write. Write it
+  /// before [`start`](Self::start): the peer is owed its answer ahead of
+  /// anything its own carried message provokes.
   pub fn pending_writes(&mut self) -> &mut BytesMut {
     &mut self.plumbing.out_buf
   }
@@ -618,5 +675,38 @@ impl EstablishedDriver {
     // handshake left in the input buffer.
     let progress = driver.on_bytes(now, &[], sink)?;
     Ok((driver, progress))
+  }
+}
+
+impl crate::sequencer::CommandTarget for InitiatorDriver {
+  fn on_command(
+    &mut self,
+    now: Instant,
+    cmd: Command,
+    sink: &mut impl EventSink,
+  ) -> Result<Progress> {
+    InitiatorDriver::on_command(self, now, cmd, sink)
+  }
+}
+
+impl crate::sequencer::CommandTarget for EstablishedDriver {
+  fn on_command(
+    &mut self,
+    now: Instant,
+    cmd: Command,
+    sink: &mut impl EventSink,
+  ) -> Result<Progress> {
+    EstablishedDriver::on_command(self, now, cmd, sink)
+  }
+}
+
+impl crate::sequencer::CommandTarget for SessionDriver {
+  fn on_command(
+    &mut self,
+    now: Instant,
+    cmd: Command,
+    sink: &mut impl EventSink,
+  ) -> Result<Progress> {
+    SessionDriver::on_command(self, now, cmd, sink)
   }
 }

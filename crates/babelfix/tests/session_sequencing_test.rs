@@ -70,15 +70,14 @@ async fn application_messages_round_trip() -> anyhow::Result<()> {
 
   expect_events! {
     { server(server_session_id) awaiting
-      << fix::session::SessionEvent::MessageReceived(
-          block::body(all!(
+      << fix::session::SessionEvent::MessageReceived { msg: block::body(all!(
             block::tag(Fields::ClOrdID, value::string(eq("order-1"))),
             block::tag(Fields::OrderQty, value::float(eq(100.0))),
             block::group(Fields::NoAllocs, 0, block::tag(
               Fields::AllocAccount, value::string(eq("ACCT-A")))),
             block::group(Fields::NoAllocs, 1, block::tag(
               Fields::AllocAccount, value::string(eq("ACCT-B")))),
-          ))) };
+          )), .. } };
   };
 
   // And back the other way.
@@ -92,18 +91,18 @@ async fn application_messages_round_trip() -> anyhow::Result<()> {
 
   expect_events! {
     { client awaiting
-      << fix::session::SessionEvent::MessageReceived(
-          block::body(block::tag(
-            Fields::ClOrdID, value::string(eq("order-2"))))) };
+      << fix::session::SessionEvent::MessageReceived { msg: block::body(block::tag(
+            Fields::ClOrdID, value::string(eq("order-2")))), .. } };
   };
 
   Ok(())
 }
 
 /// The session owns the header fields an application cannot set correctly.
-/// Whatever the application supplies for the sequence number, sending time,
-/// CompIDs or PossDupFlag is replaced, so a stale or hand-rolled message
-/// cannot corrupt the session.
+/// Whatever the application supplies for the sequence number or CompIDs is
+/// replaced, and a new message cannot be a possible duplicate, so a stale or
+/// hand-rolled message cannot corrupt the session. A `SendingTime` the
+/// application supplies is its to choose, and is kept.
 #[test_log::test(tokio::test)]
 async fn session_owns_the_sequence_and_identity_header_fields()
 -> anyhow::Result<()> {
@@ -147,7 +146,7 @@ async fn session_owns_the_sequence_and_identity_header_fields()
       message::tag(Fields::MsgSeqNum, eq("3")),
       message::tag(Fields::SenderCompID, eq("SERVER")),
       message::tag(Fields::TargetCompID, eq("CLIENT")),
-      message::tag(Fields::SendingTime, starts_with("20")),
+      message::tag(Fields::SendingTime, eq("19700101-00:00:00.000")),
       not(message::has_tag(Fields::PossDupFlag)),
     )
   )
@@ -228,9 +227,8 @@ async fn a_sequence_gap_produces_exactly_one_resend_request()
 
   expect_events! {
     { server(server_session_id) awaiting
-      << fix::session::SessionEvent::MessageReceived(
-          block::body(block::tag(
-            Fields::ClOrdID, value::string(eq("after-gap"))))) };
+      << fix::session::SessionEvent::MessageReceived { msg: block::body(block::tag(
+            Fields::ClOrdID, value::string(eq("after-gap")))), .. } };
   };
 
   Ok(())
@@ -296,10 +294,10 @@ async fn a_later_gap_produces_another_resend_request() -> anyhow::Result<()> {
   Ok(())
 }
 
-/// Session layer messages are handled by the session and never surface as
-/// application messages.
+/// A session-level Reject is about a message we sent, so unlike other session
+/// messages it reaches the application — in sequence, like any other.
 #[test_log::test(tokio::test)]
-async fn session_layer_messages_are_not_delivered_to_the_application()
+async fn a_session_level_reject_is_delivered_to_the_application()
 -> anyhow::Result<()> {
   let (server_session_id, server, port) =
     session::serve("SERVER", SessionOptions::default(), "CLIENT", fix44())
@@ -328,13 +326,12 @@ async fn session_layer_messages_are_not_delivered_to_the_application()
     .send(RawMessage::new("D").body(Fields::ClOrdID, "after-reject"))
     .await?;
 
-  // The Reject consumed a sequence number and was not passed up; the next
-  // application message is delivered as normal.
+  // The Reject is about something we sent, so it is passed up, in sequence;
+  // the next application message is delivered as normal.
   expect_events! {
     { server(server_session_id) awaiting
-      << fix::session::SessionEvent::MessageReceived(
-          block::body(block::tag(
-            Fields::ClOrdID, value::string(eq("after-reject"))))) };
+      << fix::session::SessionEvent::MessageReceived { msg: block::body(block::tag(
+            Fields::ClOrdID, value::string(eq("after-reject")))), .. } };
   };
 
   let events = {
@@ -343,11 +340,12 @@ async fn session_layer_messages_are_not_delivered_to_the_application()
   };
   let delivered = events
     .iter()
-    .filter(|e| matches!(e, fix::session::SessionEvent::MessageReceived(_)))
+    .filter(|e| matches!(e, fix::session::SessionEvent::MessageReceived { .. }))
     .count();
   anyhow::ensure!(
-    delivered == 1,
-    "Expected only the application message to be delivered, got {delivered}"
+    delivered == 2,
+    "Expected the Reject and the application message to be delivered, got \
+     {delivered}"
   );
 
   Ok(())
@@ -388,10 +386,10 @@ async fn poss_resend_is_passed_through_to_the_application() -> anyhow::Result<()
     .session(&server_session_id)
     .unwrap()
     .next_event_matching(&matches_pattern!(
-      &fix::session::SessionEvent::MessageReceived(ref anything())
+      &fix::session::SessionEvent::MessageReceived { msg: ref anything(), .. }
     ))
     .await?;
-  let fix::session::SessionEvent::MessageReceived(msg) = event else {
+  let fix::session::SessionEvent::MessageReceived { msg, .. } = event else {
     anyhow::bail!("expected an application message");
   };
 
@@ -444,7 +442,7 @@ async fn event_stream_is_well_formed() -> anyhow::Result<()> {
     .await?;
   expect_events! {
     { server(server_session_id) awaiting
-      << fix::session::SessionEvent::MessageReceived(anything()) };
+      << fix::session::SessionEvent::MessageReceived { msg: anything(), .. } };
   };
 
   client
@@ -516,7 +514,7 @@ fn check_event_stream(
     .ok_or_else(|| anyhow::anyhow!("{side}: recovery never completed"))?;
   if let Some(first_message) = events
     .iter()
-    .position(|e| matches!(e, E::MessageReceived(_)))
+    .position(|e| matches!(e, E::MessageReceived { .. }))
   {
     anyhow::ensure!(
       first_message > recovered_at,
@@ -524,34 +522,26 @@ fn check_event_stream(
     );
   }
 
-  // Sequence numbers only ever move forwards.
-  let (mut last_out, mut last_in) = (0, 0);
+  // Inbound sequence numbers only ever move forwards.
+  let mut last_in = 0;
   for event in events {
-    let state = match event {
-      E::SessionState(state)
-      | E::RawMessageSent(_, state)
-      | E::RawMessageReceived(_, state) => state,
-      _ => continue,
+    let E::MessageReceived { seq_num, .. } = event else {
+      continue;
     };
     anyhow::ensure!(
-      state.next_out_seq_num >= last_out && state.next_in_seq_num >= last_in,
-      "{side}: sequence numbers went backwards: {last_out}/{last_in} then \
-       {}/{}",
-      state.next_out_seq_num,
-      state.next_in_seq_num
+      *seq_num > last_in,
+      "{side}: inbound sequence numbers went backwards: {last_in} then \
+       {seq_num}"
     );
-    last_out = state.next_out_seq_num;
-    last_in = state.next_in_seq_num;
+    last_in = *seq_num;
   }
 
   // Every message this side sent is reported once, in order, with no gaps.
   let sent: Vec<u32> = events
     .iter()
     .filter_map(|e| match e {
-      E::RawMessageSent(msg, _) => {
-        session::raw::tag_value(msg, Fields::MsgSeqNum)
-          .and_then(|v| v.parse().ok())
-      }
+      E::RawMessageSent(msg) => session::raw::tag_value(msg, Fields::MsgSeqNum)
+        .and_then(|v| v.parse().ok()),
       _ => None,
     })
     .collect();

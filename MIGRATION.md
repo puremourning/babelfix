@@ -1,3 +1,106 @@
+# Migrating to application-owned sequence numbers
+
+The session layer no longer allocates outbound sequence numbers, and no longer
+emits session state for you to persist. Every outbound message — admin
+messages included — carries the `MsgSeqNum` the application gave it, and a
+message is persisted *before* it is sent rather than after. The
+[proposal](https://github.com/puremourning/babelfix/blob/main/docs/session_state_management_proposal.md)
+explains why. In short: an application persisting `RawMessageSent` could crash
+with the message on the wire and not in its store, and its next Logon would
+then be too low.
+
+Most applications use the tokio endpoint, where the change is small: supply a
+`SessionStore`, and the session persists each message before sending it.
+
+## At a glance
+
+| Before | After |
+|---|---|
+| `session::Session { next_out_seq_num, next_in_seq_num, heartbeat_interval, dict, time_precision }` | `session::SessionConfig { heartbeat_interval, dict, time_precision }`, plus `sequencer::Resume { next_out_seq_num, next_in_seq_num }` |
+| `endpoint::connect(.., session, config)` | `endpoint::connect(.., SessionSetup::new(config).resume(resume).store(store), config)` |
+| `EndpointEvent::NewSession` answered with `Session` | answered with `SessionSetup` |
+| `SessionEvent::SessionState(Session)` — persist it | gone: outbound messages go to your `SessionStore::persist_outbound`, the inbound watermark to `persist_watermark` |
+| `SessionEvent::RawMessageSent(msg, session)` — persist it to replay later | `RawMessageSent(msg)`: audit and display only. Replay from what `persist_outbound` stored |
+| `SessionEvent::RawMessageReceived(msg, session)` | `RawMessageReceived(msg, received_at)`: when its bytes were read from the socket. Order a journal of both directions by this, not by when you record it |
+| `SessionEvent::MessageReceived(msg)` | `MessageReceived { seq_num, msg }` |
+| — | `SessionEvent::LoggedOn`, once both Logons have been exchanged |
+| Session-level Reject (35=3) swallowed | delivered as `MessageReceived` |
+| `SessionCommand::GetSessionState` → `Session` | → `SessionStatus { next_out_seq_num, next_in_seq_num, watermark }` |
+| — | `SessionCommand::SendRaw(msg)`: persist and send under the message's own `MsgSeqNum` |
+| — | `SessionCommand::Handled(seq_num)`, under `InboundPolicy::Explicit` |
+| `Send` overwrote `SendingTime` | a `SendingTime` you set is kept |
+| `SessionConnection::initiate(.., session, sink)` / `PendingSession::accept(session, sink)` | take a `SessionSetup`; `send` returns the sequence number |
+
+## The tokio endpoint
+
+Implement `store::SessionStore` over your storage. Each method starts a write
+and returns a `'static` future that completes once it is durable. Several may
+be in flight at once.
+
+```rust
+use futures::FutureExt;
+
+struct MyStore { db: Db }
+
+impl babelfix::store::SessionStore for MyStore {
+    fn persist_outbound(&self, seq_num: u64, wire: bytes::Bytes)
+        -> futures::future::BoxFuture<'static, babelfix::Result<()>>
+    {
+        let db = self.db.clone();
+        async move { db.put_message(seq_num, wire).await; Ok(()) }.boxed()
+    }
+
+    fn persist_watermark(&self, next_in_seq_num: u64)
+        -> futures::future::BoxFuture<'static, babelfix::Result<()>>
+    {
+        let db = self.db.clone();
+        async move { db.put_next_in(next_in_seq_num).await; Ok(()) }.boxed()
+    }
+}
+```
+
+Resume a session from what was stored: one past the highest `seq_num` given
+to `persist_outbound`, and the last watermark.
+
+```rust
+let setup = SessionSetup::new(SessionConfig::new(fix44))
+    .resume(Resume { next_out_seq_num, next_in_seq_num })
+    .store(Arc::new(MyStore { db }));
+```
+
+`SessionSetup::new` alone uses `VolatileStore`, which persists nothing and
+completes every write at once. That is the old behaviour, for tools and tests.
+
+Answer a `ResendRequest` from the store, exactly as before. The stored message
+carries its original `SendingTime`, which the session moves to
+`OrigSendingTime`.
+
+By default an inbound message counts as handled once it is delivered
+(`InboundPolicy::OnDelivery`). To resume from the last message you actually
+finished with, use `InboundPolicy::Explicit` and send
+`SessionCommand::Handled(seq_num)`.
+
+## Your own event loop
+
+`SessionDriver` and the handshake drivers now need the application to number
+what they send. Either:
+
+- **Use a `sequencer::Sequencer`** (message-centric). Wrap your sink with
+  `sequencer.sink(&mut app)`. Handle `SeqEvent::Persist` by starting the
+  write, and call `sequencer.persisted(seq_num, now, &mut driver, &mut app)`
+  when it completes. See the `sequencer` module docs.
+- **Number messages yourself** (event-centric). Handle
+  `Event::AdminSendRequired(msg)`: set `MsgSeqNum` (and `SendingTime`, if you
+  want the event's timestamp), and send it back with `Command::Send`. Every
+  `Command::Send` needs a `MsgSeqNum`.
+
+`InitiatorDriver::start` and `AcceptorDriver::accept` take the inbound
+sequence number to expect alongside a `SessionConfig`. Both ask for their
+Logon with `AdminSendRequired` rather than sending one. `SessionDriver::send_logon`
+is gone; a hand-rolled handshake uses `request_logon`.
+
+---
+
 # Migrating to the `Message` API
 
 babelfix used to have two message types: `FixMessage`, a flat list of tags

@@ -4,152 +4,87 @@
 //! application message can therefore arrive together, and the handshake must
 //! hand both to the session without waiting for another read.
 
-use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+mod support;
+
+use std::time::Instant;
 
 use babelfix_core as fix;
-use babelfix_schema::codesets::{EncryptMethod, Side};
+use babelfix_schema::codesets::EncryptMethod;
 use babelfix_schema::fields::{
-  ClOrdID, EncryptMethod, HeartBtInt, OrderQty, Side, Symbol,
+  EncryptMethod, HeartBtInt, MsgSeqNum, SenderCompID, SendingTime, TargetCompID,
 };
-use babelfix_schema::tags;
-use fix::driver::{
-  AcceptorDriver, DriverConfig, InitiatorDriver, SessionDriver,
-};
-use fix::message::{Dictionaries, Dictionary, Message};
-use fix::session::{Command, Event, Session, SessionIdentifier, SessionState};
+use fix::codec::FixEncoder;
+use fix::driver::{AcceptorDriver, InitiatorDriver};
+use fix::message::Message;
+use fix::sequencer::{InboundPolicy, Resume};
+use support::*;
 
-static DICTS: LazyLock<Arc<Dictionaries>> =
-  LazyLock::new(|| Dictionaries::standard().unwrap());
-
-fn fix44() -> Arc<Dictionary> {
-  DICTS.get("FIX.4.4").unwrap().clone()
-}
-
-const DELIM: u8 = b'|';
-const HEARTBEAT: Duration = Duration::from_secs(30);
-
-/// A fixed clock keeps every encoded frame deterministic.
-fn clock() -> chrono::DateTime<chrono::Utc> {
-  chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap()
-}
-
-#[derive(Default)]
-struct Seen {
-  app_messages: Vec<String>,
-}
-
-impl Seen {
-  fn sink(&mut self) -> impl FnMut(Event<'_>) -> fix::Result<()> + '_ {
-    move |event: Event<'_>| {
-      if let Event::MessageReceived(msg) = event {
-        self.app_messages.push(
-          String::from_utf8_lossy(
-            msg.body().raw(tags::ClOrdID).unwrap_or_default(),
-          )
-          .into_owned(),
-        );
-      }
-      Ok(())
-    }
-  }
-}
-
-fn session() -> Session {
-  let mut session = Session::new(fix44());
-  session.heartbeat_interval = HEARTBEAT;
-  session
-}
-
-fn id(us: &str, them: &str) -> SessionIdentifier {
-  SessionIdentifier {
-    begin_string: "FIX.4.4".into(),
-    sender_comp_id: us.into(),
-    target_comp_id: them.into(),
-  }
-}
-
-fn config() -> DriverConfig {
-  DriverConfig {
-    dicts: DICTS.clone(),
-    delimiter: Some(DELIM),
-    clock,
-    logon_timeout: HEARTBEAT,
-    max_frame_len: fix::codec::DEFAULT_MAX_FRAME_LEN,
-  }
-}
-
-fn logon_message() -> Message {
-  let mut msg = Message::new(&fix44(), "A");
+/// A frame as the peer `us` would put it on the wire to `them`.
+fn frame(mut msg: Message, seq: u64, us: &str, them: &str) -> Message {
   msg
-    .body_mut()
-    .set(HeartBtInt, 30u64)
-    .set(EncryptMethod, EncryptMethod::None);
+    .header_mut()
+    .set(MsgSeqNum, seq)
+    .set(SenderCompID, us)
+    .set(TargetCompID, them)
+    .set_raw(SendingTime, b"20231114-22:13:20.000000000");
   msg
-}
-
-fn order(cl_ord_id: &str) -> Message {
-  let mut msg = Message::new(&fix44(), "D");
-  msg
-    .body_mut()
-    .set(ClOrdID, cl_ord_id)
-    .set(Symbol, "AAPL")
-    .set(Side, Side::Buy)
-    .set(OrderQty, 100u64);
-  msg
-}
-
-fn driver(us: &str, them: &str, now: Instant) -> SessionDriver {
-  let state = SessionState::new(id(us, them), session(), now);
-  SessionDriver::new(state, DICTS.clone(), Some(DELIM), clock)
 }
 
 /// Encode a Logon followed immediately by an application message, as one
 /// socket read could present them to the receiver.
-fn logon_and_order(us: &str, them: &str, now: Instant) -> Vec<u8> {
-  let mut peer = driver(us, them, now);
-  let mut ignore = ();
-  peer.send_logon(logon_message(), &mut ignore).unwrap();
-  let _ = peer
-    .on_command(now, Command::Send(order("order-1")), &mut ignore)
+fn logon_and_order(us: &str, them: &str) -> Vec<u8> {
+  let mut logon = Message::new(&fix44(), "A");
+  logon
+    .body_mut()
+    .set(HeartBtInt, 30u64)
+    .set(EncryptMethod, EncryptMethod::None);
+
+  let mut encoder = FixEncoder::new(Some(DELIM));
+  let mut wire = bytes::BytesMut::new();
+  encoder
+    .encode(&frame(logon, 1, us, them), &mut wire)
     .unwrap();
-  peer.pending_writes().to_vec()
+  encoder
+    .encode(&frame(order("order-1"), 2, us, them), &mut wire)
+    .unwrap();
+  wire.to_vec()
 }
 
 #[test]
 fn initiator_delivers_a_message_carried_with_the_logon() {
   let now = Instant::now();
-  let mut ignore = ();
+  let mut app = App::default();
+  let mut seq = sequencer(Resume::new(), InboundPolicy::OnDelivery);
   let mut handshake = InitiatorDriver::start(
     id("CLIENT", "SERVER"),
     session(),
+    1,
     config(),
     now,
-    &mut ignore,
+    &mut seq.sink(&mut app),
   )
   .unwrap();
-  let wire = logon_and_order("SERVER", "CLIENT", now);
-  let mut seen = Seen::default();
+  // Our Logon goes out first: the peer is answering it.
+  let _ = settle(&mut seq, &mut handshake, &mut app, now);
+  assert!(handshake.has_pending_writes(), "our Logon was not sent");
 
-  let mut sink = seen.sink();
-  let established = handshake
-    .on_bytes(now, &wire, &mut sink)
+  let wire = logon_and_order("SERVER", "CLIENT");
+  let mut established = handshake
+    .on_bytes(now, &wire, &mut seq.sink(&mut app))
     .unwrap()
     .expect("the peer's Logon establishes a session");
-  drop(sink);
+  let _ = settle(&mut seq, &mut established, &mut app, now);
 
   assert!(
-    seen.app_messages.is_empty(),
+    app.app_messages.is_empty(),
     "the initiator delivered the carried message before it was started, \
      so an application had nowhere to reply to it"
   );
 
-  let mut sink = seen.sink();
-  let _ = established.start(now, &mut sink).unwrap();
-  drop(sink);
+  let _ = established.start(now, &mut seq.sink(&mut app)).unwrap();
 
   assert_eq!(
-    seen.app_messages,
+    app.app_messages,
     vec!["order-1"],
     "the initiator left the message following Logon buffered"
   );
@@ -158,31 +93,35 @@ fn initiator_delivers_a_message_carried_with_the_logon() {
 #[test]
 fn acceptor_delivers_a_message_carried_with_the_logon() {
   let now = Instant::now();
-  let wire = logon_and_order("CLIENT", "SERVER", now);
+  let wire = logon_and_order("CLIENT", "SERVER");
   let mut handshake = AcceptorDriver::new(config(), now);
   let session_id = handshake
     .on_bytes(&wire)
     .unwrap()
     .expect("the peer's Logon identifies a session");
   assert_eq!(session_id, &id("SERVER", "CLIENT"));
-  let mut seen = Seen::default();
 
-  let mut sink = seen.sink();
-  let established = handshake.accept(session(), now, &mut sink).unwrap();
-  drop(sink);
+  let mut app = App::default();
+  let mut seq = sequencer(Resume::new(), InboundPolicy::OnDelivery);
+  let mut established = handshake
+    .accept(session(), 1, now, &mut seq.sink(&mut app))
+    .unwrap();
+  let _ = settle(&mut seq, &mut established, &mut app, now);
 
   assert!(
-    seen.app_messages.is_empty(),
+    app.app_messages.is_empty(),
     "the acceptor delivered the carried message before it was started, \
      so an application had nowhere to reply to it"
   );
+  assert!(
+    established.has_pending_writes(),
+    "the Logon reply was not sent"
+  );
 
-  let mut sink = seen.sink();
-  let _ = established.start(now, &mut sink).unwrap();
-  drop(sink);
+  let _ = established.start(now, &mut seq.sink(&mut app)).unwrap();
 
   assert_eq!(
-    seen.app_messages,
+    app.app_messages,
     vec!["order-1"],
     "the acceptor left the message following Logon buffered"
   );

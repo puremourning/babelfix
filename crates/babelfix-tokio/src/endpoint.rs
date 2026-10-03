@@ -1,13 +1,12 @@
 //! TCP endpoint layer: accept or initiate FIX connections.
 //!
-//! The endpoint owns the wire framing — an internal `tokio_util` codec that
-//! splits the byte stream into [`Message`](crate::message::Message)s and verifies
-//! `BodyLength`/`CheckSum` — and spawns a [`session`] task per connection.
+//! The endpoint owns the sockets and spawns a [`session`] task per connection,
+//! each driving one of the core's [`driver`] types.
 //!
 //! * [`serve`] binds a listener and returns an [`Acceptor`]. Iterate its `events`
 //!   receiver: reply to [`EndpointEvent::NewSession`] with a
-//!   [`Session`](crate::session::Session) for the negotiated version, then take
-//!   the [`SessionHandle`](crate::session::SessionHandle) from
+//!   [`SessionSetup`](crate::session::SessionSetup) for the negotiated version,
+//!   then take the [`SessionHandle`](crate::session::SessionHandle) from
 //!   [`EndpointEvent::SessionConnected`].
 //! * [`connect`] initiates an outbound connection (with reconnect and backoff)
 //!   and returns an [`Initiator`], whose
@@ -38,14 +37,24 @@
 //! while let Some(event) = endpoint.events.next().await {
 //!     match event {
 //!         endpoint::EndpointEvent::NewSession { session_id, response } => {
-//!             // Answer with the sequence numbers you persisted for this peer.
-//!             let session = dicts
+//!             // Answer with where this peer's session resumes, the store
+//!             // its messages are persisted to, and when an inbound message
+//!             // counts as handled: here, once the application says so with
+//!             // `SessionCommand::Handled`.
+//!             let setup = dicts
 //!                 .for_begin_string(session_id.begin_string.as_bytes())
-//!                 .map(|d| session::Session::new(d.clone()))
+//!                 .map(|d| {
+//!                     session::SessionSetup::new(
+//!                         session::SessionConfig::new(d.clone()),
+//!                     )
+//!                     .inbound(session::InboundPolicy::Explicit(
+//!                         session::WatermarkMode::Contiguous,
+//!                     ))
+//!                 })
 //!                 .ok_or_else(|| babelfix_tokio::Error::unspecified(
 //!                     "unknown FIX version",
 //!                 ));
-//!             let _ = response.send(session);
+//!             let _ = response.send(setup);
 //!         }
 //!         endpoint::EndpointEvent::SessionConnected(handle) => {
 //!             // Drive `handle` — see the `session` module docs.
@@ -59,15 +68,16 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::SinkExt;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
 use tracing::{Instrument, error, info, trace};
 
-use super::*;
+use babelfix_core::driver::{AcceptorDriver, DriverConfig, InitiatorDriver};
 
-use std::time::Duration;
+use super::*;
 
 /// Everything an endpoint needs beyond the addresses and the dictionaries.
 ///
@@ -154,13 +164,15 @@ impl EndpointConfig {
 /// What an [`Acceptor`] tells the application about each connection.
 pub enum EndpointEvent {
   /// A peer has sent a valid Logon for `session_id`. Answer on `response`
-  /// with the [`Session`](session::Session) to resume — the sequence numbers
-  /// you persisted for this peer, and the dictionary for its version. An
-  /// `Err`, or dropping `response`, refuses the session: the connection is
-  /// closed without a Logon reply.
+  /// with the [`SessionSetup`](session::SessionSetup) to resume — the settings
+  /// and dictionary for its version, where you persisted it had got to, the
+  /// store to persist to, and when an inbound message counts as handled (its
+  /// [`InboundPolicy`](session::InboundPolicy)). An `Err`, or dropping
+  /// `response`, refuses the session: the connection is closed without a
+  /// Logon reply.
   NewSession {
     session_id: session::SessionIdentifier,
-    response: oneshot::Sender<Result<session::Session>>,
+    response: oneshot::Sender<Result<session::SessionSetup>>,
   },
   /// A connection closed, or sent something other than a valid Logon, before
   /// it named a session. Carries the peer's address.
@@ -198,21 +210,17 @@ pub struct Acceptor {
   pub join_handle: tokio::task::JoinHandle<Result<()>>,
 }
 
-/// Adapts [`babelfix_core::codec::FixDecoder`] to [`tokio_util::codec`].
-///
-/// The framing itself lives in the core crate and is an ordinary synchronous
-/// function; this exists only so `FramedRead` can drive it.
-struct FixDecoder(babelfix_core::codec::FixDecoder);
-
-impl tokio_util::codec::Decoder for FixDecoder {
-  type Item = crate::message::Message;
-  type Error = Error;
-
-  fn decode(
-    &mut self,
-    data: &mut bytes::BytesMut,
-  ) -> std::result::Result<Option<Self::Item>, Self::Error> {
-    self.0.decode(data)
+/// The core driver's configuration, from the endpoint's.
+fn driver_config(
+  dicts: Arc<crate::message::Dictionaries>,
+  config: &EndpointConfig,
+) -> DriverConfig {
+  DriverConfig {
+    dicts,
+    delimiter: config.delimiter,
+    clock: session::wall_clock,
+    logon_timeout: config.logon_timeout,
+    max_frame_len: config.max_frame_len,
   }
 }
 
@@ -256,7 +264,7 @@ pub fn connect(
   endpoints: Vec<(String, u16)>,
   dicts: Arc<crate::message::Dictionaries>,
   session_id: session::SessionIdentifier,
-  session: session::Session,
+  setup: session::SessionSetup,
   config: EndpointConfig,
 ) -> Result<Initiator> {
   if endpoints.is_empty() {
@@ -306,7 +314,7 @@ pub fn connect(
               stream,
               dicts,
               session_id,
-              session,
+              setup,
               config,
               session_recv,
               session_event_sender,
@@ -341,24 +349,12 @@ async fn initiate_connection(
   mut stream: tokio::net::TcpStream,
   dicts: Arc<crate::message::Dictionaries>,
   session_id: session::SessionIdentifier,
-  session: session::Session,
+  setup: session::SessionSetup,
   config: EndpointConfig,
   mut session_recv: mpsc::Receiver<session::SessionCommand>,
   session_event_sender: mpsc::Sender<session::SessionEvent>,
 ) -> Result<()> {
-  let delimiter = config.delimiter;
-  let (rx, tx) = stream.split();
-  let mut rx = tokio_util::codec::FramedRead::new(
-    rx,
-    FixDecoder(
-      babelfix_core::codec::FixDecoder::with_dictionary(
-        dicts.clone(),
-        delimiter,
-        session.dict.clone(),
-      )
-      .with_max_frame_len(config.max_frame_len),
-    ),
-  );
+  let (mut rx, tx) = stream.split();
 
   let span = tracing::info_span!(
     "ClientSession",
@@ -367,66 +363,104 @@ async fn initiate_connection(
   );
 
   async {
-    let mut out =
-      session::PendingOutput::new(delimiter, session_event_sender.clone());
-    let handshake = babelfix_core::session::InitiatorHandshake::start(
-      session_id,
-      session,
-      config.logon_timeout,
-      std::time::Instant::now(),
-      &mut out,
-    )?;
-
-    let mut runner = session::SessionRunner::new(tx, out);
-    runner.flush().await?;
-
-    // What to send, in what order, and what to make of the answer is the
-    // handshake's business. This only supplies one frame and a deadline.
-    let frame = tokio::select! {
-      _ = tokio::time::sleep_until(
-        tokio::time::Instant::from_std(handshake.deadline()),
-      ) => {
-        return Err(Error::connection_failed(format!(
-          "Logon exchange timed out after {:?}", config.logon_timeout,
-        )));
-      }
-      msg = rx.next() => match msg {
-        Some(Ok(msg)) => msg,
-        Some(Err(e)) => {
-          return Err(Error::connection_failed(format!(
-            "Failed to read first message: {e}"
-          )));
-        }
-        None => {
-          return Err(Error::connection_failed(
-            "Connection closed before first message",
-          ));
-        }
-      },
-    };
-
-    let established = handshake.on_peer_logon(
-      frame,
-      std::time::Instant::now(),
-      runner.output(),
-    )?;
-    runner.flush().await?;
-    let mut state = established.state;
-    let progress = established.progress;
-
-    // Create a disconnecter to ensure we send a disconnect event when the
-    // session is dropped
+    // Make sure the application hears the session end, however it ends.
     let disconnector = Disconnector {
       session_event_sender: session_event_sender.clone(),
     };
 
+    let mut runner = session::SessionRunner::new(
+      tx,
+      setup.sequenced(&session_id),
+      session::Delivery::new(session_event_sender.clone()),
+    );
+
+    // Our Logon is asked for, numbered, persisted and only then sent: the
+    // exchange waits for the store.
+    let mut handshake = {
+      let runner = &mut runner;
+      InitiatorDriver::start(
+        session_id,
+        setup.config,
+        setup.resume.next_in_seq_num,
+        driver_config(dicts, &config),
+        Instant::now(),
+        &mut runner.sequenced.sink(&mut runner.delivery),
+      )?
+    };
+    // Nothing about sending our Logon can end the session.
+    let _ = runner
+      .sequenced
+      .settle(&mut handshake, &mut runner.delivery)
+      .await?;
+    runner.flush(handshake.pending_writes()).await?;
+
+    // What to send, in what order, and what to make of the answer is the
+    // handshake's business. This only supplies bytes and a deadline.
+    let deadline = tokio::time::Instant::from_std(
+      handshake
+        .deadline()
+        .unwrap_or_else(|| Instant::now() + config.logon_timeout),
+    );
+    let mut established = loop {
+      let bytes = tokio::select! {
+        _ = tokio::time::sleep_until(deadline) => {
+          return Err(Error::connection_failed(format!(
+            "Logon exchange timed out after {:?}", config.logon_timeout,
+          )));
+        }
+        read = runner.read(&mut rx) => match read? {
+          Some(bytes) => bytes,
+          None => {
+            return Err(Error::connection_failed(
+              "Connection closed before the logon exchange completed",
+            ));
+          }
+        },
+      };
+      let established = handshake.on_bytes(
+        Instant::now(),
+        &bytes,
+        &mut runner.sequenced.sink(&mut runner.delivery),
+      )?;
+      if let Some(established) = established {
+        break established;
+      }
+    };
+
+    let mut progress = established.progress();
+    if !progress.is_close() {
+      progress = runner
+        .sequenced
+        .settle(&mut established, &mut runner.delivery)
+        .await?;
+    }
+    runner.flush(established.pending_writes()).await?;
+
     // A session refused during the exchange — a Logon whose sequence number is
     // too low, say — is still a session the application must hear about: the
-    // Logout explaining why has already been emitted.
+    // events explaining why have already been emitted.
     let result = if progress.is_close() {
       Ok(())
     } else {
-      runner.run(&mut state, &mut rx, &mut session_recv).await
+      // Anything the peer sent alongside its Logon is delivered here, now the
+      // application can be reached.
+      let (mut driver, progress) = established.start(
+        Instant::now(),
+        &mut runner.sequenced.sink(&mut runner.delivery),
+      )?;
+      let progress = if progress.is_close() {
+        progress
+      } else {
+        runner
+          .sequenced
+          .complete_ready(&mut *driver, &mut runner.delivery)?
+      };
+      runner.flush(driver.pending_writes()).await?;
+      if progress.is_close() {
+        Ok(())
+      } else {
+        runner.run(&mut driver, &mut rx, &mut session_recv).await
+      }
     };
     drop(disconnector);
     result
@@ -455,89 +489,75 @@ async fn accept_connection(
   dicts: Arc<crate::message::Dictionaries>,
   config: EndpointConfig,
 ) -> Result<()> {
-  let delimiter = config.delimiter;
   info!("Handling new client connection");
   let partner = stream
     .peer_addr()
     .map_or("Unknown".to_string(), |addr| addr.to_string());
-  let (rx, tx) = stream.split();
-  let mut rx = tokio_util::codec::FramedRead::new(
-    rx,
-    FixDecoder(
-      babelfix_core::codec::FixDecoder::new(dicts.clone(), delimiter)
-        .with_max_frame_len(config.max_frame_len),
-    ),
-  );
+  let (mut rx, tx) = stream.split();
 
   let (session_send, mut session_recv) =
     mpsc::channel::<session::SessionCommand>(config.channel_depth);
   let (session_event_sender, session_event_recv) =
     mpsc::channel::<session::SessionEvent>(config.channel_depth);
 
-  let mut handshake = babelfix_core::session::AcceptorHandshake::new(
-    config.logon_timeout,
-    std::time::Instant::now(),
-  );
+  let mut handshake =
+    AcceptorDriver::new(driver_config(dicts, &config), Instant::now());
 
   // Nothing session-scoped can happen until the peer's Logon names a session,
-  // because every session on this port shares the listener. Read exactly one
-  // frame; note there is no event sink here, because there is as yet no session
-  // for an event to be about.
-  let logon_frame = tokio::select! {
-    _ = tokio::time::sleep(config.logon_timeout) => {
-      return Err(Error::connection_failed(format!(
-        "Logon exchange timed out after {:?}", config.logon_timeout,
-      )));
-    },
-    msg_event = rx.next() => {
-      match msg_event {
-        Some(Ok(msg)) => msg,
-        Some(Err(e)) => {
-          return Err(Error::connection_failed(format!(
-            "Failed to read first message: {e}"
-          )));
-        }
-        None => {
-          event_sender
-            .send(EndpointEvent::SessionInvalid(partner))
-            .await
-            .map_err(crate::chan_closed)?;
-          return Err(Error::connection_failed(
-            "Connection closed before first message",
-          ));
-        }
-      }
-    },
-  };
-
+  // because every session on this port shares the listener. Note there is no
+  // event sink here, because there is as yet no session for an event to be
+  // about.
+  //
   // A first frame that is not a Logon is refused here, before the application
-  // is told anything about it. It used to be validated *after* `NewSession` and
-  // `SessionConnected` had already gone out, so an application would do its
-  // persisted-state lookup, and be handed a session handle, for a connection
-  // about to be dropped.
-  let session_id = match handshake.identify(logon_frame) {
-    Ok(id) => id.clone(),
-    Err(e) => {
-      // There is no session to report this against — that is the whole point —
-      // so an invalid peer is named by its address instead.
-      event_sender
-        .send(EndpointEvent::SessionInvalid(partner))
-        .await
-        .map_err(crate::chan_closed)?;
-      return Err(e);
+  // is told anything about it: the handshake validates it before deriving an
+  // identity from it.
+  let deadline = tokio::time::Instant::from_std(handshake.deadline());
+  let mut read_buf = bytes::BytesMut::with_capacity(4096);
+  let mut logon_received_at = session::wall_clock();
+  let session_id = loop {
+    let read = tokio::select! {
+      _ = tokio::time::sleep_until(deadline) => {
+        return Err(Error::connection_failed(format!(
+          "Logon exchange timed out after {:?}", config.logon_timeout,
+        )));
+      },
+      read = tokio::io::AsyncReadExt::read_buf(&mut rx, &mut read_buf) => read,
+    };
+    let identified = match read {
+      Ok(0) | Err(_) => Err(Error::connection_failed(
+        "Connection closed before first message",
+      )),
+      Ok(_) => {
+        logon_received_at = session::wall_clock();
+        let bytes = std::mem::take(&mut read_buf);
+        handshake.on_bytes(&bytes).map(|id| id.cloned())
+      }
+    };
+    match identified {
+      Ok(Some(id)) => break id,
+      Ok(None) => continue,
+      Err(e) => {
+        // There is no session to report this against — that is the whole
+        // point — so an invalid peer is named by its address instead.
+        event_sender
+          .send(EndpointEvent::SessionInvalid(partner))
+          .await
+          .map_err(crate::chan_closed)?;
+        return Err(e);
+      }
     }
   };
 
-  let (set_session, get_session) =
-    oneshot::channel::<Result<session::Session>>();
+  let (set_setup, get_setup) =
+    oneshot::channel::<Result<session::SessionSetup>>();
   event_sender
     .send(EndpointEvent::NewSession {
       session_id: session_id.clone(),
-      response: set_session,
+      response: set_setup,
     })
     .await
     .map_err(crate::chan_closed)?;
-  let session = get_session.await.map_err(crate::chan_closed)??;
+  let setup = get_setup.await.map_err(crate::chan_closed)??;
 
   let span = tracing::info_span!(
     "ServerSession",
@@ -552,14 +572,13 @@ async fn accept_connection(
       session_event_sender: session_event_sender.clone(),
     };
 
-    let mut out =
-      session::PendingOutput::new(delimiter, session_event_sender.clone());
-    let established =
-      handshake.accept(session, std::time::Instant::now(), &mut out)?;
-
-    let mut runner = session::SessionRunner::new(tx, out);
-    let mut state = established.state;
-    let progress = established.progress;
+    let mut runner = session::SessionRunner::new(
+      tx,
+      setup.sequenced(&session_id),
+      session::Delivery::new(session_event_sender.clone()),
+    );
+    // The peer's Logon is reported by `accept`, below.
+    runner.delivery.received_at = logon_received_at;
 
     // The handle is published *before* the first flush. Until the application
     // holds the receiver, nothing is draining the event channel, so a session
@@ -579,15 +598,51 @@ async fn accept_connection(
       .await
       .map_err(crate::chan_closed)?;
 
-    runner.flush().await?;
+    // Our Logon reply — and whatever the peer's Logon provoked after it — is
+    // numbered, persisted, then sent.
+    let mut established = {
+      let runner = &mut runner;
+      handshake.accept(
+        setup.config,
+        setup.resume.next_in_seq_num,
+        Instant::now(),
+        &mut runner.sequenced.sink(&mut runner.delivery),
+      )?
+    };
+    let mut progress = established.progress();
+    if !progress.is_close() {
+      progress = runner
+        .sequenced
+        .settle(&mut established, &mut runner.delivery)
+        .await?;
+    }
+    runner.flush(established.pending_writes()).await?;
 
     // A session refused during the exchange — a Logon whose sequence number is
     // too low, say — is still a session the application must hear about: the
-    // Logout explaining why has already been emitted.
-    let result = if progress.is_close() {
+    // Logout explaining why has already been sent.
+    let result = if progress.is_close() || established.progress().is_close() {
       Ok(())
     } else {
-      runner.run(&mut state, &mut rx, &mut session_recv).await
+      // Anything the peer sent alongside its Logon is delivered here, after
+      // our reply has gone.
+      let (mut driver, progress) = established.start(
+        Instant::now(),
+        &mut runner.sequenced.sink(&mut runner.delivery),
+      )?;
+      let progress = if progress.is_close() {
+        progress
+      } else {
+        runner
+          .sequenced
+          .complete_ready(&mut *driver, &mut runner.delivery)?
+      };
+      runner.flush(driver.pending_writes()).await?;
+      if progress.is_close() {
+        Ok(())
+      } else {
+        runner.run(&mut driver, &mut rx, &mut session_recv).await
+      }
     };
     drop(disconnector);
     result
@@ -598,8 +653,9 @@ async fn accept_connection(
 
 /// Accept FIX connections on `addr`, speaking any version in `dicts`.
 ///
-/// Answer each [`EndpointEvent::NewSession`] with the sequence numbers you have
-/// persisted for that peer, then take the
+/// Answer each [`EndpointEvent::NewSession`] with the
+/// [`SessionSetup`](session::SessionSetup) for that peer — which is where its
+/// store, resume point and inbound policy are chosen — then take the
 /// [`SessionHandle`](session::SessionHandle) from
 /// [`EndpointEvent::SessionConnected`].
 pub async fn serve(
