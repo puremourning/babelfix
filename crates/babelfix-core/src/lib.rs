@@ -30,6 +30,7 @@ pub use babelfix_repo as repository;
 pub mod codec;
 pub mod driver;
 pub mod message;
+pub mod reorder;
 pub mod sequencer;
 pub mod session;
 pub mod time;

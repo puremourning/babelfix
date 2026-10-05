@@ -190,6 +190,13 @@ impl SessionState {
     self.highest_sent
   }
 
+  /// The highest `MsgSeqNum` accepted for sending, or 0. Beyond
+  /// [`highest_sent`](Self::highest_sent) while a replay holds messages back.
+  /// A [`Command::Send`] must be numbered above it.
+  pub fn highest_accepted(&self) -> u64 {
+    self.highest_accepted
+  }
+
   /// Whether both Logons have been exchanged.
   pub fn is_logged_on(&self) -> bool {
     self.logon_sent && self.peer_logon_received
