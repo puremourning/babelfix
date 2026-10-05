@@ -92,7 +92,10 @@ what they send. Either:
 - **Number messages yourself** (event-centric). Handle
   `Event::AdminSendRequired(msg)`: set `MsgSeqNum` (and `SendingTime`, if you
   want the event's timestamp), and send it back with `Command::Send`. Every
-  `Command::Send` needs a `MsgSeqNum`.
+  `Command::Send` needs a `MsgSeqNum`. If more than one thread numbers and
+  sends, put a `reorder::ReorderWindow` in front of the driver: it holds a
+  message that arrives ahead of its turn, briefly, so that racing senders
+  still reach the wire in number order.
 
 `InitiatorDriver::start` and `AcceptorDriver::accept` take the inbound
 sequence number to expect alongside a `SessionConfig`. Both ask for their
