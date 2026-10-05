@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -38,11 +38,11 @@ pre-release-commit-message = "Release v{{version}}"
 anyhow = "1.0"
 futures = "0.3"
 tokio = { version = "1.0", features = ["full"] }
-babelfix = { path = "crates/babelfix", version = "0.2.0" }
-babelfix-core = { path = "crates/babelfix-core", version = "0.2.0" }
-babelfix-schema = { path = "crates/babelfix-schema", version = "0.2.0" }
-babelfix-tokio = { path = "crates/babelfix-tokio", version = "0.2.0" }
-babelfix-repo = { path = "crates/babelfix-repo", version = "0.2.0" }
+babelfix = { path = "crates/babelfix", version = "0.3.0" }
+babelfix-core = { path = "crates/babelfix-core", version = "0.3.0" }
+babelfix-schema = { path = "crates/babelfix-schema", version = "0.3.0" }
+babelfix-tokio = { path = "crates/babelfix-tokio", version = "0.3.0" }
+babelfix-repo = { path = "crates/babelfix-repo", version = "0.3.0" }
 tracing = "0.1"
 bytes = "1.0"
 tokio-util = { version = "0.7", features = ["codec"] }
