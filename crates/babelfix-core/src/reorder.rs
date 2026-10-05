@@ -137,9 +137,10 @@ impl ReorderWindow {
   /// Release `msg` through `release` if it is next, along with anything held
   /// that follows it, or hold it until it is.
   ///
-  /// Anything that has waited past `max_wait` by `now` is released first. A
-  /// message without a usable `MsgSeqNum` goes straight through, for the
-  /// session to refuse.
+  /// Anything that has waited past `max_wait` by `now` is released too:
+  /// after `msg` if `msg` is the one it was waiting for, and before it
+  /// otherwise. A message without a usable `MsgSeqNum` goes straight
+  /// through, for the session to refuse.
   ///
   /// An error from `release` is returned at once. The message it was given is
   /// gone, and anything still held stays held.
@@ -156,6 +157,17 @@ impl ReorderWindow {
       Ok(Some(n)) if n > 0 => n,
       _ => return release(msg).map(Offered::Taken),
     };
+    // The message that fills the gap goes first, with the run it
+    // completes: had it come a moment sooner it would have, and
+    // expiring what waits behind it first would make it late.
+    if self.next == Some(seq_num) {
+      self.next = Some(seq_num + 1);
+      if release(msg)?.is_close() || self.release_run(&mut release)?.is_close()
+      {
+        return Ok(Offered::Taken(Progress::Close));
+      }
+      return self.expire(now, &mut release).map(Offered::Taken);
+    }
     if self.expire(now, &mut release)?.is_close() {
       return Ok(Offered::Taken(Progress::Close));
     }
@@ -167,14 +179,6 @@ impl ReorderWindow {
     if seq_num < next {
       return Ok(Offered::Late(msg));
     }
-    if seq_num == next {
-      self.next = Some(next + 1);
-      if release(msg)?.is_close() {
-        return Ok(Offered::Taken(Progress::Close));
-      }
-      return self.release_run(&mut release).map(Offered::Taken);
-    }
-
     let len = self.slots.len() as u64;
     if seq_num - next > len {
       // Too far ahead to wait for the gap: give up on everything up to it.

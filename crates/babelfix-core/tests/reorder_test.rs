@@ -130,6 +130,22 @@ fn an_expired_gap_is_given_up_on_by_the_next_offer() {
 }
 
 #[test]
+fn the_message_a_gap_waited_for_is_not_late_however_late_it_comes() {
+  let mut wire = Wire::new(10);
+  let now = Instant::now();
+  let _ = taken(wire.offer(1, now));
+  let _ = taken(wire.offer(3, now));
+  let _ = taken(wire.offer(5, now));
+
+  // 3 and 5 have both expired, but 2 is what 3 was waiting for: it goes
+  // first, and 3 with it; 5 has waited for 4 long enough.
+  let _ = taken(wire.offer(2, now + WAIT));
+  assert_eq!(wire.sent, [1, 2, 3, 5]);
+  assert_eq!(wire.window.held(), 0);
+  assert_eq!(wire.window.next_seq_num(), Some(6));
+}
+
+#[test]
 fn expire_releases_without_an_offer() {
   let mut wire = Wire::new(10);
   let now = Instant::now();
