@@ -104,6 +104,8 @@ pub struct App {
   pub recovery_completed: bool,
   pub logged_on: bool,
   pub resend_requested: Option<(u64, u64)>,
+  /// Whether the sequencer passed on an event it should have kept.
+  pub leaked: Option<String>,
 }
 
 impl SeqSink for App {
@@ -135,6 +137,11 @@ impl SeqSink for App {
         end_seq_no,
         ..
       }) => self.resend_requested = Some((begin_seq_no, end_seq_no)),
+      SeqEvent::Session(
+        e @ (Event::AdminSendRequired(_) | Event::InboundAdvanced { .. }),
+      ) => {
+        self.leaked.get_or_insert(format!("{e:?}"));
+      }
       SeqEvent::Session(_) => {}
     }
     Ok(())

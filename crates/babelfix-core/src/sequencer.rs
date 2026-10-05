@@ -141,9 +141,11 @@ pub enum Persist<'a> {
 pub enum SeqEvent<'a> {
   /// A write the session depends on.
   Persist(Persist<'a>),
-  /// Everything else, as the session emitted it. Admin requests
-  /// ([`Event::AdminSendRequired`]) never appear here: the sequencer numbers
-  /// and persists them itself.
+  /// Everything else, as the session emitted it. Two kinds of event never
+  /// appear here, because the sequencer deals with them itself: admin
+  /// requests ([`Event::AdminSendRequired`]), which it numbers and persists,
+  /// and [`Event::InboundAdvanced`], which it folds into the watermark and
+  /// reports as [`Persist::Watermark`].
   Session(Event<'a>),
 }
 
@@ -529,9 +531,6 @@ impl Sequencer {
         if self.policy == InboundPolicy::Explicit(WatermarkMode::Highest) {
           self.highest_handled = self.highest_handled.max(next_in_seq_num);
         }
-        app.event(SeqEvent::Session(Event::InboundAdvanced {
-          next_in_seq_num,
-        }))?;
         self.persist_watermark(app)
       }
       event => app.event(SeqEvent::Session(event)),

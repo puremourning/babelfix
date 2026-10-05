@@ -171,6 +171,20 @@ fn send_raw_keeps_the_header_it_was_given() {
   assert!(initiator.seq.send_raw(stale, &mut initiator.app).is_err());
 }
 
+/// Admin traffic moves the watermark without the application hearing of it
+/// other than as the watermark to persist.
+#[test]
+fn the_application_hears_admin_traffic_only_as_writes() {
+  let (mut initiator, mut acceptor, _now) = synchronised();
+  for peer in [&mut initiator, &mut acceptor] {
+    assert_eq!(peer.app.leaked, None);
+    assert!(
+      !peer.app.watermarks.is_empty(),
+      "no watermark was persisted"
+    );
+  }
+}
+
 /// Delivered is handled, for an application that does not care.
 #[test]
 fn on_delivery_advances_the_watermark_as_messages_arrive() {
