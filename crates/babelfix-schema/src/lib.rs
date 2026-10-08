@@ -23,6 +23,8 @@
 //! - [`messages`], [`components`] and [`groups`]: a module per message,
 //!   component and repeating group, holding just the fields and groups that
 //!   belong to it. See [Scoped messages](#scoped-messages).
+//! - [`MessageInstance`]: a variant per message type, for handling received
+//!   messages. See [Received messages](#received-messages).
 //!
 //! Versions' definitions are separate types: a FIX 4.2 `ExecType` is not a
 //! FIX.Latest `ExecType`, since the codes differ.
@@ -102,9 +104,35 @@
 //! ```
 //!
 //! — though an unscoped block (a plain `Message`'s, or a typed block's
-//! `unscoped()` view) accepts any field, scoped or not. To read a message you
-//! hold by reference as a typed one, use
-//! [`Message::body_as`](babelfix_core::message::Message::body_as).
+//! `unscoped()` view) accepts any field, scoped or not.
+//!
+//! # Received messages
+//!
+//! [`MessageInstance`] has a variant per message of the version, each holding
+//! it as a `TypedMessage` of that type, and `Unknown` for any other. Match on
+//! it to handle each type with its own fields:
+//!
+//! ```no_run
+//! # use babelfix_core::message::Message;
+//! use babelfix_schema::MessageInstance;
+//! use babelfix_schema::messages::{new_order_single as nos, order_cancel_request as ocr};
+//!
+//! # fn f(received: &Message) -> Result<(), babelfix_core::message::FieldError> {
+//! match MessageInstance::from(received) {
+//!   MessageInstance::NewOrderSingle(order) => {
+//!     let id = order.body().req(nos::fields::ClOrdID)?;
+//!   }
+//!   MessageInstance::OrderCancelRequest(cancel) => {
+//!     let id = cancel.body().req(ocr::fields::OrigClOrdID)?;
+//!   }
+//!   _ => {}
+//! }
+//! # Ok(()) }
+//! ```
+//!
+//! `MessageInstance::from(&msg)` borrows the message; `from(msg)` takes it,
+//! and `from(&mut msg)` edits it in place. For one type, use
+//! [`Message::as_typed`](babelfix_core::message::Message::as_typed).
 
 #![allow(non_upper_case_globals, non_snake_case, non_camel_case_types)]
 #![allow(clippy::all)]

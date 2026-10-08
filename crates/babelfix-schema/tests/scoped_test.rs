@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use babelfix_core::message::{Dictionaries, Dictionary, Message, TypedMessage};
+use babelfix_schema::MessageInstance;
 use babelfix_schema::codesets::{PartyRole, Side};
 use babelfix_schema::messages::execution_report::ExecutionReport;
 use babelfix_schema::messages::new_order_single::{self as nos, NewOrderSingle};
@@ -90,9 +91,13 @@ fn is_the_same_message_unscoped() {
 #[test]
 fn views_a_message_by_type() {
   let msg: Message = order().into();
-  let body = msg.body_as::<NewOrderSingle>().unwrap();
-  assert_eq!(body.req(nos::fields::ClOrdID).unwrap(), "order-1");
-  assert!(msg.body_as::<ExecutionReport>().is_none());
+  let order = msg.as_typed::<NewOrderSingle>().unwrap();
+  assert_eq!(order.body().req(nos::fields::ClOrdID).unwrap(), "order-1");
+  assert_eq!(
+    order.header().req(nos::header::fields::SenderCompID).unwrap(),
+    "ME"
+  );
+  assert!(msg.as_typed::<ExecutionReport>().is_none());
 
   let msg = TypedMessage::<ExecutionReport>::try_from(msg).unwrap_err();
   let order = TypedMessage::<NewOrderSingle>::try_from(msg).unwrap();
@@ -125,7 +130,7 @@ fn needs_its_versions_dictionary() {
 #[test]
 fn other_versions_messages_are_not_this_ones() {
   let msg = Message::new(&dict("FIX.4.4"), "D");
-  assert!(msg.body_as::<NewOrderSingle>().is_none());
+  assert!(msg.as_typed::<NewOrderSingle>().is_none());
 }
 
 #[cfg(feature = "fix44")]
@@ -162,4 +167,86 @@ fn untyped_message_edits_anything() {
   assert_eq!(body.raw(9999u32), Some(&b"custom"[..]));
   // Still the typed message it was.
   assert_eq!(order.body().group(nos::groups::NoPartyIDs).len(), 2);
+}
+
+#[test]
+fn message_instance_borrows() {
+  let msg: Message = order().into();
+  match MessageInstance::from(&msg) {
+    MessageInstance::NewOrderSingle(order) => {
+      assert_eq!(order.body().req(nos::fields::ClOrdID).unwrap(), "order-1");
+    }
+    _ => panic!("not an order"),
+  }
+  // Still ours.
+  assert_eq!(msg.msg_type(), "D");
+}
+
+#[test]
+fn message_instance_takes() {
+  let msg: Message = order().into();
+  let MessageInstance::NewOrderSingle(mut order) = MessageInstance::from(msg)
+  else {
+    panic!("not an order");
+  };
+  order.body_mut().set(nos::fields::ClOrdID, "order-2");
+  let msg: Message = order.into();
+  assert_eq!(
+    msg.body().req(babelfix_schema::fields::ClOrdID).unwrap(),
+    "order-2"
+  );
+}
+
+#[test]
+fn message_instance_edits_in_place() {
+  let mut msg: Message = order().into();
+  if let MessageInstance::NewOrderSingle(mut order) =
+    MessageInstance::from(&mut msg)
+  {
+    order.body_mut().set(nos::fields::ClOrdID, "order-3");
+  }
+  assert_eq!(
+    msg.body().req(babelfix_schema::fields::ClOrdID).unwrap(),
+    "order-3"
+  );
+}
+
+#[test]
+fn message_instance_shares() {
+  let msg = Arc::new(Message::from(order()));
+  let instance = MessageInstance::from(msg.clone());
+  assert!(matches!(instance, MessageInstance::NewOrderSingle(_)));
+  assert!(Arc::ptr_eq(&instance.into_untyped(), &msg));
+}
+
+#[test]
+fn message_instance_unknown() {
+  // A type FIX.Latest does not define.
+  let custom = Message::new(&dict("FIX.Latest"), "U1");
+  assert!(matches!(
+    MessageInstance::from(&custom),
+    MessageInstance::Unknown(_)
+  ));
+  // A type it does, from another version.
+  let fix44 = Message::new(&dict("FIX.4.4"), "D");
+  let instance = MessageInstance::from(&fix44);
+  assert!(matches!(instance, MessageInstance::Unknown(_)));
+  assert_eq!(instance.as_untyped().msg_type(), "D");
+}
+
+#[cfg(feature = "fix44")]
+#[test]
+fn message_instance_per_version() {
+  use babelfix_schema::fix44::MessageInstance;
+
+  let fix44 = Message::new(&dict("FIX.4.4"), "D");
+  assert!(matches!(
+    MessageInstance::from(&fix44),
+    MessageInstance::NewOrderSingle(_)
+  ));
+  let latest: Message = order().into();
+  assert!(matches!(
+    MessageInstance::from(&latest),
+    MessageInstance::Unknown(_)
+  ));
 }

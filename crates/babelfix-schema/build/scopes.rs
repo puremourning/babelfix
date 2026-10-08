@@ -490,6 +490,7 @@ pub fn generate_scopes(
       fix.groups.keys().map(|&id| ScopeId::Group(id)).collect(),
     ),
   ];
+  src.push_str(&message_instance(&g));
   for (module, doc, scopes) in &mut sections {
     scopes.sort_by_key(|&s| snake(g.name(s)));
     let mut seen = HashSet::new();
@@ -507,5 +508,99 @@ pub fn generate_scopes(
     }
     src.push_str("}\n\n");
   }
+  src
+}
+
+/// The `MessageInstance` enum: a variant per message, holding it as a
+/// `TypedMessage` of that type.
+fn message_instance(g: &Gen) -> String {
+  let fix = g.fix;
+  let mut messages: Vec<_> = fix.messages.values().collect();
+  messages.sort_by(|a, b| a.name.cmp(&b.name));
+  assert!(
+    messages.iter().all(|m| m.name != "Unknown"),
+    "{}: a message named Unknown",
+    fix.name
+  );
+
+  let mut src = String::new();
+  writeln!(
+    src,
+    "/// A {version} message, by type: match on it to handle each type with \
+     its own fields.\n\
+     ///\n\
+     /// `M` is how the message is held, as in \
+     /// [`TypedMessage`](babelfix_core::message::TypedMessage): \
+     /// `MessageInstance::from(msg)` takes it, `MessageInstance::from(&msg)` \
+     /// borrows it. See the [crate documentation](crate#received-messages).\n\
+     #[non_exhaustive]\n\
+     pub enum MessageInstance<M = babelfix_core::message::Message> {{",
+    version = fix.name
+  )
+  .unwrap();
+  for m in &messages {
+    writeln!(
+      src,
+      "  /// {} (`{}`).\n  \
+       {}(babelfix_core::message::TypedMessage<{}, M>),",
+      m.name,
+      m.msg_type,
+      m.name,
+      g.marker_type(ScopeId::Message(&m.name))
+    )
+    .unwrap();
+  }
+  writeln!(
+    src,
+    "  /// A message of a type {} does not define, or of another version.\n  \
+     Unknown(M),\n}}\n",
+    fix.name
+  )
+  .unwrap();
+
+  // From: one MsgType match, then the checked conversion.
+  writeln!(
+    src,
+    "impl<M: std::borrow::Borrow<babelfix_core::message::Message>> From<M> \
+     for MessageInstance<M> {{\n  \
+     fn from(msg: M) -> Self {{\n    \
+     use babelfix_core::message::TypedMessage;\n    \
+     let msg_type = msg.borrow().msg_type();\n    \
+     match msg_type {{"
+  )
+  .unwrap();
+  for m in &messages {
+    writeln!(
+      src,
+      "      {:?} => match TypedMessage::try_from_message(msg) {{\n        \
+       Ok(m) => Self::{}(m),\n        \
+       Err(m) => Self::Unknown(m),\n      }},",
+      m.msg_type, m.name
+    )
+    .unwrap();
+  }
+  src.push_str("      _ => Self::Unknown(msg),\n    }\n  }\n}\n\n");
+
+  writeln!(
+    src,
+    "impl<M: std::borrow::Borrow<babelfix_core::message::Message>> \
+     MessageInstance<M> {{\n  \
+     /// The message, unchecked.\n  \
+     pub fn as_untyped(&self) -> &babelfix_core::message::Message {{\n    \
+     match self {{"
+  )
+  .unwrap();
+  for m in &messages {
+    writeln!(src, "      Self::{}(m) => m.as_untyped(),", m.name).unwrap();
+  }
+  src.push_str(
+    "      Self::Unknown(m) => m.borrow(),\n    }\n  }\n\n  \
+     /// The message, as it was held.\n  \
+     pub fn into_untyped(self) -> M {\n    match self {\n",
+  );
+  for m in &messages {
+    writeln!(src, "      Self::{}(m) => m.into_untyped(),", m.name).unwrap();
+  }
+  src.push_str("      Self::Unknown(m) => m,\n    }\n  }\n}\n\n");
   src
 }
