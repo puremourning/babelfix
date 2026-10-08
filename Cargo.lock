@@ -55,7 +55,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "babelfix"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "babelfix-core",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "babelfix-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "babelfix-repo",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "babelfix-repo"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "include_dir",
  "quick-xml",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "babelfix-schema"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "babelfix-core",
  "babelfix-repo",
@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "babelfix-tokio"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "babelfix-core",
  "babelfix-schema",
@@ -537,7 +537,7 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "fix-to-kafka"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "babelfix",
