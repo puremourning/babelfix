@@ -7,26 +7,35 @@ use babelfix_core::message::{Dictionaries, Dictionary, Message, TypedMessage};
 use babelfix_schema::MessageInstance;
 use babelfix_schema::codesets::{PartyRole, Side};
 use babelfix_schema::messages::execution_report::ExecutionReport;
-use babelfix_schema::messages::new_order_single::{self as nos, NewOrderSingle};
+use babelfix_schema::messages::new_order_single::{
+  self as nos, NewOrderSingle,
+};
 
 fn dict(version: &str) -> Arc<Dictionary> {
-  Dictionaries::standard().unwrap().get(version).unwrap().clone()
+  Dictionaries::standard()
+    .unwrap()
+    .get(version)
+    .unwrap()
+    .clone()
 }
 
 fn order() -> TypedMessage<NewOrderSingle> {
   let mut order = TypedMessage::<NewOrderSingle>::new(&dict("FIX.Latest"));
   let mut body = order.body_mut();
+  // Symbol and SecurityID are from the Instrument component.
   body
     .set(nos::fields::ClOrdID, "order-1")
     .set(nos::fields::Side, Side::Buy)
-    // From the Instrument component.
     .set(nos::fields::Symbol, "VOD.L")
     .set(nos::fields::SecurityID, "GB00BH4HKS39");
   let mut parties = body.group_mut(nos::groups::NoPartyIDs);
   let mut party = parties.push();
   party
     .set(nos::groups::NoPartyIDs::fields::PartyID, "ABC")
-    .set(nos::groups::NoPartyIDs::fields::PartyRole, PartyRole::ExecutingFirm);
+    .set(
+      nos::groups::NoPartyIDs::fields::PartyRole,
+      PartyRole::ExecutingFirm,
+    );
   // A group within the group.
   party
     .group_mut(nos::groups::NoPartyIDs::groups::NoPartySubIDs)
@@ -68,7 +77,10 @@ fn builds_and_reads_back() {
     "desk-1"
   );
   assert_eq!(
-    order.header().req(nos::header::fields::SenderCompID).unwrap(),
+    order
+      .header()
+      .req(nos::header::fields::SenderCompID)
+      .unwrap(),
     "ME"
   );
 }
@@ -94,7 +106,10 @@ fn views_a_message_by_type() {
   let order = msg.as_typed::<NewOrderSingle>().unwrap();
   assert_eq!(order.body().req(nos::fields::ClOrdID).unwrap(), "order-1");
   assert_eq!(
-    order.header().req(nos::header::fields::SenderCompID).unwrap(),
+    order
+      .header()
+      .req(nos::header::fields::SenderCompID)
+      .unwrap(),
     "ME"
   );
   assert!(msg.as_typed::<ExecutionReport>().is_none());
@@ -159,8 +174,15 @@ fn untyped_message_edits_anything() {
 
   let mut order = order();
   let msg = order.as_untyped_mut();
-  msg.body_mut().set(ExecID, "not-in-an-order").set_raw(9999u32, b"custom");
-  msg.body_mut().group_mut(NoPartyIDs).push().set_raw(9998u32, b"x");
+  msg
+    .body_mut()
+    .set(ExecID, "not-in-an-order")
+    .set_raw(9999u32, b"custom");
+  msg
+    .body_mut()
+    .group_mut(NoPartyIDs)
+    .push()
+    .set_raw(9998u32, b"x");
 
   let body = order.body().unscoped();
   assert_eq!(body.req(ExecID).unwrap(), "not-in-an-order");

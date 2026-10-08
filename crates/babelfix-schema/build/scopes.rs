@@ -116,7 +116,13 @@ impl<'a> Gen<'a> {
   fn elements(&self, s: ScopeId<'a>) -> &'a [MessageElement] {
     match s {
       ScopeId::Message(name) => {
-        &self.fix.messages.values().find(|m| m.name == name).unwrap().elements
+        &self
+          .fix
+          .messages
+          .values()
+          .find(|m| m.name == name)
+          .unwrap()
+          .elements
       }
       ScopeId::Component(id) => &self.fix.components[&id].elements,
       ScopeId::Group(id) => &self.fix.groups[&id].elements,
@@ -181,13 +187,14 @@ impl<'a> Gen<'a> {
             continue;
           };
           let tag = group.num_in_group_tag;
-          own.groups.entry(self.fix.fields[&tag].name.clone()).or_insert(
-            Item {
+          own
+            .groups
+            .entry(self.fix.fields[&tag].name.clone())
+            .or_insert(Item {
               defined_in: s,
               tag,
               group: Some(group.id),
-            },
-          );
+            });
         }
         MessageElement::Component(_) => {}
       }
@@ -364,8 +371,8 @@ impl<'a> Gen<'a> {
         .filter(|(_, item)| item.defined_in == s)
         .map(|(fname, item)| {
           let f = &self.fix.fields[&item.tag];
-          let m = marker(self.fix, f, self.length_fields, self.group_fields)
-            .tokens();
+          let m =
+            marker(self.fix, f, self.length_fields, self.group_fields).tokens();
           let doc = super::doc(format!(
             "{fname} ({}): `{}`{}",
             f.id,
@@ -510,7 +517,11 @@ pub fn generate_scopes(
       "components",
       "Components: a module per component, with its scope and its fields \
        and groups.",
-      fix.components.keys().map(|&id| ScopeId::Component(id)).collect(),
+      fix
+        .components
+        .keys()
+        .map(|&id| ScopeId::Component(id))
+        .collect(),
     ),
     (
       "groups",

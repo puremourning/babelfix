@@ -32,11 +32,8 @@ fn main() {
     .map(|(version, fix)| (identifier_from_version(version), fix))
     .filter(|(module, _)| {
       module == "fixlatest"
-        || std::env::var_os(format!(
-          "CARGO_FEATURE_{}",
-          module.to_uppercase()
-        ))
-        .is_some()
+        || std::env::var_os(format!("CARGO_FEATURE_{}", module.to_uppercase()))
+          .is_some()
     })
     .collect();
   versions.sort_by(|a, b| a.0.cmp(&b.0));

@@ -161,7 +161,9 @@ impl<S: MessageScope> TryFrom<Message> for TypedMessage<S> {
   }
 }
 
-impl<'a, S: MessageScope> TryFrom<&'a Message> for TypedMessage<S, &'a Message> {
+impl<'a, S: MessageScope> TryFrom<&'a Message>
+  for TypedMessage<S, &'a Message>
+{
   /// The message, given back: it is not of type `S`.
   type Error = &'a Message;
 
