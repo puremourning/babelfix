@@ -14,6 +14,7 @@
 //! }
 //! components::instrument { Instrument, fields, groups }
 //! groups::party_id_grp   { PartyIDGrp, fields, groups }
+//! MessageInstance          a variant per message
 //! ```
 //!
 //! A field or group a scope lists itself is a constant of that scope; those of
@@ -23,11 +24,12 @@
 //! deeply — but not through groups, whose fields belong to their instances.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fmt::Write;
 
 use babelfix_repo::{FixVersion, MessageElement};
+use proc_macro2::TokenStream;
+use quote::quote;
 
-use super::{Marker, marker};
+use super::{Marker, doc, ident, marker, number};
 
 /// A message, component or group: something whose blocks have a scope.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,7 +58,7 @@ struct Provided<'a> {
 struct Gen<'a> {
   fix: &'a FixVersion,
   /// `crate::fixlatest`.
-  root: String,
+  root: TokenStream,
   header: u32,
   trailer: u32,
   length_fields: &'a HashSet<u32>,
@@ -65,7 +67,7 @@ struct Gen<'a> {
 }
 
 /// `NewOrderSingle` -> `new_order_single`, `PartyIDGrp` -> `party_id_grp`.
-pub fn snake(name: &str) -> String {
+fn snake(name: &str) -> String {
   let c: Vec<char> = name.chars().collect();
   let mut out = String::new();
   for (i, &ch) in c.iter().enumerate() {
@@ -80,18 +82,7 @@ pub fn snake(name: &str) -> String {
     }
     out.extend(ch.to_lowercase());
   }
-  match out.as_str() {
-    "as" | "break" | "const" | "continue" | "crate" | "else" | "enum"
-    | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in" | "let"
-    | "loop" | "match" | "mod" | "move" | "mut" | "pub" | "ref" | "return"
-    | "self" | "static" | "struct" | "super" | "trait" | "true" | "type"
-    | "unsafe" | "use" | "where" | "while" | "async" | "await" | "dyn"
-    | "abstract" | "become" | "box" | "do" | "final" | "macro" | "override"
-    | "priv" | "typeof" | "unsized" | "virtual" | "yield" | "try" | "gen" => {
-      format!("r#{out}")
-    }
-    _ => out,
-  }
+  out
 }
 
 impl<'a> Gen<'a> {
@@ -104,18 +95,22 @@ impl<'a> Gen<'a> {
   }
 
   /// The scope's module, from the crate root.
-  fn module(&self, s: ScopeId<'a>) -> String {
+  fn module(&self, s: ScopeId<'a>) -> TokenStream {
+    let root = &self.root;
     let kind = match s {
-      ScopeId::Message(_) => "messages",
-      ScopeId::Component(_) => "components",
-      ScopeId::Group(_) => "groups",
+      ScopeId::Message(_) => quote! { messages },
+      ScopeId::Component(_) => quote! { components },
+      ScopeId::Group(_) => quote! { groups },
     };
-    format!("{}::{kind}::{}", self.root, snake(self.name(s)))
+    let module = ident(&snake(self.name(s)));
+    quote! { #root::#kind::#module }
   }
 
   /// The scope's marker type, from the crate root.
-  fn marker_type(&self, s: ScopeId<'a>) -> String {
-    format!("{}::{}", self.module(s), self.name(s))
+  fn marker_type(&self, s: ScopeId<'a>) -> TokenStream {
+    let module = self.module(s);
+    let name = ident(self.name(s));
+    quote! { #module::#name }
   }
 
   fn elements(&self, s: ScopeId<'a>) -> &'a [MessageElement] {
@@ -258,170 +253,6 @@ impl<'a> Gen<'a> {
     all
   }
 
-  fn emit(&mut self, s: ScopeId<'a>, src: &mut String) {
-    let name = self.name(s);
-    let ty = name;
-    let provided = self.provided(s);
-    let root = self.root.clone();
-
-    let doc = match s {
-      ScopeId::Message(_) => {
-        let m = self.fix.messages.values().find(|m| m.name == name).unwrap();
-        format!("The {name} message (MsgType `{}`).", m.msg_type)
-      }
-      ScopeId::Component(_) => format!("The {name} component."),
-      ScopeId::Group(id) => {
-        let tag = self.fix.groups[&id].num_in_group_tag;
-        format!(
-          "The {name} repeating group, counted by {} ({tag}).",
-          self.fix.fields[&tag].name
-        )
-      }
-    };
-    writeln!(src, "  /// {doc}").unwrap();
-    writeln!(src, "  pub mod {} {{", snake(name)).unwrap();
-    writeln!(
-      src,
-      "    #[allow(unused_imports)]\n    \
-       use babelfix_core::message::{{MessageScope, MsgType, Scope, Within}};"
-    )
-    .unwrap();
-    writeln!(
-      src,
-      "    /// The scope of {name}'s fields: a block of it accepts them, and \
-       those of the components it includes.\n    \
-       pub enum {ty} {{}}\n    \
-       impl Scope for {ty} {{}}\n    \
-       impl Within<{ty}> for {ty} {{}}"
-    )
-    .unwrap();
-    let mut within = BTreeSet::new();
-    self.within(s, &mut within);
-    for c in within {
-      let c = self.marker_type(ScopeId::Component(c));
-      writeln!(src, "    impl Within<{ty}> for {c} {{}}").unwrap();
-    }
-
-    if let ScopeId::Message(_) = s {
-      let m = self.fix.messages.values().find(|m| m.name == name).unwrap();
-      let header = ScopeId::Component(self.header);
-      let trailer = ScopeId::Component(self.trailer);
-      writeln!(
-        src,
-        "    impl MessageScope for {ty} {{\n      \
-         const MSG_TYPE: MsgType = {root}::msg_type::{ty};\n      \
-         const VERSION: &'static str = {:?};\n      \
-         type Header = {};\n      \
-         type Trailer = {};\n    }}\n    \
-         /// `MsgType(35)`: `{}`.\n    \
-         pub const MSG_TYPE: MsgType = {root}::msg_type::{ty};\n    \
-         /// The header's fields and groups.\n    \
-         pub use {} as header;\n    \
-         /// The trailer's fields.\n    \
-         pub use {} as trailer;",
-        self.fix.name,
-        self.marker_type(header),
-        self.marker_type(trailer),
-        m.msg_type,
-        self.module(header),
-        self.module(trailer),
-      )
-      .unwrap();
-    }
-
-    // fields
-    if !provided.fields.is_empty() {
-      writeln!(
-        src,
-        "    /// {name}'s fields, and those of the components it includes.\n    \
-         pub mod fields {{\n      \
-         #[allow(unused_imports)]\n      \
-         use babelfix_core::message::types::{{Field, datatypes as dt}};\n      \
-         #[allow(unused_imports)]\n      \
-         use {root}::codesets as cs;"
-      )
-      .unwrap();
-      let mut globs = BTreeSet::new();
-      for (fname, item) in &provided.fields {
-        if item.defined_in != s {
-          continue;
-        }
-        let f = &self.fix.fields[&item.tag];
-        let m = match marker(self.fix, f, self.length_fields, self.group_fields)
-        {
-          Marker::Datatype(m) => format!("dt::{m}"),
-          Marker::Codeset(cs) => format!("cs::{cs}"),
-          Marker::Group => unreachable!("groups are not fields"),
-        };
-        let required = self.required(s, item.tag);
-        writeln!(
-          src,
-          "      /// {fname} ({}): `{}`{}\n      \
-           pub const {fname}: Field<{m}, super::{ty}> = Field::new({});",
-          f.id,
-          f.field_type,
-          if required { ", required" } else { "" },
-          f.id
-        )
-        .unwrap();
-      }
-      for c in self.components(s) {
-        if !self.provided(ScopeId::Component(c)).fields.is_empty() {
-          globs.insert(self.module(ScopeId::Component(c)));
-        }
-      }
-      for g in globs {
-        writeln!(src, "      pub use {g}::fields::*;").unwrap();
-      }
-      src.push_str("    }\n");
-    }
-
-    // groups
-    if !provided.groups.is_empty() {
-      writeln!(
-        src,
-        "    /// {name}'s repeating groups, and those of the components it \
-         includes: each a `GroupField`, and a module of the same name with \
-         its instances' fields and groups.\n    \
-         pub mod groups {{\n      \
-         #[allow(unused_imports)]\n      \
-         use babelfix_core::message::types::GroupField;"
-      )
-      .unwrap();
-      let mut globs = BTreeSet::new();
-      for (gname, item) in &provided.groups {
-        if item.defined_in != s {
-          continue;
-        }
-        let group = ScopeId::Group(item.group.unwrap());
-        let required = self.required(s, item.tag);
-        writeln!(
-          src,
-          "      /// {gname} ({}): the {} group{}\n      \
-           pub const {gname}: GroupField<super::{ty}, {}> = GroupField::new({});\n      \
-           pub use {} as {gname};",
-          item.tag,
-          self.name(group),
-          if required { ", required" } else { "" },
-          self.marker_type(group),
-          item.tag,
-          self.module(group),
-        )
-        .unwrap();
-      }
-      for c in self.components(s) {
-        if !self.provided(ScopeId::Component(c)).groups.is_empty() {
-          globs.insert(self.module(ScopeId::Component(c)));
-        }
-      }
-      for g in globs {
-        writeln!(src, "      pub use {g}::groups::*;").unwrap();
-      }
-      src.push_str("    }\n");
-    }
-    src.push_str("  }\n");
-  }
-
   /// Whether `s` lists `tag` (a field, or a group's NumInGroup) as required.
   fn required(&self, s: ScopeId<'a>, tag: u32) -> bool {
     self.elements(s).iter().any(|e| match e {
@@ -437,16 +268,213 @@ impl<'a> Gen<'a> {
       MessageElement::Component(_) => false,
     })
   }
+
+  /// The modules of `s`'s components that provide something in `fields` (or
+  /// `groups`): the glob re-exports, in name order.
+  fn component_globs(
+    &mut self,
+    s: ScopeId<'a>,
+    groups: bool,
+  ) -> Vec<TokenStream> {
+    let mut globs = BTreeMap::new();
+    for c in self.components(s) {
+      let theirs = self.provided(ScopeId::Component(c));
+      let provides = if groups {
+        !theirs.groups.is_empty()
+      } else {
+        !theirs.fields.is_empty()
+      };
+      if provides {
+        let c = ScopeId::Component(c);
+        globs.insert(snake(self.name(c)), self.module(c));
+      }
+    }
+    globs.into_values().collect()
+  }
+
+  /// The scope's module.
+  fn emit(&mut self, s: ScopeId<'a>) -> TokenStream {
+    let name = self.name(s);
+    let ty = ident(name);
+    let module = ident(&snake(name));
+    let provided = self.provided(s);
+    let root = self.root.clone();
+
+    let doc = doc(match s {
+      ScopeId::Message(_) => {
+        let m = self.fix.messages.values().find(|m| m.name == name).unwrap();
+        format!("The {name} message (MsgType `{}`).", m.msg_type)
+      }
+      ScopeId::Component(_) => format!("The {name} component."),
+      ScopeId::Group(id) => {
+        let tag = self.fix.groups[&id].num_in_group_tag;
+        format!(
+          "The {name} repeating group, counted by {} ({tag}).",
+          self.fix.fields[&tag].name
+        )
+      }
+    });
+    let scope_doc = super::doc(format!(
+      "The scope of {name}'s fields: a block of it accepts them, and those of \
+       the components it includes."
+    ));
+
+    let mut within = BTreeSet::new();
+    self.within(s, &mut within);
+    let within = within.into_iter().map(|c| {
+      let c = self.marker_type(ScopeId::Component(c));
+      quote! { impl Within<#ty> for #c {} }
+    });
+    let within: TokenStream = within.collect();
+
+    let message = match s {
+      ScopeId::Message(_) => {
+        let m = self.fix.messages.values().find(|m| m.name == name).unwrap();
+        let version = &self.fix.name;
+        let header = self.marker_type(ScopeId::Component(self.header));
+        let trailer = self.marker_type(ScopeId::Component(self.trailer));
+        let header_module = self.module(ScopeId::Component(self.header));
+        let trailer_module = self.module(ScopeId::Component(self.trailer));
+        let msg_type_doc =
+          super::doc(format!("`MsgType(35)`: `{}`.", m.msg_type));
+        quote! {
+          impl MessageScope for #ty {
+            const MSG_TYPE: MsgType = #root::msg_type::#ty;
+            const VERSION: &'static str = #version;
+            type Header = #header;
+            type Trailer = #trailer;
+          }
+          #msg_type_doc
+          pub const MSG_TYPE: MsgType = #root::msg_type::#ty;
+          /// The header's fields and groups.
+          pub use #header_module as header;
+          /// The trailer's fields.
+          pub use #trailer_module as trailer;
+        }
+      }
+      _ => TokenStream::new(),
+    };
+
+    let fields = if provided.fields.is_empty() {
+      TokenStream::new()
+    } else {
+      let consts = provided
+        .fields
+        .iter()
+        .filter(|(_, item)| item.defined_in == s)
+        .map(|(fname, item)| {
+          let f = &self.fix.fields[&item.tag];
+          let m = marker(self.fix, f, self.length_fields, self.group_fields)
+            .tokens();
+          let doc = super::doc(format!(
+            "{fname} ({}): `{}`{}",
+            f.id,
+            f.field_type,
+            if self.required(s, item.tag) {
+              ", required"
+            } else {
+              ""
+            }
+          ));
+          let fname = ident(fname);
+          let tag = number(f.id);
+          quote! {
+            #doc
+            pub const #fname: Field<#m, super::#ty> = Field::new(#tag);
+          }
+        })
+        .collect::<TokenStream>();
+      let globs = self.component_globs(s, false);
+      let doc = super::doc(format!(
+        "{name}'s fields, and those of the components it includes."
+      ));
+      quote! {
+        #doc
+        pub mod fields {
+          #[allow(unused_imports)]
+          use babelfix_core::message::types::{Field, datatypes as dt};
+          #[allow(unused_imports)]
+          use #root::codesets as cs;
+          #consts
+          #(pub use #globs::fields::*;)*
+        }
+      }
+    };
+
+    let groups = if provided.groups.is_empty() {
+      TokenStream::new()
+    } else {
+      let consts = provided
+        .groups
+        .iter()
+        .filter(|(_, item)| item.defined_in == s)
+        .map(|(gname, item)| {
+          let group = ScopeId::Group(item.group.unwrap());
+          let doc = super::doc(format!(
+            "{gname} ({}): the {} group{}",
+            item.tag,
+            self.name(group),
+            if self.required(s, item.tag) {
+              ", required"
+            } else {
+              ""
+            }
+          ));
+          let gname = ident(gname);
+          let tag = number(item.tag);
+          let instance = self.marker_type(group);
+          let module = self.module(group);
+          quote! {
+            #doc
+            pub const #gname: GroupField<super::#ty, #instance> =
+              GroupField::new(#tag);
+            pub use #module as #gname;
+          }
+        })
+        .collect::<TokenStream>();
+      let globs = self.component_globs(s, true);
+      let doc = super::doc(format!(
+        "{name}'s repeating groups, and those of the components it includes: \
+         each a `GroupField`, and a module of the same name with its \
+         instances' fields and groups."
+      ));
+      quote! {
+        #doc
+        pub mod groups {
+          #[allow(unused_imports)]
+          use babelfix_core::message::types::GroupField;
+          #consts
+          #(pub use #globs::groups::*;)*
+        }
+      }
+    };
+
+    quote! {
+      #doc
+      pub mod #module {
+        #[allow(unused_imports)]
+        use babelfix_core::message::{MessageScope, MsgType, Scope, Within};
+        #scope_doc
+        pub enum #ty {}
+        impl Scope for #ty {}
+        impl Within<#ty> for #ty {}
+        #within
+        #message
+        #fields
+        #groups
+      }
+    }
+  }
 }
 
 /// The `messages`, `components` and `groups` modules for `fix`, which is
-/// generated as module `module` of the crate.
+/// generated as module `module` of the crate, and its `MessageInstance`.
 pub fn generate_scopes(
   fix: &FixVersion,
   module: &str,
   length_fields: &HashSet<u32>,
   group_fields: &HashSet<u32>,
-) -> String {
+) -> TokenStream {
   let find = |name: &str| {
     fix
       .components
@@ -455,9 +483,10 @@ pub fn generate_scopes(
       .unwrap_or_else(|| panic!("{}: no {name} component", fix.name))
       .id
   };
+  let module = ident(module);
   let mut g = Gen {
     fix,
-    root: format!("crate::{module}"),
+    root: quote! { crate::#module },
     header: find("StandardHeader"),
     trailer: find("StandardTrailer"),
     length_fields,
@@ -465,7 +494,7 @@ pub fn generate_scopes(
     provided: BTreeMap::new(),
   };
 
-  let mut src = String::new();
+  let mut src = message_instance(&g);
   let mut sections: [(&str, &str, Vec<ScopeId>); 3] = [
     (
       "messages",
@@ -490,8 +519,7 @@ pub fn generate_scopes(
       fix.groups.keys().map(|&id| ScopeId::Group(id)).collect(),
     ),
   ];
-  src.push_str(&message_instance(&g));
-  for (module, doc, scopes) in &mut sections {
+  for (module, section_doc, scopes) in &mut sections {
     scopes.sort_by_key(|&s| snake(g.name(s)));
     let mut seen = HashSet::new();
     for &s in scopes.iter() {
@@ -502,18 +530,22 @@ pub fn generate_scopes(
         snake(g.name(s))
       );
     }
-    writeln!(src, "/// {doc}\npub mod {module} {{").unwrap();
-    for &s in scopes.iter() {
-      g.emit(s, &mut src);
-    }
-    src.push_str("}\n\n");
+    let modules: TokenStream = scopes.iter().map(|&s| g.emit(s)).collect();
+    let section_doc = doc(*section_doc);
+    let module = ident(module);
+    src.extend(quote! {
+      #section_doc
+      pub mod #module {
+        #modules
+      }
+    });
   }
   src
 }
 
 /// The `MessageInstance` enum: a variant per message, holding it as a
 /// `TypedMessage` of that type.
-fn message_instance(g: &Gen) -> String {
+fn message_instance(g: &Gen) -> TokenStream {
   let fix = g.fix;
   let mut messages: Vec<_> = fix.messages.values().collect();
   messages.sort_by(|a, b| a.name.cmp(&b.name));
@@ -523,84 +555,80 @@ fn message_instance(g: &Gen) -> String {
     fix.name
   );
 
-  let mut src = String::new();
-  writeln!(
-    src,
-    "/// A {version} message, by type: match on it to handle each type with \
-     its own fields.\n\
-     ///\n\
-     /// `M` is how the message is held, as in \
-     /// [`TypedMessage`](babelfix_core::message::TypedMessage): \
-     /// `MessageInstance::from(msg)` takes it, `MessageInstance::from(&msg)` \
-     /// borrows it. See the [crate documentation](crate#received-messages).\n\
-     #[non_exhaustive]\n\
-     pub enum MessageInstance<M = babelfix_core::message::Message> {{",
-    version = fix.name
-  )
-  .unwrap();
-  for m in &messages {
-    writeln!(
-      src,
-      "  /// {} (`{}`).\n  \
-       {}(babelfix_core::message::TypedMessage<{}, M>),",
-      m.name,
-      m.msg_type,
-      m.name,
-      g.marker_type(ScopeId::Message(&m.name))
-    )
-    .unwrap();
-  }
-  writeln!(
-    src,
-    "  /// A message of a type {} does not define, or of another version.\n  \
-     Unknown(M),\n}}\n",
+  let enum_doc = doc(format!(
+    "A {} message, by type: match on it to handle each type with its own \
+     fields.\n\
+     \n\
+     `M` is how the message is held, as in\n\
+     [`TypedMessage`](babelfix_core::message::TypedMessage):\n\
+     `MessageInstance::from(msg)` takes it, `MessageInstance::from(&msg)`\n\
+     borrows it. See the [crate documentation](crate#received-messages).",
     fix.name
-  )
-  .unwrap();
+  ));
+  let unknown_doc = doc(format!(
+    "A message of a type {} does not define, or of another version.",
+    fix.name
+  ));
+  let names: Vec<_> = messages.iter().map(|m| ident(&m.name)).collect();
+  let variants = messages.iter().zip(&names).map(|(m, name)| {
+    let doc = doc(format!("{} (`{}`).", m.name, m.msg_type));
+    let scope = g.marker_type(ScopeId::Message(&m.name));
+    quote! {
+      #doc
+      #name(babelfix_core::message::TypedMessage<#scope, M>),
+    }
+  });
+  // One MsgType match, then the checked conversion.
+  let arms = messages.iter().zip(&names).map(|(m, name)| {
+    let msg_type = &m.msg_type;
+    quote! {
+      #msg_type => match TypedMessage::try_from_message(msg) {
+        Ok(m) => Self::#name(m),
+        Err(m) => Self::Unknown(m),
+      },
+    }
+  });
 
-  // From: one MsgType match, then the checked conversion.
-  writeln!(
-    src,
-    "impl<M: std::borrow::Borrow<babelfix_core::message::Message>> From<M> \
-     for MessageInstance<M> {{\n  \
-     fn from(msg: M) -> Self {{\n    \
-     use babelfix_core::message::TypedMessage;\n    \
-     let msg_type = msg.borrow().msg_type();\n    \
-     match msg_type {{"
-  )
-  .unwrap();
-  for m in &messages {
-    writeln!(
-      src,
-      "      {:?} => match TypedMessage::try_from_message(msg) {{\n        \
-       Ok(m) => Self::{}(m),\n        \
-       Err(m) => Self::Unknown(m),\n      }},",
-      m.msg_type, m.name
-    )
-    .unwrap();
-  }
-  src.push_str("      _ => Self::Unknown(msg),\n    }\n  }\n}\n\n");
+  quote! {
+    #enum_doc
+    #[non_exhaustive]
+    pub enum MessageInstance<M = babelfix_core::message::Message> {
+      #(#variants)*
+      #unknown_doc
+      Unknown(M),
+    }
 
-  writeln!(
-    src,
-    "impl<M: std::borrow::Borrow<babelfix_core::message::Message>> \
-     MessageInstance<M> {{\n  \
-     /// The message, unchecked.\n  \
-     pub fn as_untyped(&self) -> &babelfix_core::message::Message {{\n    \
-     match self {{"
-  )
-  .unwrap();
-  for m in &messages {
-    writeln!(src, "      Self::{}(m) => m.as_untyped(),", m.name).unwrap();
+    impl<M: std::borrow::Borrow<babelfix_core::message::Message>> From<M>
+      for MessageInstance<M>
+    {
+      fn from(msg: M) -> Self {
+        use babelfix_core::message::TypedMessage;
+        let msg_type = msg.borrow().msg_type();
+        match msg_type {
+          #(#arms)*
+          _ => Self::Unknown(msg),
+        }
+      }
+    }
+
+    impl<M: std::borrow::Borrow<babelfix_core::message::Message>>
+      MessageInstance<M>
+    {
+      /// The message, unchecked.
+      pub fn as_untyped(&self) -> &babelfix_core::message::Message {
+        match self {
+          #(Self::#names(m) => m.as_untyped(),)*
+          Self::Unknown(m) => m.borrow(),
+        }
+      }
+
+      /// The message, as it was held.
+      pub fn into_untyped(self) -> M {
+        match self {
+          #(Self::#names(m) => m.into_untyped(),)*
+          Self::Unknown(m) => m,
+        }
+      }
+    }
   }
-  src.push_str(
-    "      Self::Unknown(m) => m.borrow(),\n    }\n  }\n\n  \
-     /// The message, as it was held.\n  \
-     pub fn into_untyped(self) -> M {\n    match self {\n",
-  );
-  for m in &messages {
-    writeln!(src, "      Self::{}(m) => m.into_untyped(),", m.name).unwrap();
-  }
-  src.push_str("      Self::Unknown(m) => m,\n    }\n  }\n}\n\n");
-  src
 }

@@ -23,6 +23,10 @@ babelfix-core.workspace = true
 
 [build-dependencies]
 babelfix-repo.workspace = true
+prettyplease.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
 
 # FIX.Latest is always built, and re-exported at the top level. Each feature
 # adds a module of definitions for that version.
