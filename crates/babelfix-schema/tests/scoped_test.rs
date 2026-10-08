@@ -22,12 +22,14 @@ fn dict(version: &str) -> Arc<Dictionary> {
 fn order() -> TypedMessage<NewOrderSingle> {
   let mut order = TypedMessage::<NewOrderSingle>::new(&dict("FIX.Latest"));
   let mut body = order.body_mut();
-  // Symbol and SecurityID are from the Instrument component.
+  // Symbol and SecurityID are from the Instrument component, OrderQty from
+  // OrderQtyData.
   body
     .set(nos::fields::ClOrdID, "order-1")
     .set(nos::fields::Side, Side::Buy)
     .set(nos::fields::Symbol, "VOD.L")
-    .set(nos::fields::SecurityID, "GB00BH4HKS39");
+    .set(nos::fields::SecurityID, "GB00BH4HKS39")
+    .set(nos::fields::OrderQty, "100");
   let mut parties = body.group_mut(nos::groups::NoPartyIDs);
   let mut party = parties.push();
   party

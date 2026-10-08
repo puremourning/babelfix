@@ -707,6 +707,17 @@ macro_rules! decimal_type {
         Ok(())
       }
     }
+    // Text, validated as a FIX float: a decimal read from a file, say.
+    impl ToFix<$m> for str {
+      fn to_fix(&self, w: &mut ValueWriter<'_>) -> Result<(), ValueError> {
+        <Decimal<'_> as ToFix<$m>>::to_fix(&Decimal::new(self.as_bytes())?, w)
+      }
+    }
+    impl ToFix<$m> for String {
+      fn to_fix(&self, w: &mut ValueWriter<'_>) -> Result<(), ValueError> {
+        <str as ToFix<$m>>::to_fix(self, w)
+      }
+    }
   )*};
 }
 decimal_type!(Float, Qty, Price, PriceOffset, Amt, Percentage);
@@ -1084,6 +1095,15 @@ mod tests {
         "{bad}"
       );
     }
+  }
+
+  #[test]
+  fn decimals_from_text() {
+    assert_eq!(write::<Qty>("100.5").unwrap(), b"100.5");
+    assert_eq!(write::<Price>("-0.25").unwrap(), b"-0.25");
+    assert_eq!(write::<Amt>(String::from("12")).unwrap(), b"12");
+    assert_eq!(write::<Qty>("1e5"), Err(ValueError::Malformed));
+    assert_eq!(write::<Price>("1,000.00"), Err(ValueError::Malformed));
   }
 
   #[test]
