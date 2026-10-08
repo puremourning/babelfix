@@ -55,13 +55,45 @@ impl Tag for u32 {
   }
 }
 
-/// A tag whose value is of datatype `M`.
-pub struct Field<M> {
+/// A set of fields a block can hold: a message's body, a component, a repeating
+/// group's instances — or [`Unscoped`], any field at all.
+///
+/// Scopes are generated, one type per message, component and group, by
+/// `babelfix-schema`. A field constant names the scope it is defined in, and a
+/// block names the scope it holds, so that `set` and `get` accept only the
+/// fields that belong there (see [`Within`]).
+pub trait Scope: 'static {}
+
+/// The scope of plain field constants and of untyped blocks: no checking.
+///
+/// An `Unscoped` block — `Message::body_mut()`, say — accepts a field of any
+/// scope. A scoped block does not accept an `Unscoped` field; to opt out of
+/// checking, take the block's [`unscoped`](crate::message::BlockMut::unscoped)
+/// view.
+#[derive(Clone, Copy, Debug)]
+pub enum Unscoped {}
+
+impl Scope for Unscoped {}
+
+/// The fields of scope `Self` may be used in a block of scope `S`: `S` itself,
+/// or a component `S` includes (directly, or through other components; not
+/// through groups, whose fields are in the group's own instances).
+#[diagnostic::on_unimplemented(
+  message = "fields of `{Self}` cannot be used in a block of `{S}`",
+  label = "not a field of `{S}`",
+  note = "use the field constants from `{S}`'s module, or the block's `unscoped()` view to skip the check"
+)]
+pub trait Within<S>: Scope {}
+
+impl<F: Scope> Within<Unscoped> for F {}
+
+/// A tag whose value is of datatype `M`, defined in scope `S`.
+pub struct Field<M, S = Unscoped> {
   tag: u32,
-  _m: PhantomData<fn() -> M>,
+  _m: PhantomData<fn() -> (M, S)>,
 }
 
-impl<M> Field<M> {
+impl<M, S> Field<M, S> {
   pub const fn new(tag: u32) -> Self {
     Self {
       tag,
@@ -74,34 +106,38 @@ impl<M> Field<M> {
   }
 }
 
-impl<M> Clone for Field<M> {
+impl<M, S> Clone for Field<M, S> {
   fn clone(&self) -> Self {
     *self
   }
 }
-impl<M> Copy for Field<M> {}
+impl<M, S> Copy for Field<M, S> {}
 
-impl<M> fmt::Debug for Field<M> {
+impl<M, S> fmt::Debug for Field<M, S> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "Field({})", self.tag)
   }
 }
 
-impl<M> Tag for Field<M> {
+impl<M, S> Tag for Field<M, S> {
   fn tag(self) -> u32 {
     self.tag
   }
 }
 
-/// A repeating group, named by its NumInGroup tag.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GroupField {
+/// A repeating group, named by its NumInGroup tag: defined in scope `S`, with
+/// instances of scope `G`.
+pub struct GroupField<S = Unscoped, G = Unscoped> {
   tag: u32,
+  _s: PhantomData<fn() -> (S, G)>,
 }
 
-impl GroupField {
+impl<S, G> GroupField<S, G> {
   pub const fn new(tag: u32) -> Self {
-    Self { tag }
+    Self {
+      tag,
+      _s: PhantomData,
+    }
   }
 
   pub const fn tag(&self) -> u32 {
@@ -109,10 +145,51 @@ impl GroupField {
   }
 }
 
-impl Tag for GroupField {
+impl<S, G> Clone for GroupField<S, G> {
+  fn clone(&self) -> Self {
+    *self
+  }
+}
+impl<S, G> Copy for GroupField<S, G> {}
+
+impl<S, G> PartialEq for GroupField<S, G> {
+  fn eq(&self, other: &Self) -> bool {
+    self.tag == other.tag
+  }
+}
+impl<S, G> Eq for GroupField<S, G> {}
+
+impl<S, G> fmt::Debug for GroupField<S, G> {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "GroupField({})", self.tag)
+  }
+}
+
+impl<S, G> Tag for GroupField<S, G> {
   fn tag(self) -> u32 {
     self.tag
   }
+}
+
+/// Names a repeating group in a block of scope `S`, and says what scope its
+/// instances are: a [`GroupField`] of `S`, or — in an [`Unscoped`] block — a
+/// bare tag number.
+#[diagnostic::on_unimplemented(
+  message = "`{Self}` is not a group of `{S}`",
+  label = "not a group of `{S}`",
+  note = "use the group constants from `{S}`'s module, or the block's `unscoped()` view to skip the check"
+)]
+pub trait GroupTag<S>: Tag {
+  /// The scope of the group's instances.
+  type Instance: Scope;
+}
+
+impl GroupTag<Unscoped> for u32 {
+  type Instance = Unscoped;
+}
+
+impl<S, F: Within<S>, G: Scope> GroupTag<S> for GroupField<F, G> {
+  type Instance = G;
 }
 
 /// A `MsgType(35)` value.
@@ -630,6 +707,17 @@ macro_rules! decimal_type {
         Ok(())
       }
     }
+    // Text, validated as a FIX float: a decimal read from a file, say.
+    impl ToFix<$m> for str {
+      fn to_fix(&self, w: &mut ValueWriter<'_>) -> Result<(), ValueError> {
+        <Decimal<'_> as ToFix<$m>>::to_fix(&Decimal::new(self.as_bytes())?, w)
+      }
+    }
+    impl ToFix<$m> for String {
+      fn to_fix(&self, w: &mut ValueWriter<'_>) -> Result<(), ValueError> {
+        <str as ToFix<$m>>::to_fix(self, w)
+      }
+    }
   )*};
 }
 decimal_type!(Float, Qty, Price, PriceOffset, Amt, Percentage);
@@ -1007,6 +1095,15 @@ mod tests {
         "{bad}"
       );
     }
+  }
+
+  #[test]
+  fn decimals_from_text() {
+    assert_eq!(write::<Qty>("100.5").unwrap(), b"100.5");
+    assert_eq!(write::<Price>("-0.25").unwrap(), b"-0.25");
+    assert_eq!(write::<Amt>(String::from("12")).unwrap(), b"12");
+    assert_eq!(write::<Qty>("1e5"), Err(ValueError::Malformed));
+    assert_eq!(write::<Price>("1,000.00"), Err(ValueError::Malformed));
   }
 
   #[test]

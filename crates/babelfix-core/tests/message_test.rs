@@ -414,6 +414,20 @@ fn fragments() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn sets_decimals_from_text() {
+  let mut m = Message::new(&dict(), msg_type::NewOrderSingle);
+  let qty = String::from("250.5");
+  m.body_mut().set(Price, "101.25").set(OrderQty, &qty);
+  assert_eq!(m.body().req(Price).unwrap().as_str(), "101.25");
+  assert_eq!(m.body().req(OrderQty).unwrap().as_str(), "250.5");
+
+  let err = m.body_mut().try_set(Price, "1e5").map(|_| ()).unwrap_err();
+  assert_eq!(err.kind, FieldErrorKind::Value(ValueError::Malformed));
+  // The field keeps its value.
+  assert_eq!(m.body().req(Price).unwrap().as_str(), "101.25");
+}
+
+#[test]
 fn builds_a_message() {
   let mut m = Message::new(&dict(), msg_type::NewOrderSingle);
   {

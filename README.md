@@ -43,7 +43,7 @@ It is a small stack of layers, each usable on its own:
 
 | Layer | Crate | Responsibility |
 |-------|-------|----------------|
-| Schema | `babelfix-schema` | Typed field constants, message types and codeset enums, generated from FIX.Latest |
+| Schema | `babelfix-schema` | Typed field constants, message types and codeset enums, generated from Orchestra: FIX.Latest, plus FIX 4.4 and 4.2 by feature |
 | Repository | `babelfix-repo` | Parsed Orchestra metadata: versions, messages, fields, components, groups |
 | Message | `babelfix-core::message` | Parse, read, build, edit and serialise messages |
 | Codec | `babelfix-core::codec` | Frame a byte stream into messages and back |

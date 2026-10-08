@@ -1,13 +1,16 @@
 //! Reading: blocks, groups and cursors over a message's tape.
 
 use std::fmt;
+use std::marker::PhantomData;
 
 use bytes::Bytes;
 
 use super::error::{FieldError, ValueError};
 use super::path::FieldPath;
 use super::tape::{Kind, Message, Region};
-use super::types::{Field, FieldType, FromFix, Tag};
+use super::types::{
+  Field, FieldType, FromFix, GroupTag, Scope, Tag, Unscoped, Within,
+};
 
 /// A position in a message, for hinted lookups ([`Block::get_from`]). Produced
 /// by [`Cursor::pos`], [`Group::end`] and [`Block::start`]/[`Block::end`].
@@ -19,13 +22,23 @@ pub struct Pos(pub(crate) u32);
 
 /// A set of fields in which each tag appears at most once: a region of the
 /// message (header, body, trailer) or one instance of a repeating group.
-#[derive(Clone, Copy)]
-pub struct Block<'a> {
+///
+/// Its scope `S` says which fields it holds: [`get`](Self::get) accepts only
+/// fields [`Within`] `S`. An [`Unscoped`] block accepts any field.
+pub struct Block<'a, S = Unscoped> {
   pub(crate) msg: &'a Message,
   pub(crate) start: u32,
   pub(crate) end: u32,
   pub(crate) depth: u8,
+  pub(crate) _s: PhantomData<fn() -> S>,
 }
+
+impl<S> Clone for Block<'_, S> {
+  fn clone(&self) -> Self {
+    *self
+  }
+}
+impl<S> Copy for Block<'_, S> {}
 
 impl<'a> Block<'a> {
   pub(crate) fn region(msg: &'a Message, region: Region) -> Self {
@@ -35,6 +48,7 @@ impl<'a> Block<'a> {
       start,
       end,
       depth: 0,
+      _s: PhantomData,
     }
   }
 
@@ -46,7 +60,26 @@ impl<'a> Block<'a> {
       start: idx + 1,
       end: idx + e.span(),
       depth: e.depth,
+      _s: PhantomData,
     }
+  }
+}
+
+impl<'a, S> Block<'a, S> {
+  /// The same block, as scope `T`; the caller vouches that it holds `T`.
+  pub(crate) fn scoped<T>(self) -> Block<'a, T> {
+    Block {
+      msg: self.msg,
+      start: self.start,
+      end: self.end,
+      depth: self.depth,
+      _s: PhantomData,
+    }
+  }
+
+  /// The same block, unchecked: it accepts any field.
+  pub fn unscoped(self) -> Block<'a> {
+    self.scoped()
   }
 
   fn find(&self, tag: u32, hint: Option<Pos>) -> Option<u32> {
@@ -74,7 +107,7 @@ impl<'a> Block<'a> {
   /// present but malformed.
   pub fn get<M: FieldType>(
     &self,
-    field: Field<M>,
+    field: Field<M, impl Within<S>>,
   ) -> Result<Option<M::Value<'a>>, FieldError> {
     Self::decode::<M>(field.tag(), self.field_bytes(field.tag(), None))
   }
@@ -82,7 +115,7 @@ impl<'a> Block<'a> {
   /// [`get`](Self::get), searching from `hint` first.
   pub fn get_from<M: FieldType>(
     &self,
-    field: Field<M>,
+    field: Field<M, impl Within<S>>,
     hint: Pos,
   ) -> Result<Option<M::Value<'a>>, FieldError> {
     Self::decode::<M>(field.tag(), self.field_bytes(field.tag(), Some(hint)))
@@ -91,7 +124,7 @@ impl<'a> Block<'a> {
   /// The field's decoded value; absent is an error too.
   pub fn req<M: FieldType>(
     &self,
-    field: Field<M>,
+    field: Field<M, impl Within<S>>,
   ) -> Result<M::Value<'a>, FieldError> {
     self.get(field)?.ok_or(FieldError::missing(field.tag()))
   }
@@ -99,7 +132,7 @@ impl<'a> Block<'a> {
   /// The field's value converted to `T`: `get_as::<Dec19>(Price)`.
   pub fn get_as<T: FromFix<M>, M: FieldType>(
     &self,
-    field: Field<M>,
+    field: Field<M, impl Within<S>>,
   ) -> Result<Option<T>, FieldError> {
     self
       .get(field)?
@@ -110,7 +143,7 @@ impl<'a> Block<'a> {
   /// [`get_as`](Self::get_as); absent is an error too.
   pub fn req_as<T: FromFix<M>, M: FieldType>(
     &self,
-    field: Field<M>,
+    field: Field<M, impl Within<S>>,
   ) -> Result<T, FieldError> {
     self.get_as(field)?.ok_or(FieldError::missing(field.tag()))
   }
@@ -132,11 +165,15 @@ impl<'a> Block<'a> {
   }
 
   /// The repeating group: empty if absent.
-  pub fn group(&self, group: impl Tag) -> Group<'a> {
+  pub fn group<G: GroupTag<S>>(&self, group: G) -> Group<'a, G::Instance> {
     let idx = self
       .find(group.tag(), None)
       .filter(|&i| self.msg.tape[i as usize].kind == Kind::Group);
-    Group { msg: self.msg, idx }
+    Group {
+      msg: self.msg,
+      idx,
+      _s: PhantomData,
+    }
   }
 
   /// The block's own fields and groups, in order. Groups are single entries
@@ -176,7 +213,7 @@ impl<'a> Block<'a> {
   }
 }
 
-impl fmt::Debug for Block<'_> {
+impl<S> fmt::Debug for Block<'_, S> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let mut list = f.debug_list();
     for c in self.fields() {
@@ -186,14 +223,22 @@ impl fmt::Debug for Block<'_> {
   }
 }
 
-/// A repeating group within a block. Absent groups are empty.
-#[derive(Clone, Copy)]
-pub struct Group<'a> {
+/// A repeating group within a block, whose instances are blocks of scope `S`.
+/// Absent groups are empty.
+pub struct Group<'a, S = Unscoped> {
   pub(crate) msg: &'a Message,
   pub(crate) idx: Option<u32>,
+  pub(crate) _s: PhantomData<fn() -> S>,
 }
 
-impl<'a> Group<'a> {
+impl<S> Clone for Group<'_, S> {
+  fn clone(&self) -> Self {
+    *self
+  }
+}
+impl<S> Copy for Group<'_, S> {}
+
+impl<'a, S> Group<'a, S> {
   /// Number of instances.
   pub fn len(&self) -> usize {
     self
@@ -206,11 +251,11 @@ impl<'a> Group<'a> {
   }
 
   /// The `n`th instance.
-  pub fn get(&self, n: usize) -> Option<Block<'a>> {
+  pub fn get(&self, n: usize) -> Option<Block<'a, S>> {
     self.iter().nth(n)
   }
 
-  pub fn iter(&self) -> GroupIter<'a> {
+  pub fn iter(&self) -> GroupIter<'a, S> {
     let (next, end) = match self.idx {
       Some(idx) => (idx + 1, self.msg.next_sibling(idx)),
       None => (0, 0),
@@ -219,6 +264,7 @@ impl<'a> Group<'a> {
       msg: self.msg,
       next,
       end,
+      _s: PhantomData,
     }
   }
 
@@ -233,34 +279,35 @@ impl<'a> Group<'a> {
   }
 }
 
-impl<'a> IntoIterator for Group<'a> {
-  type Item = Block<'a>;
-  type IntoIter = GroupIter<'a>;
-  fn into_iter(self) -> GroupIter<'a> {
+impl<'a, S> IntoIterator for Group<'a, S> {
+  type Item = Block<'a, S>;
+  type IntoIter = GroupIter<'a, S>;
+  fn into_iter(self) -> GroupIter<'a, S> {
     self.iter()
   }
 }
 
 /// The instances of a [`Group`].
-pub struct GroupIter<'a> {
+pub struct GroupIter<'a, S = Unscoped> {
   msg: &'a Message,
   next: u32,
   end: u32,
+  _s: PhantomData<fn() -> S>,
 }
 
-impl<'a> Iterator for GroupIter<'a> {
-  type Item = Block<'a>;
-  fn next(&mut self) -> Option<Block<'a>> {
+impl<'a, S> Iterator for GroupIter<'a, S> {
+  type Item = Block<'a, S>;
+  fn next(&mut self) -> Option<Block<'a, S>> {
     if self.next >= self.end {
       return None;
     }
-    let block = Block::instance(self.msg, self.next);
+    let block = Block::instance(self.msg, self.next).scoped();
     self.next = self.msg.next_sibling(self.next);
     Some(block)
   }
 }
 
-impl fmt::Debug for Group<'_> {
+impl<S> fmt::Debug for Group<'_, S> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_list().entries(self.iter()).finish()
   }
@@ -492,13 +539,14 @@ impl Message {
       start: 0,
       end: self.trailer_start,
       depth: 0,
+      _s: PhantomData,
     }
   }
 
   /// A top-level field from the header or the body.
   pub fn find<M: FieldType>(
     &self,
-    field: Field<M>,
+    field: Field<M, impl Scope>,
   ) -> Result<Option<M::Value<'_>>, FieldError> {
     self.header_and_body().get(field)
   }
@@ -506,7 +554,7 @@ impl Message {
   /// [`find`](Self::find), searching from `hint` first.
   pub fn find_from<M: FieldType>(
     &self,
-    field: Field<M>,
+    field: Field<M, impl Scope>,
     hint: Pos,
   ) -> Result<Option<M::Value<'_>>, FieldError> {
     self.header_and_body().get_from(field, hint)

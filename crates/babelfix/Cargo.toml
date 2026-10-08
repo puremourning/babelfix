@@ -21,6 +21,10 @@ serde = ["babelfix-core/serde", "babelfix-tokio?/serde"]
 decimix = ["babelfix-core/decimix"]
 ## Read and write decimal fields as the `decimix-finance` newtypes.
 decimix-finance = ["decimix", "babelfix-core/decimix-finance"]
+## Add `schema::fix44`, definitions from FIX 4.4.
+fix44 = ["babelfix-schema/fix44"]
+## Add `schema::fix42`, definitions from FIX 4.2.
+fix42 = ["babelfix-schema/fix42"]
 
 [dependencies]
 babelfix-core.workspace = true

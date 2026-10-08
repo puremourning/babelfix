@@ -40,6 +40,7 @@ mod normalize;
 mod parse;
 mod path;
 pub mod tape;
+pub mod typed;
 pub mod types;
 mod validate;
 mod view;
@@ -51,9 +52,11 @@ pub use error::{
 };
 pub use path::{FieldPath, ParsePathError};
 pub use tape::{Message, Region};
+pub use typed::{MessageScope, TypedMessage};
 pub use types::{
-  Date, Decimal, Field, FieldType, FixStr, FromFix, GroupField, MsgType, Tag,
-  Time, Timestamp, ToFix, ValueWriter, datatypes,
+  Date, Decimal, Field, FieldType, FixStr, FromFix, GroupField, GroupTag,
+  MsgType, Scope, Tag, Time, Timestamp, ToFix, Unscoped, ValueWriter, Within,
+  datatypes,
 };
 pub use view::{Block, Cursor, EntryKind, Group, GroupIter, Pos};
 
