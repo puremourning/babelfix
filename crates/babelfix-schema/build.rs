@@ -7,6 +7,9 @@ use std::fmt::Write;
 
 use babelfix_repo::{Field, FixVersion};
 
+#[path = "build/scopes.rs"]
+mod scopes;
+
 /// The module name for a version: `FIX.4.4` -> `fix44`.
 fn identifier_from_version(version: &str) -> String {
   version.to_lowercase().replace('.', "")
@@ -14,6 +17,7 @@ fn identifier_from_version(version: &str) -> String {
 
 fn main() {
   println!("cargo:rerun-if-changed=build.rs");
+  println!("cargo:rerun-if-changed=build");
   let repo = babelfix_repo::orchestrate().expect("embedded Orchestra data");
   let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
@@ -35,7 +39,8 @@ fn main() {
 
   let mut lib = String::new();
   for (module, fix) in versions {
-    std::fs::write(out.join(format!("{module}.rs")), generate(fix)).unwrap();
+    std::fs::write(out.join(format!("{module}.rs")), generate(fix, &module))
+      .unwrap();
     writeln!(
       lib,
       "pub mod {module} {{ \
@@ -56,7 +61,7 @@ enum Marker {
   Group,
 }
 
-fn generate(fix: &FixVersion) -> String {
+fn generate(fix: &FixVersion, module: &str) -> String {
   let mut fields: Vec<&Field> =
     fix.fields.values().map(|f| f.as_ref()).collect();
   fields.sort_by_key(|f| f.id);
@@ -232,6 +237,12 @@ fn generate(fix: &FixVersion) -> String {
     .unwrap();
   }
   src.push_str("}\n");
+  src.push_str(&scopes::generate_scopes(
+    fix,
+    module,
+    &length_fields,
+    &group_fields,
+  ));
   src
 }
 

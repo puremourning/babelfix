@@ -12,12 +12,16 @@
 //! search. Entries before an insertion point never move, so none of those
 //! indices go stale however much is inserted into the view.
 
+use std::marker::PhantomData;
+
 use super::SOH;
 use super::dict::{FieldKind, GroupIdx};
 use super::error::{FieldError, FieldErrorKind, ValueError};
 use super::path::FieldPath;
 use super::tape::{Entry, Kind, Message, Region, Seg};
-use super::types::{Field, FieldType, Tag, ToFix, ValueWriter};
+use super::types::{
+  Field, FieldType, GroupTag, Tag, ToFix, Unscoped, ValueWriter, Within,
+};
 use super::view::{Block, Cursor};
 
 /// BeginString, BodyLength, CheckSum and MsgType: derived or fixed when the
@@ -58,9 +62,13 @@ impl Place {
 }
 
 /// A block (a region, or a group instance) being built or edited.
-pub struct BlockMut<'a> {
+///
+/// Its scope `S` says which fields it holds: [`set`](Self::set) accepts only
+/// fields [`Within`] `S`. An [`Unscoped`] block accepts any field.
+pub struct BlockMut<'a, S = Unscoped> {
   msg: &'a mut Message,
   place: Place,
+  _s: PhantomData<fn() -> S>,
 }
 
 /// A group instance being built or edited: a [`BlockMut`] (which it
@@ -69,38 +77,39 @@ pub struct BlockMut<'a> {
 /// If it is dropped with nothing in the instance, the instance goes — and its
 /// group, if that was the last one — so an instance only exists once something
 /// is in it, and a group's length always matches what is written.
-pub struct InstanceMut<'a> {
-  block: BlockMut<'a>,
+pub struct InstanceMut<'a, S = Unscoped> {
+  block: BlockMut<'a, S>,
 }
 
-impl<'a> std::ops::Deref for InstanceMut<'a> {
-  type Target = BlockMut<'a>;
-  fn deref(&self) -> &BlockMut<'a> {
+impl<'a, S> std::ops::Deref for InstanceMut<'a, S> {
+  type Target = BlockMut<'a, S>;
+  fn deref(&self) -> &BlockMut<'a, S> {
     &self.block
   }
 }
 
-impl<'a> std::ops::DerefMut for InstanceMut<'a> {
-  fn deref_mut(&mut self) -> &mut BlockMut<'a> {
+impl<'a, S> std::ops::DerefMut for InstanceMut<'a, S> {
+  fn deref_mut(&mut self) -> &mut BlockMut<'a, S> {
     &mut self.block
   }
 }
 
-impl Drop for InstanceMut<'_> {
+impl<S> Drop for InstanceMut<'_, S> {
   fn drop(&mut self) {
-    let BlockMut { msg, place } = &mut self.block;
+    let BlockMut { msg, place, .. } = &mut self.block;
     msg.prune(place);
   }
 }
 
-impl std::fmt::Debug for InstanceMut<'_> {
+impl<S> std::fmt::Debug for InstanceMut<'_, S> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     std::fmt::Debug::fmt(&self.block, f)
   }
 }
 
-/// A repeating group being built or edited.
-pub struct GroupMut<'a> {
+/// A repeating group being built or edited, whose instances are blocks of
+/// scope `S`.
+pub struct GroupMut<'a, S = Unscoped> {
   msg: &'a mut Message,
   /// The block the group is in.
   parent: Place,
@@ -109,6 +118,7 @@ pub struct GroupMut<'a> {
   idx: Option<u32>,
   /// The group's definition, if the dictionary has one.
   def: Option<GroupIdx>,
+  _s: PhantomData<fn() -> S>,
 }
 
 /// A position in a message, for editing. See [`Cursor`].
@@ -119,17 +129,11 @@ pub struct CursorMut<'a> {
 
 impl Message {
   pub fn header_mut(&mut self) -> BlockMut<'_> {
-    BlockMut {
-      msg: self,
-      place: Place::region(Region::Header),
-    }
+    BlockMut::new(self, Place::region(Region::Header))
   }
 
   pub fn body_mut(&mut self) -> BlockMut<'_> {
-    BlockMut {
-      msg: self,
-      place: Place::region(Region::Body),
-    }
+    BlockMut::new(self, Place::region(Region::Body))
   }
 
   /// If `place` is an instance with nothing in it, remove it, and its group if
@@ -419,15 +423,34 @@ impl Message {
   }
 }
 
-impl<'a> BlockMut<'a> {
+impl<'a, S> BlockMut<'a, S> {
+  fn new(msg: &'a mut Message, place: Place) -> Self {
+    Self {
+      msg,
+      place,
+      _s: PhantomData,
+    }
+  }
+
+  /// The same block, as scope `T`; the caller vouches that it holds `T`.
+  pub(crate) fn scoped<T>(self) -> BlockMut<'a, T> {
+    BlockMut::new(self.msg, self.place)
+  }
+
+  /// The same block, unchecked: it accepts any field.
+  pub fn unscoped(&mut self) -> BlockMut<'_> {
+    BlockMut::new(&mut *self.msg, self.place.clone())
+  }
+
   /// Read the block as it stands.
-  pub fn as_block(&self) -> Block<'_> {
+  pub fn as_block(&self) -> Block<'_, S> {
     let (start, end, depth) = self.msg.owner_range(self.place.owner);
     Block {
       msg: self.msg,
       start,
       end,
       depth,
+      _s: PhantomData,
     }
   }
 
@@ -442,7 +465,7 @@ impl<'a> BlockMut<'a> {
   /// [`try_set`](Self::try_set) for values you don't control.
   pub fn set<M: FieldType, V: ToFix<M>>(
     &mut self,
-    field: Field<M>,
+    field: Field<M, impl Within<S>>,
     value: V,
   ) -> &mut Self {
     let result = self.try_set(field, value).map(|_| ());
@@ -452,7 +475,7 @@ impl<'a> BlockMut<'a> {
   /// Set a field, or say why its value is unusable.
   pub fn try_set<M: FieldType, V: ToFix<M>>(
     &mut self,
-    field: Field<M>,
+    field: Field<M, impl Within<S>>,
     value: V,
   ) -> Result<&mut Self, FieldError> {
     self.put(field.tag(), |w| value.to_fix(w))
@@ -582,7 +605,7 @@ impl<'a> BlockMut<'a> {
   ///
   /// BeginString, BodyLength, CheckSum and MsgType are each message's own, and
   /// are not copied (`false`, after a `debug_assert!`).
-  pub fn copy(&mut self, src: &Block<'_>, tag: impl Tag) -> bool {
+  pub fn copy<T>(&mut self, src: &Block<'_, T>, tag: impl Tag) -> bool {
     let tag = tag.tag();
     if is_framing(tag) {
       debug_assert!(false, "tag {tag} is derived and cannot be copied");
@@ -654,7 +677,10 @@ impl<'a> BlockMut<'a> {
   }
 
   /// A repeating group in this block, to build or edit.
-  pub fn group_mut(&mut self, group: impl Tag) -> GroupMut<'_> {
+  pub fn group_mut<G: GroupTag<S>>(
+    &mut self,
+    group: G,
+  ) -> GroupMut<'_, G::Instance> {
     let tag = group.tag();
     let idx = self
       .find(tag)
@@ -666,17 +692,18 @@ impl<'a> BlockMut<'a> {
       tag,
       idx,
       def,
+      _s: PhantomData,
     }
   }
 }
 
-impl std::fmt::Debug for BlockMut<'_> {
+impl<S> std::fmt::Debug for BlockMut<'_, S> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     std::fmt::Debug::fmt(&self.as_block(), f)
   }
 }
 
-impl<'a> GroupMut<'a> {
+impl<'a, S> GroupMut<'a, S> {
   /// The Group entry, if it still exists: an instance view dropped empty can
   /// remove the group along with its last instance.
   fn group(&self) -> Option<u32> {
@@ -749,25 +776,25 @@ impl<'a> GroupMut<'a> {
   }
 
   /// A view of the instance entry at `q`.
-  fn instance_view(&mut self, g: u32, q: u32) -> InstanceMut<'_> {
+  fn instance_view(&mut self, g: u32, q: u32) -> InstanceMut<'_, S> {
     let mut ancestors = self.inner_ancestors(g);
     ancestors.push(q);
     InstanceMut {
-      block: BlockMut {
-        msg: &mut *self.msg,
-        place: Place {
+      block: BlockMut::new(
+        &mut *self.msg,
+        Place {
           owner: Owner::Instance(q),
           region: self.parent.region,
           def: self.def,
           ancestors,
         },
-      },
+      ),
     }
   }
 
   /// Add an instance at the end; returns it, empty, to fill in. If the view is
   /// dropped with nothing in the instance, the instance goes too.
-  pub fn push(&mut self) -> InstanceMut<'_> {
+  pub fn push(&mut self) -> InstanceMut<'_, S> {
     let n = self.len();
     self.insert(n)
   }
@@ -777,7 +804,7 @@ impl<'a> GroupMut<'a> {
   /// # Panics
   ///
   /// If `n > len()`.
-  pub fn insert(&mut self, n: usize) -> InstanceMut<'_> {
+  pub fn insert(&mut self, n: usize) -> InstanceMut<'_, S> {
     assert!(n <= self.len(), "instance {n} of {}", self.len());
     let g = self.ensure();
     let at = self.instance_at(n).expect("checked above");
@@ -796,7 +823,7 @@ impl<'a> GroupMut<'a> {
   }
 
   /// The `n`th instance, to edit.
-  pub fn get_mut(&mut self, n: usize) -> Option<InstanceMut<'_>> {
+  pub fn get_mut(&mut self, n: usize) -> Option<InstanceMut<'_, S>> {
     let g = self.group()?;
     let q = self.instance_at(n).filter(|_| n < self.len())?;
     Some(self.instance_view(g, q))
@@ -824,7 +851,7 @@ impl<'a> GroupMut<'a> {
   /// group, however many go.
   pub fn retain(
     &mut self,
-    mut keep: impl FnMut(Block<'_>) -> bool,
+    mut keep: impl FnMut(Block<'_, S>) -> bool,
   ) -> &mut Self {
     let Some(g) = self.group() else {
       return self;
@@ -835,7 +862,7 @@ impl<'a> GroupMut<'a> {
     let mut q = g + 1;
     while q < end {
       let next = self.msg.next_sibling(q);
-      if keep(Block::instance(self.msg, q)) {
+      if keep(Block::instance(self.msg, q).scoped()) {
         kept.extend_from_slice(&self.msg.tape[q as usize..next as usize]);
         count += 1;
       }
@@ -881,10 +908,7 @@ impl<'a> CursorMut<'a> {
   /// The block this position is in, to edit.
   pub fn block_mut(&mut self) -> BlockMut<'_> {
     let place = self.msg.place_of(self.idx);
-    BlockMut {
-      msg: &mut *self.msg,
-      place,
-    }
+    BlockMut::new(&mut *self.msg, place)
   }
 
   /// Set this field's value to these bytes.
@@ -909,14 +933,11 @@ impl<'a> CursorMut<'a> {
       }
       _ => {
         let place = self.msg.place_of(self.idx);
-        let mut block = BlockMut {
-          msg: &mut *self.msg,
-          place,
-        };
+        let mut block: BlockMut<'_> = BlockMut::new(&mut *self.msg, place);
         block.remove(tag);
         // Removing an instance's last field removes the instance, as
         // dropping an empty InstanceMut does.
-        let BlockMut { msg, place } = &mut block;
+        let BlockMut { msg, place, .. } = &mut block;
         msg.prune(place);
       }
     }
@@ -938,10 +959,7 @@ impl<'a> CursorMut<'a> {
       std::mem::replace(&mut view.block.place, Place::region(Region::Body));
     drop(view);
     Some(InstanceMut {
-      block: BlockMut {
-        msg: &mut *self.msg,
-        place,
-      },
+      block: BlockMut::new(&mut *self.msg, place),
     })
   }
 }

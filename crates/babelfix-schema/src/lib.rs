@@ -20,6 +20,9 @@
 //! - [`msg_type`]: `MsgType(35)` values by message name.
 //! - [`codesets`]: an enum per codeset, each with an `Unlisted` variant for
 //!   values the specification does not list.
+//! - [`messages`], [`components`] and [`groups`]: a module per message,
+//!   component and repeating group, holding just the fields and groups that
+//!   belong to it. See [Scoped messages](#scoped-messages).
 //!
 //! Versions' definitions are separate types: a FIX 4.2 `ExecType` is not a
 //! FIX.Latest `ExecType`, since the codes differ.
@@ -36,6 +39,72 @@
 //! let mut order = Message::new(dicts.get("FIX.4.4").unwrap(), msg_type::NewOrderSingle);
 //! order.body_mut().set(ClOrdID, "order-1").set(Side, Side::Buy);
 //! ```
+//!
+//! # Scoped messages
+//!
+//! Each message's module has a `fields` module and a `groups` module with only
+//! the fields and groups the message may contain, its components' included —
+//! so an editor completing `new_order_single::fields::` offers just those.
+//! Each group in `groups` is also a module of the same name, with its
+//! instances' `fields` and `groups`. `header` and `trailer` are the
+//! StandardHeader's and StandardTrailer's modules.
+//!
+//! Those constants are *scoped*: each names the message, component or group
+//! it belongs to. [`TypedMessage`](babelfix_core::message::TypedMessage) gives a message
+//! blocks of its own scope, which accept only its fields:
+//!
+//! ```no_run
+//! use babelfix_core::message::{Dictionaries, TypedMessage};
+//! use babelfix_schema::codesets::Side;
+//! use babelfix_schema::messages::new_order_single::{self as nos, NewOrderSingle};
+//!
+//! let dicts = Dictionaries::standard().unwrap();
+//! let mut order = TypedMessage::<NewOrderSingle>::new(dicts.get("FIX.Latest").unwrap());
+//! let mut body = order.body_mut();
+//! body
+//!   .set(nos::fields::ClOrdID, "order-1")
+//!   .set(nos::fields::Side, Side::Buy)
+//!   .set(nos::fields::Symbol, "VOD.L"); // from the Instrument component
+//! body
+//!   .group_mut(nos::groups::NoPartyIDs)
+//!   .push()
+//!   .set(nos::groups::NoPartyIDs::fields::PartyID, "ABC");
+//! ```
+//!
+//! A field from another message does not compile:
+//!
+//! ```compile_fail,E0277
+//! # use babelfix_core::message::{Dictionaries, TypedMessage};
+//! # use babelfix_schema::messages::{execution_report as er, new_order_single::NewOrderSingle};
+//! # let dicts = Dictionaries::standard().unwrap();
+//! # let mut order = TypedMessage::<NewOrderSingle>::new(dicts.get("FIX.Latest").unwrap());
+//! order.body_mut().set(er::fields::ExecID, "exec-1");
+//! ```
+//!
+//! Nor does one of the message's own fields in a group instance:
+//!
+//! ```compile_fail,E0277
+//! # use babelfix_core::message::{Dictionaries, TypedMessage};
+//! # use babelfix_schema::messages::new_order_single::{self as nos, NewOrderSingle};
+//! # let dicts = Dictionaries::standard().unwrap();
+//! # let mut order = TypedMessage::<NewOrderSingle>::new(dicts.get("FIX.Latest").unwrap());
+//! order.body_mut().group_mut(nos::groups::NoPartyIDs).push().set(nos::fields::ClOrdID, "x");
+//! ```
+//!
+//! Nor does an unscoped field, from [`fields`]:
+//!
+//! ```compile_fail,E0277
+//! # use babelfix_core::message::{Dictionaries, TypedMessage};
+//! # use babelfix_schema::messages::new_order_single::NewOrderSingle;
+//! # let dicts = Dictionaries::standard().unwrap();
+//! # let mut order = TypedMessage::<NewOrderSingle>::new(dicts.get("FIX.Latest").unwrap());
+//! order.body_mut().set(babelfix_schema::fields::ClOrdID, "order-1");
+//! ```
+//!
+//! — though an unscoped block (a plain `Message`'s, or a typed block's
+//! `unscoped()` view) accepts any field, scoped or not. To read a message you
+//! hold by reference as a typed one, use
+//! [`Message::body_as`](babelfix_core::message::Message::body_as).
 
 #![allow(non_upper_case_globals, non_snake_case, non_camel_case_types)]
 #![allow(clippy::all)]
