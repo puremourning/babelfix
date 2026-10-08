@@ -1,21 +1,52 @@
 //! Generates the typed schema (`fields`, `tags`, `msg_type`, `codesets`)
-//! from the FIX.Latest Orchestra data.
-//!
-//! One set of constants serves every FIX version: tag numbers, datatypes and
-//! codes are shared, and FIX.Latest is the superset.
+//! from the Orchestra data: a module per FIX version, FIX.Latest always and
+//! the others when their feature is enabled.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write;
 
 use babelfix_repo::{Field, FixVersion};
 
+/// The module name for a version: `FIX.4.4` -> `fix44`.
+fn identifier_from_version(version: &str) -> String {
+  version.to_lowercase().replace('.', "")
+}
+
 fn main() {
   println!("cargo:rerun-if-changed=build.rs");
   let repo = babelfix_repo::orchestrate().expect("embedded Orchestra data");
-  let fix = repo.get_version("FIX.Latest").expect("FIX.Latest");
-  let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap())
-    .join("schema.rs");
-  std::fs::write(out, generate(&fix)).unwrap();
+  let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+
+  // FIX.Latest is always built; other versions only when their feature is on.
+  let mut versions: Vec<_> = repo
+    .versions
+    .iter()
+    .map(|(version, fix)| (identifier_from_version(version), fix))
+    .filter(|(module, _)| {
+      module == "fixlatest"
+        || std::env::var_os(format!(
+          "CARGO_FEATURE_{}",
+          module.to_uppercase()
+        ))
+        .is_some()
+    })
+    .collect();
+  versions.sort_by(|a, b| a.0.cmp(&b.0));
+
+  let mut lib = String::new();
+  for (module, fix) in versions {
+    std::fs::write(out.join(format!("{module}.rs")), generate(fix)).unwrap();
+    writeln!(
+      lib,
+      "pub mod {module} {{ \
+         include!(concat!(env!(\"OUT_DIR\"), \"/{module}.rs\")); \
+       }}"
+    )
+    .unwrap();
+  }
+  lib.push_str("pub use fixlatest::*;\n");
+
+  std::fs::write(out.join("schema.rs"), lib).unwrap();
 }
 
 /// Where a field's value type comes from.
@@ -32,6 +63,10 @@ fn generate(fix: &FixVersion) -> String {
 
   let length_fields: HashSet<u32> =
     fields.iter().filter_map(|f| f.length_id).collect();
+  // Before FIX 4.4 there is no NumInGroup datatype: a group's count field is
+  // an `int`, so find them from the groups themselves.
+  let group_fields: HashSet<u32> =
+    fix.groups.values().map(|g| g.num_in_group_tag).collect();
 
   let mut src = String::new();
   let mut codesets_used = BTreeMap::new();
@@ -46,7 +81,7 @@ fn generate(fix: &FixVersion) -> String {
   for f in &fields {
     let doc = format!("  /// {} ({}): `{}`\n", f.name, f.id, f.field_type);
     src.push_str(&doc);
-    match marker(fix, f, &length_fields) {
+    match marker(fix, f, &length_fields, &group_fields) {
       Marker::Group => writeln!(
         src,
         "  pub const {}: GroupField = GroupField::new({});",
@@ -200,12 +235,17 @@ fn generate(fix: &FixVersion) -> String {
   src
 }
 
-fn marker(fix: &FixVersion, f: &Field, length_fields: &HashSet<u32>) -> Marker {
+fn marker(
+  fix: &FixVersion,
+  f: &Field,
+  length_fields: &HashSet<u32>,
+  group_fields: &HashSet<u32>,
+) -> Marker {
   if length_fields.contains(&f.id) {
     return Marker::Datatype("DataLength");
   }
   let datatype = f.datatype(fix);
-  if fix.datatype_is(datatype, "NumInGroup") {
+  if group_fields.contains(&f.id) || fix.datatype_is(datatype, "NumInGroup") {
     return Marker::Group;
   }
   if f.is_codeset(fix) {

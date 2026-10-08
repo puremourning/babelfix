@@ -23,3 +23,9 @@ babelfix-core.workspace = true
 
 [build-dependencies]
 babelfix-repo.workspace = true
+
+# FIX.Latest is always built, and re-exported at the top level. Each feature
+# adds a module of definitions for that version.
+[features]
+fix44 = []
+fix42 = []

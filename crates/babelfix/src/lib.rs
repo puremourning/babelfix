@@ -9,7 +9,7 @@
 //!
 //! | Layer | Module / crate | Responsibility |
 //! |-------|----------------|----------------|
-//! | Schema | [`schema`] (`babelfix-schema`) | Typed field constants, message types and codeset enums, generated from FIX.Latest |
+//! | Schema | [`schema`] (`babelfix-schema`) | Typed field constants, message types and codeset enums, generated from Orchestra: FIX.Latest, plus FIX 4.4 and 4.2 by feature |
 //! | Repository | [`repository`] (`babelfix-repo`) | Parsed FIX Orchestra metadata: versions, messages, fields, components, groups |
 //! | Message | [`message`] (`babelfix-core`) | Parsing, reading, building, editing and serialising FIX messages |
 //! | Codec | [`codec`] (`babelfix-core`) | Framing a byte stream into messages and back |
@@ -117,7 +117,8 @@ pub use babelfix_core::{
 };
 
 /// Typed FIX field constants, message types and codeset enums, generated from
-/// the FIX.Latest Orchestra data. See [`babelfix_schema`].
+/// the Orchestra data: FIX.Latest at the top level, and other versions in
+/// their own modules by feature. See [`babelfix_schema`].
 pub use babelfix_schema as schema;
 
 /// The session layer.
