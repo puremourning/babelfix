@@ -140,8 +140,8 @@ impl std::fmt::Debug for SessionSetup {
 }
 
 /// The wall clock the tokio driver stamps `SendingTime` from.
-pub(crate) fn wall_clock() -> chrono::DateTime<chrono::Utc> {
-  chrono::Utc::now()
+pub(crate) fn wall_clock() -> jiff::Timestamp {
+  jiff::Timestamp::now()
 }
 
 #[derive(Debug)]
@@ -229,7 +229,7 @@ pub enum SessionEvent {
   /// handled is no use for that: an outbound message reaches the
   /// [`SessionStore`] from the session task, before the application has seen
   /// the event that provoked it.)
-  RawMessageReceived(crate::message::Message, chrono::DateTime<chrono::Utc>),
+  RawMessageReceived(crate::message::Message, jiff::Timestamp),
 
   /// Emitted when any FIX message was sent to the remote, including admin
   /// messages, as it went on the wire. Useful for auditing, logging and
@@ -301,10 +301,7 @@ impl SessionEvent {
   /// hands out borrows, and turning them into owned events for delivery over a
   /// channel means cloning. A driver that implements
   /// [`SessionOutput`] directly pays none of it.
-  fn from_core(
-    event: Event<'_>,
-    received_at: chrono::DateTime<chrono::Utc>,
-  ) -> Option<Self> {
+  fn from_core(event: Event<'_>, received_at: jiff::Timestamp) -> Option<Self> {
     Some(match event {
       Event::ConnectionEstablished => SessionEvent::ConnectionEstablished,
       Event::LoggedOn => SessionEvent::LoggedOn,
@@ -357,7 +354,7 @@ pub(crate) struct Delivery {
   events: VecDeque<SessionEvent>,
   event_sender: mpsc::Sender<SessionEvent>,
   /// When the bytes being processed were read from the socket.
-  pub(crate) received_at: chrono::DateTime<chrono::Utc>,
+  pub(crate) received_at: jiff::Timestamp,
 }
 
 impl Delivery {

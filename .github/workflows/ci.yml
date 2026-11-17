@@ -43,7 +43,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Built on its own, not as part of --workspace: cargo unifies features
       # across a single invocation, so a workspace build would hand the core
-      # back `chrono/now` (and anything else babelfix-tokio enables) and the
+      # back `jiff/std` (and anything else babelfix-tokio enables) and the
       # guarantee below would silently stop meaning anything.
       - name: Build the core alone
         run: cargo build -p babelfix-core
@@ -56,11 +56,11 @@ jobs:
             echo "::error::babelfix-core has picked up an async runtime dependency"
             exit 1
           fi
-      # `Utc::now()` must not exist in the core: the driver supplies the clock.
-      # chrono gates it behind the `now` feature, which the core does not enable.
+      # `Timestamp::now()` must not exist in the core: the driver supplies the clock.
+      # jiff gates it behind the `std` feature, which the core does not enable.
       - name: No wall clock in the core
         run: |
-          if cargo tree -p babelfix-core -e features | grep -q 'chrono feature "now"' ; then
-            echo "::error::babelfix-core has enabled chrono's clock"
+          if cargo tree -p babelfix-core -e features | grep -q 'jiff feature "std"' ; then
+            echo "::error::babelfix-core has enabled jiff's clock"
             exit 1
           fi

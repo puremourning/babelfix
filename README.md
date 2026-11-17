@@ -131,7 +131,7 @@ assert_eq!(parsed.body().req(Symbol).unwrap(), "AAPL");
 assert_eq!(parsed.body().req(OrderQty).unwrap().as_str(), "100");
 ```
 
-Timestamps are set with a precision: `set(TransactTime, (Utc::now(),
+Timestamps are set with a precision: `set(TransactTime, (Timestamp::now(),
 TimePrecision::Micros))`. Strings are Latin-1, as FIX defines them; setting
 text outside Latin-1 panics in debug builds, so use `try_set` for text you
 didn't write.

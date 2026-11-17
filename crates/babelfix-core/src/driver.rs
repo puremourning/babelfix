@@ -47,7 +47,7 @@
 use std::time::Instant;
 
 use bytes::BytesMut;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::codec::{FixDecoder, FixEncoder};
 use crate::message::{Dictionaries, Message};
@@ -61,8 +61,8 @@ use crate::{Error, Result};
 ///
 /// A plain function pointer rather than a trait: it keeps the driver free of
 /// generics, and it is called once per outbound message so a caller with a
-/// better clock than `Utc::now` — a TSC read, say — can supply it.
-pub type Clock = fn() -> DateTime<Utc>;
+/// better clock than `Timestamp::now` — a TSC read, say — can supply it.
+pub type Clock = fn() -> Timestamp;
 
 /// The transport half of [`SessionOutput`], borrowing the caller's event sink
 /// for the application half.

@@ -497,7 +497,7 @@ fn matcher_smoke() {
   // Composition with matches_pattern! on a SessionEvent (the intended usage).
   let ev = fix::session::SessionEvent::RawMessageReceived(
     built.clone(),
-    chrono::Utc::now(),
+    jiff::Timestamp::now(),
   );
   verify_that!(
     &ev,

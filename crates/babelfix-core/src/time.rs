@@ -6,13 +6,13 @@
 //! [`TimePrecision`] selects how many fractional digits are emitted.
 //!
 //! **This module reads no clock.** It formats an instant it is handed. Built on
-//! its own, the crate does not even enable chrono's `now` feature, so
-//! `Utc::now()` is not in scope here — the driver owns the clock, and stamps
+//! its own, the crate does not even enable jiff's `std` feature, so
+//! `Timestamp::now()` is not in scope here — the driver owns the clock, and stamps
 //! `SendingTime` as late as it can. See [`crate::message`] for where the result is used.
 
 use std::fmt;
 
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use jiff::{Timestamp, tz::Offset};
 
 /// `"YYYYMMDD-HH:MM:SS."` — everything before the fractional digits.
 const PREFIX_LEN: usize = 18;
@@ -122,11 +122,11 @@ fn write_digits(buf: &mut [u8], at: usize, value: u32, width: usize) -> usize {
 
 /// Format `when` as a FIX UTC timestamp at the given precision.
 ///
-/// The formatting is done by hand rather than through `chrono`'s `format`
+/// The formatting is done by hand rather than through jiff's `strftime`
 /// machinery: the layout is fixed, this sits on the send path, and it lets the
 /// result live on the stack. To format straight into a buffer of your own, see
 /// [`write_fix_time`].
-pub fn fix_time(when: DateTime<Utc>, precision: TimePrecision) -> FixTime {
+pub fn fix_time(when: Timestamp, precision: TimePrecision) -> FixTime {
   let mut buf = [0u8; MAX_LEN];
   let len = write_fix_time(when, precision, &mut buf);
   FixTime { buf, len }
@@ -139,37 +139,35 @@ pub fn fix_time(when: DateTime<Utc>, precision: TimePrecision) -> FixTime {
 ///
 /// If `buf` is shorter than `precision.width()`.
 pub fn write_fix_time(
-  when: DateTime<Utc>,
+  when: Timestamp,
   precision: TimePrecision,
   buf: &mut [u8],
 ) -> usize {
   let buf = &mut buf[..precision.width()];
-  let date = when.date_naive();
-  let time = when.time();
+  let dt = Offset::UTC.to_datetime(when);
 
   // A year outside 0..=9999 cannot be rendered in the four digits FIX allows.
   // Clamping keeps the field fixed-width; such a timestamp is nonsense anyway.
-  let year = date.year().clamp(0, 9999) as u32;
+  let year = dt.year().clamp(0, 9999) as u32;
 
   let mut at = write_digits(buf, 0, year, 4);
-  at = write_digits(buf, at, date.month(), 2);
-  at = write_digits(buf, at, date.day(), 2);
+  at = write_digits(buf, at, dt.month() as u32, 2);
+  at = write_digits(buf, at, dt.day() as u32, 2);
   buf[at] = b'-';
   at += 1;
-  at = write_digits(buf, at, time.hour(), 2);
+  at = write_digits(buf, at, dt.hour() as u32, 2);
   buf[at] = b':';
   at += 1;
-  at = write_digits(buf, at, time.minute(), 2);
+  at = write_digits(buf, at, dt.minute() as u32, 2);
   buf[at] = b':';
   at += 1;
-  at = write_digits(buf, at, time.second(), 2);
+  at = write_digits(buf, at, dt.second() as u32, 2);
   buf[at] = b'.';
   at += 1;
 
-  // `Timelike::nanosecond` returns 1_000_000_000..2_000_000_000 during a leap
-  // second. FIX has no way to express one, so fold it into the last nanosecond
-  // of the minute rather than emitting a 10-digit fraction.
-  let nanos = time.nanosecond().min(999_999_999);
+  // jiff has no leap seconds, and `subsec_nanosecond` of a civil datetime is
+  // always in 0..1_000_000_000.
+  let nanos = dt.subsec_nanosecond() as u32;
 
   let at = match precision {
     TimePrecision::Millis => write_digits(buf, at, nanos / 1_000_000, 3),
@@ -189,20 +187,10 @@ pub fn write_fix_time(
 mod tests {
   use super::*;
 
-  fn at(
-    y: i32,
-    mo: u32,
-    d: u32,
-    h: u32,
-    mi: u32,
-    s: u32,
-    nanos: u32,
-  ) -> DateTime<Utc> {
-    chrono::NaiveDate::from_ymd_opt(y, mo, d)
+  fn at(y: i16, mo: i8, d: i8, h: i8, mi: i8, s: i8, nanos: i32) -> Timestamp {
+    Offset::UTC
+      .to_timestamp(jiff::civil::datetime(y, mo, d, h, mi, s, nanos))
       .unwrap()
-      .and_hms_nano_opt(h, mi, s, nanos)
-      .unwrap()
-      .and_utc()
   }
 
   #[test]
@@ -256,30 +244,25 @@ mod tests {
   }
 
   #[test]
-  fn matches_chrono_reference_formatting() {
+  fn matches_jiff_reference_formatting() {
     // The hand-rolled formatter must agree with the `%Y%m%d-%H:%M:%S.%f` form
     // this replaced.
     let t = at(2026, 8, 9, 14, 3, 7, 123_456_789);
     assert_eq!(
       fix_time(t, TimePrecision::Millis).as_str(),
-      t.format("%Y%m%d-%H:%M:%S.%3f").to_string()
+      t.strftime("%Y%m%d-%H:%M:%S.%3f").to_string()
     );
     assert_eq!(
       fix_time(t, TimePrecision::Nanos).as_str(),
-      t.format("%Y%m%d-%H:%M:%S.%9f").to_string()
+      t.strftime("%Y%m%d-%H:%M:%S.%9f").to_string()
     );
   }
 
   #[test]
-  fn leap_second_folds_rather_than_overflowing() {
-    // chrono reports a leap second as nanosecond >= 1_000_000_000.
-    let t = chrono::NaiveDate::from_ymd_opt(2016, 12, 31)
-      .unwrap()
-      .and_hms_nano_opt(23, 59, 59, 1_500_000_000)
-      .unwrap()
-      .and_utc();
+  fn out_of_range_years_are_clamped_to_four_digits() {
+    let t = Timestamp::MIN;
     let formatted = fix_time(t, TimePrecision::Nanos);
     assert_eq!(formatted.len(), TimePrecision::Nanos.width());
-    assert_eq!(formatted.as_str(), "20161231-23:59:59.999999999");
+    assert!(formatted.as_str().starts_with("0000"));
   }
 }
