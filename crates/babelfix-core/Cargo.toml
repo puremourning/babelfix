@@ -39,7 +39,7 @@ decimix-finance = { version = "0.1.0", optional = true }
 # Note this only holds when the crate is built alone (`cargo build -p
 # babelfix-core`); a `--workspace` build unifies features and hands `std` back.
 # CI checks the standalone build for exactly this reason.
-jiff = { version = "0.2", default-features = false, features = ["alloc"] }
+jiff = { version = "1.0", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 # The schema depends on the core, not the other way round; the core's
