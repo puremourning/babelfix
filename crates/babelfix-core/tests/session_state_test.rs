@@ -82,7 +82,7 @@ impl SessionOutput for Recorder {
     let clock = &mut self.clock;
     msg.stamp(|| {
       *clock += 1;
-      chrono::DateTime::from_timestamp(1_700_000_000, *clock)
+      jiff::Timestamp::new(1_700_000_000, *clock as i32)
         .expect("valid timestamp")
     });
     Ok(())

@@ -55,7 +55,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Instant;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::driver::Clock;
 use crate::message::Message;
@@ -455,7 +455,7 @@ impl Sequencer {
       .set(SenderCompID, self.sender_comp_id.as_str())
       .set(TargetCompID, self.target_comp_id.as_str());
     if stamp {
-      let now: DateTime<Utc> = (self.clock)();
+      let now: Timestamp = (self.clock)();
       header.set(SendingTime, (now, self.precision));
     }
   }

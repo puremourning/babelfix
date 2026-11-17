@@ -837,17 +837,17 @@ macro_rules! text_view {
 
 text_view!(
   /// A `UTCTimestamp` value: `YYYYMMDD-HH:MM:SS[.s…]`. Unchecked until
-  /// converted with `get_as::<DateTime<Utc>>`.
+  /// converted with `get_as::<jiff::Timestamp>`.
   Timestamp
 );
 text_view!(
   /// A `UTCDateOnly` or `LocalMktDate` value: `YYYYMMDD`. Unchecked until
-  /// converted with `get_as::<NaiveDate>`.
+  /// converted with `get_as::<jiff::civil::Date>`.
   Date
 );
 text_view!(
   /// A `UTCTimeOnly` or `LocalMktTime` value: `HH:MM:SS[.s…]`. Unchecked until
-  /// converted with `get_as::<NaiveTime>`.
+  /// converted with `get_as::<jiff::civil::Time>`.
   Time
 );
 
@@ -884,8 +884,14 @@ impl ToFix<UtcTimestamp> for Timestamp<'_> {
   }
 }
 
-mod chrono_impls {
-  use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Timelike, Utc};
+mod jiff_impls {
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  use jiff::{
+    SignedDuration,
+    civil::{Date as CivilDate, Time as CivilTime},
+    tz::Offset,
+  };
 
   use super::*;
   use crate::time::{TimePrecision, write_fix_time};
@@ -898,22 +904,22 @@ mod chrono_impls {
     parse_uint(raw).map(|v| v as u32)
   }
 
-  fn date(raw: &[u8]) -> Result<NaiveDate, ValueError> {
+  fn date(raw: &[u8]) -> Result<CivilDate, ValueError> {
     if raw.len() != 8 {
       return Err(ValueError::Malformed);
     }
-    NaiveDate::from_ymd_opt(
-      digits(&raw[0..4], 4)? as i32,
-      digits(&raw[4..6], 2)?,
-      digits(&raw[6..8], 2)?,
+    CivilDate::new(
+      digits(&raw[0..4], 4)? as i16,
+      digits(&raw[4..6], 2)? as i8,
+      digits(&raw[6..8], 2)? as i8,
     )
-    .ok_or(ValueError::OutOfRange)
+    .map_err(|_| ValueError::OutOfRange)
   }
 
   /// `HH:MM:SS` optionally followed by `.` and 1 to 12 digits (picoseconds are
   /// truncated to the nanosecond). A leap second, `:60`, is folded into the
   /// last nanosecond of the minute, as `fix_time` does when formatting.
-  fn time(raw: &[u8]) -> Result<NaiveTime, ValueError> {
+  fn time(raw: &[u8]) -> Result<CivilTime, ValueError> {
     if raw.len() < 8 || raw[2] != b':' || raw[5] != b':' {
       return Err(ValueError::Malformed);
     }
@@ -932,22 +938,25 @@ mod chrono_impls {
       s = 59;
       nanos = 999_999_999;
     }
-    NaiveTime::from_hms_nano_opt(h, m, s, nanos).ok_or(ValueError::OutOfRange)
+    CivilTime::new(h as i8, m as i8, s as i8, nanos as i32)
+      .map_err(|_| ValueError::OutOfRange)
   }
 
-  impl FromFix<UtcTimestamp> for DateTime<Utc> {
+  impl FromFix<UtcTimestamp> for jiff::Timestamp {
     fn from_fix(v: Timestamp<'_>) -> Result<Self, ValueError> {
       let raw = v.as_bytes();
       if raw.len() < 17 || raw[8] != b'-' {
         return Err(ValueError::Malformed);
       }
-      Ok(date(&raw[..8])?.and_time(time(&raw[9..])?).and_utc())
+      Offset::UTC
+        .to_timestamp(date(&raw[..8])?.to_datetime(time(&raw[9..])?))
+        .map_err(|_| ValueError::OutOfRange)
     }
   }
 
   /// A UTC timestamp at a chosen precision: `set(TransactTime, (now,
   /// TimePrecision::Micros))`.
-  impl ToFix<UtcTimestamp> for (DateTime<Utc>, TimePrecision) {
+  impl ToFix<UtcTimestamp> for (jiff::Timestamp, TimePrecision) {
     fn to_fix(&self, w: &mut ValueWriter<'_>) -> Result<(), ValueError> {
       let (when, precision) = *self;
       w.put_with(precision.width(), |out| {
@@ -957,14 +966,41 @@ mod chrono_impls {
     }
   }
 
+  impl FromFix<UtcTimestamp> for SystemTime {
+    fn from_fix(v: Timestamp<'_>) -> Result<Self, ValueError> {
+      let since_epoch = jiff::Timestamp::from_fix(v)?.as_duration();
+      let magnitude = since_epoch.unsigned_abs();
+      Ok(if since_epoch.is_negative() {
+        UNIX_EPOCH - magnitude
+      } else {
+        UNIX_EPOCH + magnitude
+      })
+    }
+  }
+
+  /// As for [`jiff::Timestamp`]; a `SystemTime` outside jiff's range
+  /// (years -9999 to 9999) is [`ValueError::OutOfRange`].
+  impl ToFix<UtcTimestamp> for (SystemTime, TimePrecision) {
+    fn to_fix(&self, w: &mut ValueWriter<'_>) -> Result<(), ValueError> {
+      let since_epoch = match self.0.duration_since(UNIX_EPOCH) {
+        Ok(d) => SignedDuration::try_from(d),
+        Err(e) => SignedDuration::try_from(e.duration()).map(|d| -d),
+      }
+      .map_err(|_| ValueError::OutOfRange)?;
+      let when = jiff::Timestamp::from_duration(since_epoch)
+        .map_err(|_| ValueError::OutOfRange)?;
+      (when, self.1).to_fix(w)
+    }
+  }
+
   macro_rules! date_impls {
     ($($m:ty),*) => {$(
-      impl FromFix<$m> for NaiveDate {
+      impl FromFix<$m> for CivilDate {
         fn from_fix(v: Date<'_>) -> Result<Self, ValueError> {
           date(v.as_bytes())
         }
       }
-      impl ToFix<$m> for NaiveDate {
+      impl ToFix<$m> for CivilDate {
         fn to_fix(&self, w: &mut ValueWriter<'_>) -> Result<(), ValueError> {
           let y = self.year();
           if !(0..=9999).contains(&y) {
@@ -972,8 +1008,8 @@ mod chrono_impls {
           }
           w.put_with(8, |out| {
             write_padded(&mut out[0..4], y as u32);
-            write_padded(&mut out[4..6], self.month());
-            write_padded(&mut out[6..8], self.day());
+            write_padded(&mut out[4..6], self.month() as u32);
+            write_padded(&mut out[6..8], self.day() as u32);
             8
           });
           Ok(())
@@ -985,18 +1021,18 @@ mod chrono_impls {
 
   macro_rules! time_impls {
     ($($m:ty),*) => {$(
-      impl FromFix<$m> for NaiveTime {
+      impl FromFix<$m> for CivilTime {
         fn from_fix(v: Time<'_>) -> Result<Self, ValueError> {
           time(v.as_bytes())
         }
       }
       /// Whole seconds: `HH:MM:SS`.
-      impl ToFix<$m> for NaiveTime {
+      impl ToFix<$m> for CivilTime {
         fn to_fix(&self, w: &mut ValueWriter<'_>) -> Result<(), ValueError> {
           write_time(w, self, None)
         }
       }
-      impl ToFix<$m> for (NaiveTime, TimePrecision) {
+      impl ToFix<$m> for (CivilTime, TimePrecision) {
         fn to_fix(&self, w: &mut ValueWriter<'_>) -> Result<(), ValueError> {
           write_time(w, &self.0, Some(self.1))
         }
@@ -1014,22 +1050,22 @@ mod chrono_impls {
 
   fn write_time(
     w: &mut ValueWriter<'_>,
-    t: &NaiveTime,
+    t: &CivilTime,
     precision: Option<TimePrecision>,
   ) -> Result<(), ValueError> {
     // `HH:MM:SS`, then `.` and up to 12 fractional digits.
     let digits = precision.map_or(0, TimePrecision::digits);
     let width = if digits == 0 { 8 } else { 9 + digits };
     w.put_with(width, |out| {
-      write_padded(&mut out[0..2], t.hour());
+      write_padded(&mut out[0..2], t.hour() as u32);
       out[2] = b':';
-      write_padded(&mut out[3..5], t.minute());
+      write_padded(&mut out[3..5], t.minute() as u32);
       out[5] = b':';
-      write_padded(&mut out[6..8], t.second());
+      write_padded(&mut out[6..8], t.second() as u32);
       if digits > 0 {
         out[8] = b'.';
         // Nanoseconds, then zeros for any picosecond digits.
-        let nanos = t.nanosecond().min(999_999_999);
+        let nanos = t.subsec_nanosecond() as u32;
         let frac = &mut out[9..9 + digits];
         frac.fill(b'0');
         let shown = digits.min(9);
@@ -1147,47 +1183,56 @@ mod tests {
   }
 
   #[test]
-  fn timestamps_round_trip_through_chrono() {
-    use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+  fn timestamps_round_trip_through_jiff() {
+    use jiff::{
+      Timestamp as Ts,
+      civil::{Date as CivilDate, Time as CivilTime},
+    };
 
     use crate::time::TimePrecision;
 
     let t = Timestamp(FixStr(b"20261002-13:45:01.123456"));
-    let dt = <DateTime<Utc> as FromFix<UtcTimestamp>>::from_fix(t).unwrap();
+    let dt = <Ts as FromFix<UtcTimestamp>>::from_fix(t).unwrap();
     assert_eq!(
       write::<UtcTimestamp>((dt, TimePrecision::Micros)).unwrap(),
       b"20261002-13:45:01.123456"
     );
+    let sys = <std::time::SystemTime as FromFix<UtcTimestamp>>::from_fix(
+      Timestamp(FixStr(b"20261002-13:45:01.123456")),
+    )
+    .unwrap();
+    assert_eq!(
+      write::<UtcTimestamp>((sys, TimePrecision::Micros)).unwrap(),
+      b"20261002-13:45:01.123456"
+    );
     let t = Timestamp(FixStr(b"20261002-13:45:01"));
-    assert!(<DateTime<Utc> as FromFix<UtcTimestamp>>::from_fix(t).is_ok());
+    assert!(<Ts as FromFix<UtcTimestamp>>::from_fix(t).is_ok());
     for bad in [
       &b"20261002 13:45:01"[..],
       b"2026100-13:45:01",
       b"20261302-13:45:01",
     ] {
       assert!(
-        <DateTime<Utc> as FromFix<UtcTimestamp>>::from_fix(Timestamp(FixStr(
-          bad
-        )))
-        .is_err()
+        <Ts as FromFix<UtcTimestamp>>::from_fix(Timestamp(FixStr(bad)))
+          .is_err()
       );
     }
 
-    let d = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+    let d = CivilDate::new(2026, 1, 2).unwrap();
     assert_eq!(write::<LocalMktDate>(d).unwrap(), b"20260102");
     assert_eq!(
-      <NaiveDate as FromFix<LocalMktDate>>::from_fix(Date(FixStr(b"20260102"))),
+      <CivilDate as FromFix<LocalMktDate>>::from_fix(Date(FixStr(b"20260102"))),
       Ok(d)
     );
 
-    let t = NaiveTime::from_hms_milli_opt(9, 5, 3, 7).unwrap();
+    let t = CivilTime::new(9, 5, 3, 7_000_000).unwrap();
     assert_eq!(write::<UtcTimeOnly>(t).unwrap(), b"09:05:03");
     assert_eq!(
       write::<UtcTimeOnly>((t, TimePrecision::Millis)).unwrap(),
       b"09:05:03.007"
     );
     assert_eq!(
-      <NaiveTime as FromFix<UtcTimeOnly>>::from_fix(Time(FixStr(
+      <CivilTime as FromFix<UtcTimeOnly>>::from_fix(Time(FixStr(
         b"09:05:03.007"
       ))),
       Ok(t)
@@ -1217,11 +1262,11 @@ mod tests {
 
   #[test]
   fn time_fractions_at_every_precision() {
-    use chrono::NaiveTime;
+    use jiff::civil::Time as CivilTime;
 
     use crate::time::TimePrecision;
 
-    let t = NaiveTime::from_hms_nano_opt(9, 5, 3, 7_008_009).unwrap();
+    let t = CivilTime::new(9, 5, 3, 7_008_009).unwrap();
     for (p, want) in [
       (TimePrecision::Millis, &b"09:05:03.007"[..]),
       (TimePrecision::Micros, b"09:05:03.007008"),

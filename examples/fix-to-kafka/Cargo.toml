@@ -24,7 +24,8 @@ bytes.workspace = true
 kv = { version = "0.24", features = [ "bincode-value" ] }
 # Pure Rust, without the default compression features: lz4 and zstd are C.
 rskafka = { version = "0.6", default-features = false }
-chrono.workspace = true
+# rskafka's `Record::timestamp` is a chrono type, so the example still needs it.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde = { version = "1.0", features = ["derive"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 serde_json = "1.0.151"

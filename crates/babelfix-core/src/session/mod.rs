@@ -132,10 +132,7 @@ impl<'a> Unstamped<'a> {
 
   /// Write `SendingTime` from `clock`, at the session's precision, unless the
   /// message already has one, and hand back the message to encode.
-  pub fn stamp(
-    self,
-    clock: impl FnOnce() -> chrono::DateTime<chrono::Utc>,
-  ) -> &'a Message {
+  pub fn stamp(self, clock: impl FnOnce() -> jiff::Timestamp) -> &'a Message {
     if let Some(precision) = self.precision {
       let now = clock();
       self.msg.stamp_sending_time(precision.width(), |out| {

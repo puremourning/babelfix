@@ -26,5 +26,5 @@ where
 
 /// The current UTC time, formatted for `SendingTime`/`TransactTime`.
 pub fn time_now_fix() -> String {
-  fix_time(chrono::Utc::now(), TimePrecision::Millis).into()
+  fix_time(jiff::Timestamp::now(), TimePrecision::Millis).into()
 }

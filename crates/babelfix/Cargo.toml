@@ -46,7 +46,7 @@ futures.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 bytes.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 tracing.workspace = true
 
 [[bench]]

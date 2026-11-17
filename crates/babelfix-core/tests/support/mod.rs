@@ -31,10 +31,10 @@ pub fn fix44() -> Arc<Dictionary> {
 pub const DELIM: u8 = b'|';
 pub const HEARTBEAT: Duration = Duration::from_secs(30);
 
-/// A fixed clock. Real drivers pass `Utc::now`; a test wants determinism, and
+/// A fixed clock. Real drivers pass `Timestamp::now`; a test wants determinism, and
 /// the core cannot read a clock itself in any case.
-pub fn clock() -> chrono::DateTime<chrono::Utc> {
-  chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap()
+pub fn clock() -> jiff::Timestamp {
+  jiff::Timestamp::from_second(1_700_000_000).unwrap()
 }
 
 pub fn session() -> SessionConfig {

@@ -302,8 +302,8 @@ parties.push().set(PartyID, "CLIENT-A").set(PartyRole, PartyRole::ClientID);
   numbers are integers, decimals are `Decimal` or decimix types, codesets are
   the enum. For anything the dictionary types differently from what a
   counterparty sends, use `set_raw(tag, bytes)`.
-- **Timestamps take a precision.** `set(TransactTime, (Utc::now(),
-  TimePrecision::Micros))`; a bare `DateTime<Utc>` doesn't say how many
+- **Timestamps take a precision.** `set(TransactTime, (Timestamp::now(),
+  TimePrecision::Micros))`; a bare `Timestamp` doesn't say how many
   fractional digits to write.
 - **Text outside Latin-1 is an invalid value.** Like an empty value, it fails
   a `debug_assert!` in `set` and removes the field in release builds; use
@@ -406,7 +406,7 @@ it:
 
 ```rust
 fn transmit(&mut self, msg: Unstamped<'_>, _: &Session) -> Result<()> {
-    let msg = msg.stamp(Utc::now());
+    let msg = msg.stamp(Timestamp::now());
     self.encoder.encode(msg, &mut self.out)
 }
 ```

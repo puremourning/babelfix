@@ -325,7 +325,7 @@ impl ChannelPair {
         let wire = inbound.clone();
         vec![
           SessionEvent::RawMessageSent(wire.clone()),
-          SessionEvent::RawMessageReceived(wire, chrono::Utc::now()),
+          SessionEvent::RawMessageReceived(wire, jiff::Timestamp::now()),
         ]
       }
       n => panic!("unsupported event fan-out: {n}"),
@@ -951,7 +951,7 @@ impl SansIo {
     };
     let state =
       SessionState::new(session_id, bench_config(fix), 1, Instant::now());
-    SessionDriver::new(state, load_repo(), None, chrono::Utc::now)
+    SessionDriver::new(state, load_repo(), None, jiff::Timestamp::now)
   }
 
   fn take(d: &mut SessionDriver) -> Vec<u8> {
