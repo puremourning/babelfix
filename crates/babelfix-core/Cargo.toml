@@ -27,8 +27,8 @@ babelfix-repo.workspace = true
 tracing.workspace = true
 bytes.workspace = true
 serde = { workspace = true, optional = true }
-decimix = { version = "0.1.0", optional = true }
-decimix-finance = { version = "0.1.0", optional = true }
+decimix = { version = "0.2.0", optional = true }
+decimix-finance = { version = "0.2.0", optional = true }
 
 # Deliberately NOT inherited from [workspace.dependencies], and deliberately
 # `default-features = false`: that drops jiff's `std` feature, which is what

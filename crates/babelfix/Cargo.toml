@@ -37,7 +37,7 @@ babelfix-tokio = { workspace = true, optional = true }
 [dev-dependencies]
 # For the `decimix` feature test; the feature itself pulls decimix in through
 # babelfix-core.
-decimix = "0.1.0"
+decimix = "0.2.0"
 criterion.workspace = true
 anyhow.workspace = true
 googletest.workspace = true
